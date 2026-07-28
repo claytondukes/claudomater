@@ -1,0 +1,179 @@
+{
+  "version": 1,
+  "snapshot": {
+    "relativeDir": "_bmad-output/story-automator/policy-snapshots"
+  },
+  "runtime": {
+    "parser": {
+      "provider": "claude",
+      "model": "claude-haiku-4-5-20251001",
+      "timeoutSeconds": 120
+    },
+    "merge": {
+      "maps": "deep",
+      "arrays": "replace"
+    }
+  },
+  "models": {
+    "usageCachePath": "~/.cache/claude-statusline/usage.json",
+    "defaultComplexity": "medium",
+    "reviewSteps": ["review", "retro"],
+    "tiers": {
+      "normal": {
+        "low": "claude-sonnet-5",
+        "medium": "claude-opus-4-8",
+        "high": "claude-fable-5",
+        "review": "claude-fable-5"
+      },
+      "fableExhausted": {
+        "low": "claude-sonnet-5",
+        "medium": "claude-sonnet-5",
+        "high": "claude-opus-4-8",
+        "review": "claude-opus-4-8"
+      }
+    },
+    "fableFallback": {
+      "scopedModelName": "Fable",
+      "thresholdPercent": 95
+    }
+  },
+  "bmadPaths": {
+    "config": "_bmad/bmm/config.yaml",
+    "implementationArtifacts": "_bmad-output/implementation-artifacts",
+    "sprintStatus": "_bmad-output/implementation-artifacts/sprint-status.yaml",
+    "planningArtifacts": "_bmad-output/planning-artifacts"
+  },
+  "workflow": {
+    "sequence": ["create", "dev", "auto", "review", "retro"],
+    "repeat": {
+      "review": {
+        "maxCycles": 5,
+        "successVerifier": "review_completion",
+        "onIncomplete": "retry",
+        "onExhausted": "escalate"
+      }
+    },
+    "crash": {
+      "maxRetries": 2,
+      "onExhausted": "escalate"
+    }
+  },
+  "steps": {
+    "create": {
+      "label": "create-story",
+      "assets": {
+        "skillName": "bmad-create-story",
+        "skillCandidates": ["bmad-create-story"],
+        "workflowCandidates": ["workflow.md", "workflow.yaml"],
+        "instructionsCandidates": ["discover-inputs.md"],
+        "checklistCandidates": ["checklist.md"],
+        "templateCandidates": ["template.md"],
+        "required": ["skill"]
+      },
+      "prompt": {
+        "templateFile": "data/prompts/create.md",
+        "interactionMode": "autonomous"
+      },
+      "parse": {
+        "schemaFile": "data/parse/create.json"
+      },
+      "success": {
+        "verifier": "create_story_artifact",
+        "config": {
+          "glob": "_bmad-output/implementation-artifacts/{story_prefix}-*.md",
+          "expectedMatches": 1
+        }
+      }
+    },
+    "dev": {
+      "label": "dev-story",
+      "assets": {
+        "skillName": "bmad-dev-story",
+        "skillCandidates": ["bmad-dev-story"],
+        "workflowCandidates": ["workflow.md", "workflow.yaml"],
+        "instructionsCandidates": [],
+        "checklistCandidates": ["checklist.md"],
+        "templateCandidates": [],
+        "required": ["skill"]
+      },
+      "prompt": {
+        "templateFile": "data/prompts/dev.md",
+        "interactionMode": "autonomous"
+      },
+      "parse": {
+        "schemaFile": "data/parse/dev.json"
+      },
+      "success": {
+        "verifier": "session_exit"
+      }
+    },
+    "auto": {
+      "label": "qa-generate-e2e-tests",
+      "assets": {
+        "skillName": "bmad-qa-generate-e2e-tests",
+        "skillCandidates": ["bmad-qa-generate-e2e-tests"],
+        "workflowCandidates": ["workflow.md", "workflow.yaml"],
+        "instructionsCandidates": [],
+        "checklistCandidates": ["checklist.md"],
+        "templateCandidates": [],
+        "required": []
+      },
+      "prompt": {
+        "templateFile": "data/prompts/auto.md",
+        "interactionMode": "autonomous"
+      },
+      "parse": {
+        "schemaFile": "data/parse/auto.json"
+      },
+      "success": {
+        "verifier": "session_exit"
+      }
+    },
+    "review": {
+      "label": "bmad-story-automator-review",
+      "assets": {
+        "skillName": "bmad-story-automator-review",
+        "workflowCandidates": ["workflow.md", "workflow.yaml"],
+        "instructionsCandidates": ["instructions.xml", "instructions.md"],
+        "checklistCandidates": ["checklist.md"],
+        "templateCandidates": [],
+        "required": ["skill", "workflow"]
+      },
+      "prompt": {
+        "templateFile": "data/prompts/review.md",
+        "interactionMode": "autonomous",
+        "acceptExtraInstruction": true,
+        "defaultExtraInstruction": "AUTONOMOUS AUTOMATION CONTEXT — apply ALL findings (CRITICAL, MUST-FIX, SHOULD-FIX, NOTE). Bar is perfection."
+      },
+      "parse": {
+        "schemaFile": "data/parse/review.json"
+      },
+      "success": {
+        "verifier": "review_completion",
+        "contractFile": ".claude/skills/bmad-story-automator-review/contract.json"
+      }
+    },
+    "retro": {
+      "label": "retrospective",
+      "assets": {
+        "skillName": "bmad-retrospective",
+        "skillCandidates": ["bmad-retrospective"],
+        "workflowCandidates": ["workflow.md", "workflow.yaml"],
+        "instructionsCandidates": [],
+        "checklistCandidates": [],
+        "templateCandidates": [],
+        "required": ["skill"]
+      },
+      "prompt": {
+        "templateFile": "data/prompts/retro.md",
+        "interactionMode": "autonomous"
+      },
+      "parse": {
+        "schemaFile": "data/parse/retro.json"
+      },
+      "success": {
+        "verifier": "epic_complete"
+      }
+    }
+  }
+}
