@@ -69,8 +69,13 @@ def write_atomic(path: str | Path, data: str | bytes) -> None:
     ensure_dir(path.parent)
     fd, tmp = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
     try:
-        mode = "wb" if isinstance(data, bytes) else "w"
-        with os.fdopen(fd, mode) as handle:
+        # Pin UTF-8 for text writes so behavior is locale-independent and
+        # consistent with read_text()'s explicit encoding.
+        if isinstance(data, bytes):
+            handle = os.fdopen(fd, "wb")
+        else:
+            handle = os.fdopen(fd, "w", encoding="utf-8")
+        with handle:
             handle.write(data)
             handle.flush()
             os.fsync(handle.fileno())

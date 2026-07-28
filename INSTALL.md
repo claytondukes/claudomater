@@ -9,9 +9,11 @@ orchestration and an optional GitHub Copilot PR-review convergence loop.
 - **Claude Code** (CLI)
 - **Python ≥ 3.11** (`python3 --version`)
 - **tmux** (`brew install tmux` / `apt install tmux`) — the orchestrator runs each step in a tmux session
+- **ripgrep (`rg`)** (`brew install ripgrep` / `apt install ripgrep`) — the runtime step docs use `rg` to scan the state document
 - **git**
 - A **BMAD** project (the target repo has a `_bmad/` directory)
 - **GitHub CLI (`gh`)** — only if you want the PR + Copilot review loop. Skip it and set `open_pr: false` / `copilot_loop: false` (see config below).
+- **`jq`** (`brew install jq` / `apt install jq`) — only needed to run the bundled shell test scripts (`tests/*.sh`); not required for normal operation.
 
 ## 1. Install the skill into your Claude config
 
