@@ -96,7 +96,13 @@ def scratch_dirs_for(root: Path, env: dict[str, str] | None = None) -> list[Path
     dirs = [root / SCRATCH_SUBDIR]
     extra = env.get(SCRATCH_ENV)
     if extra:
-        dirs.append(Path(os.path.expanduser(extra)))
+        p = Path(os.path.expanduser(extra))
+        if not p.is_absolute():
+            # Anchor to the project root, not the hook process CWD — a
+            # relative value resolved against CWD would deny legitimate
+            # scratch writes and point the deny hint at the wrong place.
+            p = root / p
+        dirs.append(p)
     return dirs
 
 

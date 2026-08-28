@@ -227,6 +227,15 @@ class TestRunPhase:
         verified = [e for e in log.events() if e["event"] == "phase-verified"]
         assert verified[0]["detail"]["token_usage"] == {"output_tokens": 10}
 
+    def test_empty_output_still_leaves_a_transcript(self, tmp_path):
+        """'The agent produced nothing' is post-mortem information — an
+        empty-output attempt must still leave its transcript file."""
+        runner, log, *_ = make_runner(tmp_path, ["", GOOD])
+        outcome = runner.run_phase(PhaseSpec("dev", "m", "p"))
+        assert outcome.status == "verified"
+        assert log.transcript_path("dev", 1).exists()
+        assert log.transcript_path("dev", 1).read_text() == ""
+
     def test_transcripts_written_and_scrubbed(self, tmp_path, monkeypatch):
         monkeypatch.setenv("MY_SECRET", "hunter2secret")
         leaky = 'MY_SECRET=hunter2secret\n```json\n{"status": "done"}\n```'

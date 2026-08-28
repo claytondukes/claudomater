@@ -360,7 +360,10 @@ class PhaseRunner:
                 failure = f"timeout: {exc}"
                 transcript_text = exc.partial_text
 
-            if transcript_text:
+            # Empty output is still a captured transcript ("the agent
+            # produced nothing" is post-mortem information); only a timeout
+            # that yielded no partial text leaves no file.
+            if transcript_text is not None:
                 path = self.runlog.transcript_path(spec.name, attempt)
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text(self._scrub(transcript_text), encoding="utf-8")

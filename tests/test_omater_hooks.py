@@ -57,6 +57,26 @@ class TestWriteToolFence:
         assert not allow
         assert "/var/scratch" in reason
 
+    def test_relative_env_scratch_anchors_to_project_root(self, tmp_path):
+        """A relative OMATER_SCRATCH_DIR must resolve against the project
+        root, not the hook process CWD — CWD-relative interpretation both
+        denies legitimate scratch writes AND quietly allows writes into an
+        arbitrary CWD-adjacent directory (a fence hole)."""
+        import pathlib
+
+        env = {hooks.SCRATCH_ENV: "myscratch"}
+        allow, reason = hooks.evaluate_pre_tool_use(
+            payload("Write", file_path=str(tmp_path / "myscratch" / "x.txt")),
+            tmp_path,
+            env=env,
+        )
+        assert allow, reason
+        cwd_scratch = pathlib.Path.cwd() / "myscratch" / "x.txt"
+        allow, _ = hooks.evaluate_pre_tool_use(
+            payload("Write", file_path=str(cwd_scratch)), tmp_path, env=env
+        )
+        assert not allow  # the CWD interpretation must NOT be in the allowed set
+
     def test_declared_env_scratch_allowed(self, tmp_path):
         allow, _ = hooks.evaluate_pre_tool_use(
             payload("Write", file_path="/var/scratch/x.txt"),
