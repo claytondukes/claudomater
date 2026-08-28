@@ -21,7 +21,7 @@ Clone straight into your Claude skills dir (default `~/.claude/skills`; if you
 set `CLAUDE_CONFIG_DIR`, use that instead):
 
 ```bash
-git clone git@github.com:claytondukes/claude-o-mator.git ~/.claude/skills/story-automator
+git clone git@github.com:claytondukes/claudomater.git ~/.claude/skills/story-automator
 ```
 
 Update later with `git -C ~/.claude/skills/story-automator pull`. The skill is

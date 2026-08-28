@@ -1,7 +1,9 @@
 __pycache__/
+.omater/
 *.py[cod]
 *.egg-info/
 .pytest_cache/
 build/
 dist/
 .DS_Store
+uv.lock

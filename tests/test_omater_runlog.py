@@ -1,0 +1,140 @@
+"""Run log: write-ahead events, one live run per project, adoption, control."""
+
+from __future__ import annotations
+
+import json
+
+import pytest
+
+from claudomater.runlog import RunError, RunLog, runs_root
+
+
+class TestRunLifecycle:
+    def test_create_writes_both_files_and_current_symlink(self, tmp_path):
+        log = RunLog.create(tmp_path)
+        assert (log.run_dir / "events.jsonl").exists()
+        assert (log.run_dir / "progress.log").exists()
+        current = runs_root(tmp_path) / "current"
+        assert current.resolve() == log.run_dir.resolve()
+
+    def test_one_live_run_per_project(self, tmp_path):
+        RunLog.create(tmp_path, run_id="run-a")
+        with pytest.raises(RunError, match="live run already exists"):
+            RunLog.create(tmp_path, run_id="run-b")
+
+    def test_finished_run_allows_a_new_one(self, tmp_path):
+        log = RunLog.create(tmp_path, run_id="run-a")
+        log.finish("run-complete")
+        log2 = RunLog.create(tmp_path, run_id="run-b")
+        assert log2.run_id == "run-b"
+        current = runs_root(tmp_path) / "current"
+        assert current.resolve().name == "run-b"
+
+    def test_finish_rejects_non_terminal_event(self, tmp_path):
+        log = RunLog.create(tmp_path)
+        with pytest.raises(RunError, match="not a terminal"):
+            log.finish("phase-verified")
+
+
+class TestEvents:
+    def test_events_are_structured_and_ordered(self, tmp_path):
+        log = RunLog.create(tmp_path, run_id="r1")
+        log.event("create", "phase-spawn", {"model": "m", "attempt": 1}, story_key="s-1")
+        log.event("create", "phase-verified", {"attempt": 1})
+        events = log.events()
+        assert [e["event"] for e in events] == [
+            "run-created",
+            "phase-spawn",
+            "phase-verified",
+        ]
+        spawn = events[1]
+        assert spawn["run_id"] == "r1"
+        assert spawn["phase"] == "create"
+        assert spawn["story_key"] == "s-1"
+        assert spawn["detail"]["model"] == "m"
+        assert spawn["ts"].endswith("Z")
+
+    def test_progress_log_is_human_readable(self, tmp_path):
+        log = RunLog.create(tmp_path)
+        log.event("dev", "phase-spawn", {"model": "claude-opus-5"})
+        lines = (log.run_dir / "progress.log").read_text().splitlines()
+        assert any("[dev] phase-spawn" in line and "claude-opus-5" in line for line in lines)
+
+    def test_events_jsonl_is_one_json_object_per_line(self, tmp_path):
+        log = RunLog.create(tmp_path)
+        log.event("dev", "phase-spawn")
+        for line in (log.run_dir / "events.jsonl").read_text().splitlines():
+            json.loads(line)
+
+    def test_torn_final_line_is_dropped_not_fatal(self, tmp_path):
+        """A crash mid-append leaves a torn tail — exactly when adoption
+        runs. Write-ahead means the torn event's action never committed, so
+        the tail is dropped and the run stays adoptable."""
+        log = RunLog.create(tmp_path)
+        log.event("dev", "phase-spawn", {"model": "m"})
+        with open(log.run_dir / "events.jsonl", "a", encoding="utf-8") as fh:
+            fh.write('{"ts": "2026-08-28T21:00:00Z", "event": "phase-ver')
+        events = log.events()
+        assert [e["event"] for e in events] == ["run-created", "phase-spawn"]
+        assert log.is_live()
+        adopted = RunLog.adopt(tmp_path)
+        assert adopted.run_id == log.run_id
+
+    def test_corrupt_middle_line_is_a_run_error(self, tmp_path):
+        log = RunLog.create(tmp_path)
+        with open(log.run_dir / "events.jsonl", "a", encoding="utf-8") as fh:
+            fh.write("garbage not json\n")
+        log_path_ok = log.event  # appending a valid event after the garbage
+        log_path_ok("dev", "phase-spawn")
+        with pytest.raises(RunError, match="corrupt"):
+            log.events()
+
+
+class TestAdoption:
+    def test_adopt_attaches_to_current_and_replays_events(self, tmp_path):
+        log = RunLog.create(tmp_path, run_id="orphan")
+        log.event("dev", "phase-spawn", {"model": "m", "attempt": 1})
+        # Orchestrator dies here. A fresh session adopts:
+        adopted = RunLog.adopt(tmp_path)
+        assert adopted.run_id == "orphan"
+        events = [e["event"] for e in adopted.events()]
+        # write-ahead means the spawn intent is present even though no
+        # phase-verified/failed followed — the adopter replays against reality
+        assert "phase-spawn" in events
+        assert events[-1] == "run-adopted"
+
+    def test_adopt_without_current_raises(self, tmp_path):
+        with pytest.raises(RunError, match="no current run"):
+            RunLog.adopt(tmp_path)
+
+    def test_adopt_refuses_a_finished_run(self, tmp_path):
+        """Adopting a completed run would flip it live again and wedge
+        one-live-run enforcement forever."""
+        log = RunLog.create(tmp_path)
+        log.finish("run-complete")
+        with pytest.raises(RunError, match="already ended"):
+            RunLog.adopt(tmp_path)
+        # and a new run can still start afterwards
+        RunLog.create(tmp_path, run_id="fresh")
+
+    def test_duplicate_run_id_is_a_run_error(self, tmp_path):
+        log = RunLog.create(tmp_path, run_id="dup")
+        log.finish("run-complete")
+        with pytest.raises(RunError, match="already exists"):
+            RunLog.create(tmp_path, run_id="dup")
+
+
+class TestControl:
+    def test_control_events_round_trip(self, tmp_path):
+        log = RunLog.create(tmp_path)
+        log.write_control("resume")
+        log.write_control("approve", {"gate": "promotion"})
+        controls = log.read_controls()
+        assert [c["action"] for c in controls] == ["resume", "approve"]
+        # control writes also land in the run's event stream
+        assert "control-resume" in [e["event"] for e in log.events()]
+
+    def test_unknown_control_action_raises(self, tmp_path):
+        log = RunLog.create(tmp_path)
+        with pytest.raises(RunError, match="unknown control action"):
+            log.write_control("skip")
