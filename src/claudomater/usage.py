@@ -157,8 +157,10 @@ def refresh_cache(
         payload = json.loads(body)
     except (urllib.error.URLError, OSError, json.JSONDecodeError, ValueError) as exc:
         return False, f"fetch-failed: {exc}", account
-    if "limits" not in payload:
-        return False, "fetch-failed: response has no 'limits'", account
+    if not isinstance(payload, dict) or "limits" not in payload:
+        # isinstance first: "limits" in None/42 raises TypeError, and this
+        # function's contract is (False, reason, account), never an exception
+        return False, "fetch-failed: response is not a JSON object with 'limits'", account
     try:
         cache_path.parent.mkdir(parents=True, exist_ok=True)
         tmp = cache_path.with_suffix(cache_path.suffix + ".tmp")
@@ -184,13 +186,16 @@ def _read_fake(path: Path) -> UsageSnapshot:
     if "limits" in data:
         fields = parse_limits(data)
     else:  # simplified shape: {"five_hour": 50, "seven_day": 60, "scoped": 70, ...}
+        scoped_model = data.get("scoped_model", "Fable")
         fields = {
             # non-numeric values degrade to None = unknown = fail closed,
             # never a TypeError inside evaluate()
             "five_hour": _num_or_none(data.get("five_hour")),
             "seven_day": _num_or_none(data.get("seven_day")),
             "scoped": _num_or_none(data.get("scoped")),
-            "scoped_model": data.get("scoped_model", "Fable"),
+            # string-or-unknown, same rule as parse_limits: a non-string
+            # would crash scope_applies (.lower())
+            "scoped_model": scoped_model if isinstance(scoped_model, str) else None,
             "five_hour_resets_at": data.get("five_hour_resets_at"),
             "seven_day_resets_at": data.get("seven_day_resets_at"),
             "scoped_resets_at": data.get("scoped_resets_at"),

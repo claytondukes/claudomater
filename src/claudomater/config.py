@@ -314,6 +314,14 @@ def _validate_degrade_path(path: list[str]) -> None:
                 "(recognizable families: fable, opus, sonnet, haiku)"
             )
     ranks = [family_rank(e) for e in path if e != "pause"]
+    if not ranks:
+        # [pause] alone can never degrade anything: next_model() finds no
+        # lower tier and keeps every model unchanged, silently disabling
+        # scoped-quota degrades. If "trip = pause" is the intent, that's
+        # what on_threshold: pause expresses.
+        raise ConfigError(
+            "usage.degrade_path must contain at least one model, not just 'pause'"
+        )
     if ranks != sorted(ranks, reverse=True) or len(set(ranks)) != len(ranks):
         raise ConfigError(
             "usage.degrade_path must step strictly DOWN the tiers "

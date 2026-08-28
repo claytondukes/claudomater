@@ -240,6 +240,15 @@ class TestUserConfig:
         with pytest.raises(ConfigError, match="last entry"):
             load_user_config(path)
 
+    def test_pause_only_degrade_path_rejected(self, tmp_path):
+        """[pause] can never degrade anything — next_model finds no lower
+        tier and keeps every model unchanged, silently disabling scoped
+        degrades. Must fail at load."""
+        path = tmp_path / "config.yaml"
+        path.write_text("usage:\n  degrade_path: [pause]\n", encoding="utf-8")
+        with pytest.raises(ConfigError, match="at least one model"):
+            load_user_config(path)
+
     def test_degrade_path_must_step_down(self, tmp_path):
         path = tmp_path / "config.yaml"
         path.write_text(

@@ -374,6 +374,32 @@ class TestRealPathFailClosed:
         assert snap.five_hour == 5
         assert snap.source == "cache"
 
+    def test_non_object_api_response_never_raises(self, tmp_path):
+        """refresh_cache's contract is (False, reason, account), never an
+        exception — json.loads('null') must not TypeError on the 'limits'
+        membership test."""
+        from claudomater.usage import refresh_cache
+
+        for body in (b"null", b"42", b'"oops"', b"[]"):
+            ok, reason, _ = refresh_cache(
+                tmp_path / "cache.json",
+                providers=[EnvTokenProvider(env={"OMATER_OAUTH_TOKEN": "tok"})],
+                http=lambda url, headers, timeout, b=body: b,
+            )
+            assert ok is False
+            assert "fetch-failed" in reason
+
+    def test_non_string_scoped_model_in_fake_degrades_to_none(self, tmp_path, monkeypatch):
+        write_fake(
+            tmp_path,
+            monkeypatch,
+            {"five_hour": 1, "seven_day": 1, "scoped": 85, "scoped_model": 42},
+        )
+        snap = read_usage()
+        assert snap.scoped_model is None
+        # and the degrade decision that follows must not crash
+        assert evaluate(snap, UserConfig()).action == "degrade"
+
     def test_refresh_writes_cache_via_injected_http(self, tmp_path):
         payload = {
             "limits": [
