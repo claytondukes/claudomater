@@ -202,9 +202,13 @@ class RunLog:
         path = self.run_dir / filename
         if not path.exists():
             return []
-        lines = [
-            line for line in path.read_text(encoding="utf-8").splitlines() if line.strip()
-        ]
+        # errors="replace", not strict: events carry ensure_ascii=False text,
+        # so a torn append can cut a multi-byte UTF-8 sequence — a strict
+        # decode would raise before line splitting and defeat the torn-tail
+        # tolerance. The replacement char only mangles the torn line, which
+        # the JSON parse below then rejects as usual.
+        text = path.read_text(encoding="utf-8", errors="replace")
+        lines = [line for line in text.splitlines() if line.strip()]
         out = []
         for i, line in enumerate(lines):
             try:

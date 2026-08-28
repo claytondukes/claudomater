@@ -155,6 +155,12 @@ def _read_fake(path: Path) -> UsageSnapshot:
         mtime = path.stat().st_mtime
     except (OSError, json.JSONDecodeError, ValueError) as exc:
         raise UsageUnavailable(f"fake-usage unreadable: {exc}") from exc
+    if not isinstance(data, dict):
+        # fail closed, not TypeError: valid-but-wrong-shaped JSON is still
+        # unknown usage
+        raise UsageUnavailable(
+            f"fake-usage unreadable: expected a JSON object, got {type(data).__name__}"
+        )
     if "limits" in data:
         fields = parse_limits(data)
     else:  # simplified shape: {"five_hour": 50, "seven_day": 60, "scoped": 70, ...}
@@ -222,6 +228,11 @@ def read_usage(
             f"no-usage-data: cache unreadable at {cache}"
             + (f" ({failure})" if failure else "")
         ) from None
+    if not isinstance(payload, dict):
+        raise UsageUnavailable(
+            f"no-usage-data: cache at {cache} is not a JSON object "
+            f"(got {type(payload).__name__})"
+        )
 
     age = now - mtime
     if age > max_stale:

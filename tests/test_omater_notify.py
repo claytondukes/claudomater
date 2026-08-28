@@ -39,6 +39,9 @@ def test_detail_is_rendered_as_code_block():
     notifier.notify(RUN_COMPLETE, "run done", detail={"stories": 3})
     _, payload = transport.sent[0]
     assert '"stories": 3' in payload["text"]
+    # newline-wrapped fences: Slack renders ```{...}``` inconsistently
+    assert "\n```\n{" in payload["text"]
+    assert payload["text"].endswith("\n```")
 
 
 def test_unknown_kind_raises():

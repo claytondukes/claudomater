@@ -77,7 +77,9 @@ class Notifier:
             prefix += f" {project}:"
         text = f"{prefix} {message}"
         if detail:
-            text += "\n```" + json.dumps(detail, indent=2, sort_keys=True) + "```"
+            # newline-wrapped fences: Slack mrkdwn renders ```{...}``` (no
+            # newlines) inconsistently across clients
+            text += "\n```\n" + json.dumps(detail, indent=2, sort_keys=True) + "\n```"
 
         body = json.dumps({"text": text}).encode("utf-8")
         try:

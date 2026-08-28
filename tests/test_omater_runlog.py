@@ -80,6 +80,16 @@ class TestEvents:
         adopted = RunLog.adopt(tmp_path)
         assert adopted.run_id == log.run_id
 
+    def test_torn_multibyte_tail_is_recoverable(self, tmp_path):
+        """A torn append can cut a multi-byte UTF-8 char (events are written
+        ensure_ascii=False); the decode must not defeat torn-tail tolerance."""
+        log = RunLog.create(tmp_path)
+        log.event("dev", "phase-spawn")
+        with open(log.run_dir / "events.jsonl", "ab") as fh:
+            fh.write('{"note": "caf'.encode() + b"\xc3")  # é cut in half
+        assert [e["event"] for e in log.events()] == ["run-created", "phase-spawn"]
+        assert log.is_live()
+
     def test_corrupt_middle_line_is_a_run_error(self, tmp_path):
         log = RunLog.create(tmp_path)
         with open(log.run_dir / "events.jsonl", "a", encoding="utf-8") as fh:

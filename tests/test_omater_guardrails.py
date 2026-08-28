@@ -307,6 +307,20 @@ class TestFakeUsageInjection:
         with pytest.raises(UsageUnavailable):
             read_usage()
 
+    def test_non_object_fake_json_fails_closed(self, tmp_path, monkeypatch):
+        path = tmp_path / "fake-usage.json"
+        path.write_text("[]", encoding="utf-8")
+        monkeypatch.setenv(FAKE_USAGE_ENV, str(path))
+        with pytest.raises(UsageUnavailable, match="JSON object"):
+            read_usage()
+
+    def test_non_object_cache_json_fails_closed(self, tmp_path, monkeypatch):
+        monkeypatch.delenv(FAKE_USAGE_ENV, raising=False)
+        cache = tmp_path / "cache.json"
+        cache.write_text("[]", encoding="utf-8")
+        with pytest.raises(UsageUnavailable, match="JSON object"):
+            read_usage(cache_path=cache, providers=[])
+
 
 class TestRealPathFailClosed:
     def test_no_credentials_and_no_cache_fails_closed(self, tmp_path, monkeypatch):
