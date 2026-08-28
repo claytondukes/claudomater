@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import os
 import secrets
+import shutil
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -104,10 +105,22 @@ class RunLog:
             run_dir.mkdir(parents=True, exist_ok=False)
         except FileExistsError:
             raise RunError(f"run id {run_id!r} already exists") from None
-        (run_dir / TRANSCRIPTS_DIR).mkdir()
         log = cls(run_dir, run_id)
-        log._point_current()
-        log.event("run", "run-created", {"run_id": run_id})
+        try:
+            (run_dir / TRANSCRIPTS_DIR).mkdir()
+            log._point_current()
+            log.event("run", "run-created", {"run_id": run_id})
+        except BaseException:
+            # Failing halfway must not strand an orphan run dir or leave
+            # `current` dangling at a dir we are about to remove.
+            shutil.rmtree(run_dir, ignore_errors=True)
+            try:
+                if current.is_symlink() and os.readlink(current) == run_id:
+                    current.unlink()
+            except OSError:
+                pass
+            (root / f".{CURRENT_LINK}.tmp").unlink(missing_ok=True)
+            raise
         return log
 
     @classmethod

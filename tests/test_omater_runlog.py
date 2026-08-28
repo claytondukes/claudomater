@@ -30,6 +30,21 @@ class TestRunLifecycle:
         current = runs_root(tmp_path) / "current"
         assert current.resolve().name == "run-b"
 
+    def test_failed_create_leaves_no_orphans(self, tmp_path, monkeypatch):
+        """An IO failure after mkdir must not strand an orphan run dir or a
+        dangling current link — repeated attempts would accumulate them."""
+        from claudomater.runlog import runs_root as rr
+
+        monkeypatch.setattr(
+            RunLog,
+            "_point_current",
+            lambda self: (_ for _ in ()).throw(OSError("disk full")),
+        )
+        with pytest.raises(OSError, match="disk full"):
+            RunLog.create(tmp_path, run_id="doomed")
+        assert not (rr(tmp_path) / "doomed").exists()
+        assert not (rr(tmp_path) / "current").is_symlink()
+
     def test_finish_rejects_non_terminal_event(self, tmp_path):
         log = RunLog.create(tmp_path)
         with pytest.raises(RunError, match="not a terminal"):
