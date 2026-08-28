@@ -48,6 +48,20 @@ def runs_root(project_root: Path | str) -> Path:
     return Path(project_root) / OMATER_DIR / RUNS_DIR
 
 
+def validate_run_id(run_id: str) -> str:
+    """A run id is a simple directory name. Anything with path separators
+    (or dot-names) could escape `.omater/runs/` — a path-traversal hole and
+    a breach of one-live-run bookkeeping."""
+    if (
+        not run_id
+        or run_id in (".", "..", CURRENT_LINK)
+        or "/" in run_id
+        or "\\" in run_id
+    ):
+        raise RunError(f"invalid run id {run_id!r}: must be a simple name")
+    return run_id
+
+
 def _detail_summary(detail: Any) -> str:
     if detail is None:
         return ""
@@ -81,8 +95,9 @@ class RunLog:
                     f"a live run already exists ({live.run_id}); "
                     "adopt it or abort it before starting a new one"
                 )
-        run_id = run_id or (
-            time.strftime("%Y%m%d-%H%M%S") + "-" + secrets.token_hex(2)
+        run_id = validate_run_id(
+            run_id
+            or (time.strftime("%Y%m%d-%H%M%S") + "-" + secrets.token_hex(2))
         )
         run_dir = root / run_id
         try:

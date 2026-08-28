@@ -151,6 +151,13 @@ class TestControlCommand:
         )
         assert [c["action"] for c in log.read_controls()] == ["abort"]
 
+    def test_run_path_traversal_is_rejected(self, tmp_path, capsys):
+        RunLog.create(tmp_path)
+        rc = main(["control", "resume", "--root", str(tmp_path), "--run", "../../evil"])
+        assert rc == EXIT_ERROR
+        assert "simple name" in capsys.readouterr().err
+        assert not (tmp_path / "evil").exists()
+
     def test_top_level_shorthands(self, tmp_path):
         """`omater resume | abort | approve` — the shapes the notifications name."""
         log = RunLog.create(tmp_path)

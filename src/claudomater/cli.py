@@ -14,7 +14,13 @@ from pathlib import Path
 from claudomater import __version__, guardrails, hooks, initcmd
 from claudomater import notify as notify_mod
 from claudomater.config import ConfigError, load_project_config, load_user_config
-from claudomater.runlog import CONTROL_ACTIONS, RunError, RunLog, runs_root
+from claudomater.runlog import (
+    CONTROL_ACTIONS,
+    RunError,
+    RunLog,
+    runs_root,
+    validate_run_id,
+)
 from claudomater.usage import UsageUnavailable, read_usage
 
 EXIT_OK = 0
@@ -146,7 +152,7 @@ def _cmd_control(args: argparse.Namespace) -> int:
     root = Path(args.root).resolve()
     try:
         if args.run and args.run != "current":
-            run_dir = runs_root(root) / args.run
+            run_dir = runs_root(root) / validate_run_id(args.run)
             if not run_dir.is_dir():
                 raise RunError(f"no run {args.run!r} under {runs_root(root)}")
             log = RunLog(run_dir, args.run)

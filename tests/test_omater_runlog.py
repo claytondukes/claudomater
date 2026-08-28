@@ -127,6 +127,17 @@ class TestAdoption:
         # fail-fast: no orphan run dir may be left behind by the attempt
         assert sorted(p.name for p in rr(tmp_path).iterdir()) == ["current"]
 
+    def test_run_id_path_traversal_is_rejected(self, tmp_path):
+        # ("" is absent: falsy run_id means auto-generate, which is valid)
+        for bad in ("../evil", "a/b", "..", ".", "current", "back\\slash"):
+            with pytest.raises(RunError, match="simple name|invalid run id"):
+                RunLog.create(tmp_path, run_id=bad)
+        # nothing escaped .omater/runs or got created by the attempts
+        from claudomater.runlog import runs_root as rr
+
+        assert not (tmp_path / "evil").exists()
+        assert not rr(tmp_path).exists() or list(rr(tmp_path).iterdir()) == []
+
     def test_duplicate_run_id_is_a_run_error(self, tmp_path):
         log = RunLog.create(tmp_path, run_id="dup")
         log.finish("run-complete")

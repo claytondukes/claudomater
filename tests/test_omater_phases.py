@@ -437,6 +437,20 @@ class TestSalvageUncommitted:
     def test_non_git_dir_is_a_noop(self, tmp_path):
         assert salvage_uncommitted(tmp_path) is False
 
+    def test_failed_add_leaves_no_staged_state(self, git_repo):
+        """A partially-failed `git add -A` must not leave earlier entries
+        staged — salvage is side-effect-free unless it succeeds."""
+        (git_repo / "stageable.txt").write_text("ok", encoding="utf-8")
+        unreadable = git_repo / "unreadable.txt"
+        unreadable.write_text("secret", encoding="utf-8")
+        unreadable.chmod(0o000)
+        try:
+            assert salvage_uncommitted(git_repo) is False
+            staged = git(git_repo, "diff", "--cached", "--name-only").stdout.strip()
+            assert staged == ""
+        finally:
+            unreadable.chmod(0o644)
+
     def test_failed_commit_leaves_no_staged_state(self, git_repo):
         """Salvage must be side-effect-free unless it succeeds: a failing
         commit (e.g. a hook) must not leave `add -A`'s staging behind."""

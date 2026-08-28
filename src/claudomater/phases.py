@@ -187,12 +187,22 @@ def salvage_uncommitted(project_root: Path, message: str = "wip(phase-crash)") -
         return False
     if proc.returncode != 0 or not proc.stdout.strip():
         return False
+    def _unstage() -> None:
+        # Side-effect-free unless salvage succeeds: mixed reset unstages
+        # whatever `add -A` managed before failing, never touching files.
+        subprocess.run(
+            ["git", "-C", str(project_root), "reset", "-q"],
+            capture_output=True,
+            timeout=60,
+        )
+
     add = subprocess.run(
         ["git", "-C", str(project_root), "add", "-A"],
         capture_output=True,
         timeout=60,
     )
     if add.returncode != 0:
+        _unstage()
         return False
     subprocess.run(
         ["git", "-C", str(project_root), "reset", "-q", "--", ".omater"],
@@ -213,14 +223,7 @@ def salvage_uncommitted(project_root: Path, message: str = "wip(phase-crash)") -
         timeout=60,
     )
     if commit.returncode != 0:
-        # Side-effect-free on failure: unstage what `add -A` staged (mixed
-        # reset never touches the working tree) so retries and verifiers
-        # don't operate on a half-staged index.
-        subprocess.run(
-            ["git", "-C", str(project_root), "reset", "-q"],
-            capture_output=True,
-            timeout=60,
-        )
+        _unstage()
         return False
     return True
 
