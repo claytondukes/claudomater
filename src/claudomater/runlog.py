@@ -117,10 +117,21 @@ class RunLog:
 
     def _point_current(self) -> None:
         current = self.run_dir.parent / CURRENT_LINK
+        if current.exists() and not current.is_symlink():
+            # A stray real file/dir here would make replace() raise a bare
+            # OSError (dir case) or be clobbered silently (file case) —
+            # fail loudly instead of guessing what left it behind.
+            raise RunError(
+                f"{current} exists but is not a symlink; remove it manually "
+                "before starting a run"
+            )
         tmp = self.run_dir.parent / f".{CURRENT_LINK}.tmp"
-        tmp.unlink(missing_ok=True)
-        tmp.symlink_to(self.run_dir.name)
-        tmp.replace(current)
+        try:
+            tmp.unlink(missing_ok=True)
+            tmp.symlink_to(self.run_dir.name)
+            tmp.replace(current)
+        except OSError as exc:
+            raise RunError(f"cannot point {current} at {self.run_id}: {exc}") from exc
 
     # ---- events ----------------------------------------------------------
 

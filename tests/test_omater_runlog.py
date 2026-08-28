@@ -117,6 +117,14 @@ class TestAdoption:
         # and a new run can still start afterwards
         RunLog.create(tmp_path, run_id="fresh")
 
+    def test_stray_non_symlink_current_is_a_run_error(self, tmp_path):
+        from claudomater.runlog import runs_root as rr
+
+        stray = rr(tmp_path) / "current"
+        stray.mkdir(parents=True)
+        with pytest.raises(RunError, match="not a symlink"):
+            RunLog.create(tmp_path)
+
     def test_duplicate_run_id_is_a_run_error(self, tmp_path):
         log = RunLog.create(tmp_path, run_id="dup")
         log.finish("run-complete")

@@ -238,7 +238,10 @@ def load_project_config(root: Path | str) -> ProjectConfig:
         raise ConfigError(
             f"{PROJECT_CONFIG_NAME}: merge.reviewer must be 'copilot' or 'agent'"
         )
-    if merge.reviewer == "copilot" and forge != "github":
+    # Reviewer-forge compatibility only matters when the convergence gate is
+    # actually on: with converge: off the gate is skipped and the reviewer
+    # value is inert, so a non-GitHub project may keep the template default.
+    if merge.converge == "required" and merge.reviewer == "copilot" and forge != "github":
         raise ConfigError(
             f"{PROJECT_CONFIG_NAME}: merge.reviewer 'copilot' is GitHub-only; "
             f"forge is {forge!r} — use reviewer: agent or converge: off"

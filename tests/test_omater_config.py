@@ -82,6 +82,17 @@ class TestProjectConfig:
                 )
             )
 
+    def test_copilot_reviewer_inert_when_converge_off(self, tmp_path):
+        """converge: off skips the gate entirely — the reviewer value is
+        inert, so a non-GitHub project may keep the template default."""
+        cfg = load_project_config(
+            write_project(
+                tmp_path,
+                "project: x\nforge: bitbucket\nmerge:\n  converge: off\n  reviewer: copilot\n",
+            )
+        )
+        assert cfg.merge.converge == "off"
+
     def test_bitbucket_with_agent_reviewer_ok(self, tmp_path):
         cfg = load_project_config(
             write_project(
