@@ -105,6 +105,17 @@ class TestEvents:
         assert [e["event"] for e in log.events()] == ["run-created", "phase-spawn"]
         assert log.is_live()
 
+    def test_object_missing_event_key_counts_as_corrupt(self, tmp_path):
+        """A valid JSON object without 'event' must not reach is_live() as a
+        KeyError — torn tail drops, middle line is a clear RunError."""
+        log = RunLog.create(tmp_path)
+        with open(log.run_dir / "events.jsonl", "a", encoding="utf-8") as fh:
+            fh.write('{"ts": "2026-08-28T23:00:00Z"}\n')
+        assert log.is_live()  # tail dropped, no KeyError
+        log.event("dev", "phase-spawn")  # now the damaged line is in the middle
+        with pytest.raises(RunError, match="corrupt"):
+            log.events()
+
     def test_non_object_json_lines_get_the_same_treatment(self, tmp_path):
         log = RunLog.create(tmp_path)
         log.event("dev", "phase-spawn")

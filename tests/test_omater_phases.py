@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
 
 import pytest
 
@@ -506,6 +507,20 @@ class TestVerifiers:
         verdict = git_worktree_clean()(ctx)
         assert not verdict.ok
         assert "dirty.txt" in verdict.detail
+
+    def test_command_ok_declarative_list_form(self, tmp_path):
+        """The documented {command_ok: [argv...]} form must actually run."""
+        from claudomater.verifiers import command_ok
+
+        ok, verdicts = run_verifiers(
+            [{"command_ok": [sys.executable, "-c", "pass"]}],
+            VerifierContext(project_root=tmp_path),
+        )
+        assert ok, verdicts[0].detail
+        # the single-list call style keeps working too
+        assert command_ok([sys.executable, "-c", "pass"])(
+            VerifierContext(project_root=tmp_path)
+        ).ok
 
     def test_build_from_declarative_entries(self, tmp_path):
         (tmp_path / "x.md").write_text("x", encoding="utf-8")

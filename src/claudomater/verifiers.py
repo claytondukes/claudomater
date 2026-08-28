@@ -111,8 +111,15 @@ def result_field(name: str, expected: Any = ...) -> Verifier:
     return check
 
 
-def command_ok(argv: list[str], timeout: int = 1800) -> Verifier:
-    """An arbitrary reality check (test gauntlet, linter) exits 0."""
+def command_ok(*argv: Any, timeout: int = 1800) -> Verifier:
+    """An arbitrary reality check (test gauntlet, linter) exits 0.
+
+    Accepts both `command_ok("pytest", "-q")` (what the declarative
+    `{command_ok: [...]}` form splats into) and `command_ok(["pytest", "-q"])`.
+    """
+    if len(argv) == 1 and isinstance(argv[0], (list, tuple)):
+        argv = tuple(argv[0])
+    argv = [str(a) for a in argv]
 
     def check(ctx: VerifierContext) -> Verdict:
         try:

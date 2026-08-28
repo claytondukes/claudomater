@@ -216,11 +216,16 @@ class RunLog:
             os.fsync(fh.fileno())
         return record
 
-    def _read_jsonl_tolerant(self, filename: str) -> list[dict[str, Any]]:
+    def _read_jsonl_tolerant(
+        self, filename: str, required_key: str
+    ) -> list[dict[str, Any]]:
         """Read an append-only jsonl file, tolerating a torn FINAL line (what
         a crash mid-append leaves behind; the write-ahead discipline means the
         action it described never committed). Corrupt middle lines raise
-        RunError — that is damage, not a crash artifact."""
+        RunError — that is damage, not a crash artifact. An entry missing
+        `required_key` counts as corrupt: letting it through would surface
+        later as a bare KeyError in is_live()/consumers instead of a clear
+        message naming the damaged line."""
         path = self.run_dir / filename
         if not path.exists():
             return []
@@ -241,18 +246,19 @@ class RunLog:
             # number or string) gets the same treatment as unparsable:
             # crashing later in is_live()/adoption with a KeyError would
             # hide WHERE the damage is.
-            if not isinstance(obj, dict):
+            if not isinstance(obj, dict) or required_key not in obj:
                 if i == len(lines) - 1:
                     break
                 raise RunError(
                     f"corrupt {filename} at line {i + 1} in {self.run_dir}: "
-                    "not a JSON object (only a torn FINAL line is recoverable)"
+                    f"not a JSON object with {required_key!r} "
+                    "(only a torn FINAL line is recoverable)"
                 ) from None
             out.append(obj)
         return out
 
     def events(self) -> list[dict[str, Any]]:
-        return self._read_jsonl_tolerant(EVENTS_JSONL)
+        return self._read_jsonl_tolerant(EVENTS_JSONL, "event")
 
     def is_live(self) -> bool:
         evs = self.events()
@@ -284,4 +290,4 @@ class RunLog:
         return record
 
     def read_controls(self) -> list[dict[str, Any]]:
-        return self._read_jsonl_tolerant(CONTROL_JSONL)
+        return self._read_jsonl_tolerant(CONTROL_JSONL, "action")
