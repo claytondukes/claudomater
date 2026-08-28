@@ -213,9 +213,7 @@ def load_project_config(root: Path | str) -> ProjectConfig:
             f"{PROJECT_CONFIG_NAME}: forge must be one of {FORGES}, got {forge!r}"
         )
 
-    models = data.get("models") or {}
-    if not isinstance(models, dict):
-        raise ConfigError(f"{PROJECT_CONFIG_NAME}: 'models' must be a mapping")
+    models = _require_mapping("models", data.get("models"))
     for role, value in models.items():
         if role not in MODEL_ROLES:
             raise ConfigError(
@@ -227,7 +225,7 @@ def load_project_config(root: Path | str) -> ProjectConfig:
                 f"{PROJECT_CONFIG_NAME}: models.{role} must be a model name string"
             )
 
-    merge_raw = data.get("merge") or {}
+    merge_raw = _require_mapping("merge", data.get("merge"))
     merge = MergeConfig(
         converge=merge_raw.get("converge", "required"),
         reviewer=merge_raw.get("reviewer", "copilot"),
@@ -246,9 +244,9 @@ def load_project_config(root: Path | str) -> ProjectConfig:
             f"forge is {forge!r} — use reviewer: agent or converge: off"
         )
 
-    ci_raw = data.get("ci") or {}
-    learning_raw = data.get("learning") or {}
-    adapters_raw = data.get("adapters") or {}
+    ci_raw = _require_mapping("ci", data.get("ci"))
+    learning_raw = _require_mapping("learning", data.get("learning"))
+    adapters_raw = _require_mapping("adapters", data.get("adapters"))
 
     secrets_deny = data.get("secrets_deny") or []
     if not isinstance(secrets_deny, list) or not all(
@@ -270,7 +268,7 @@ def load_project_config(root: Path | str) -> ProjectConfig:
         learning_scopes=list(learning_raw.get("scopes") or ["global"]),
         ci_tier_on_push=ci_raw.get("tier_on_push"),
         ci_tier_on_merge=ci_raw.get("tier_on_merge", "full"),
-        gates=dict(data.get("gates") or {}),
+        gates=_require_mapping("gates", data.get("gates")),
         root=root,
     )
 

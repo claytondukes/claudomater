@@ -48,6 +48,15 @@ class TestWriteToolFence:
         )
         assert allow
 
+    def test_deny_hint_names_the_declared_scratch_dir(self, tmp_path):
+        allow, reason = hooks.evaluate_pre_tool_use(
+            payload("Write", file_path="/tmp_probe/out.txt"),
+            tmp_path,
+            env={hooks.SCRATCH_ENV: "/var/scratch"},
+        )
+        assert not allow
+        assert "/var/scratch" in reason
+
     def test_declared_env_scratch_allowed(self, tmp_path):
         allow, _ = hooks.evaluate_pre_tool_use(
             payload("Write", file_path="/var/scratch/x.txt"),

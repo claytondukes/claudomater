@@ -114,9 +114,12 @@ def evaluate_pre_tool_use(
     cwd = Path(payload.get("cwd") or root)
     tool = payload.get("tool_name", "")
     tool_input = payload.get("tool_input") or {}
+    # Name every allowed scratch location, including an operator-declared
+    # OMATER_SCRATCH_DIR — a hint pointing only at the default sends the
+    # agent to the wrong place when a declared dir exists.
     redirect_hint = (
-        f"write inside the project ({root}) or the declared scratch dir "
-        f"({root / SCRATCH_SUBDIR})"
+        f"write inside the project ({root}) or a declared scratch dir "
+        f"({', '.join(str(d) for d in scratch)})"
     )
 
     if tool in WRITE_TOOLS:

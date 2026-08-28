@@ -117,6 +117,20 @@ class TestProjectConfig:
             for key in ("models", "review_floor", "red_green", "ci_on_push"):
                 assert key in policy, f"{dt} missing {key}"
 
+    def test_non_mapping_sections_are_config_errors(self, tmp_path):
+        """merge: off (a string) must be a ConfigError at load, never an
+        AttributeError traceback — fail loudly at load is the contract."""
+        for text in (
+            "project: x\nmerge: off\n",
+            "project: x\nci: [fast]\n",
+            "project: x\nadapters: none\n",
+            "project: x\nlearning: 3\n",
+            "project: x\ngates: [a]\n",
+        ):
+            (tmp_path / PROJECT_CONFIG_NAME).write_text(text, encoding="utf-8")
+            with pytest.raises(ConfigError, match="must be a mapping"):
+                load_project_config(tmp_path)
+
     def test_secrets_deny_and_scopes(self, tmp_path):
         cfg = load_project_config(
             write_project(

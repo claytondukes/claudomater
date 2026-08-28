@@ -428,6 +428,18 @@ class TestSalvageUncommitted:
     def test_non_git_dir_is_a_noop(self, tmp_path):
         assert salvage_uncommitted(tmp_path) is False
 
+    def test_failed_commit_leaves_no_staged_state(self, git_repo):
+        """Salvage must be side-effect-free unless it succeeds: a failing
+        commit (e.g. a hook) must not leave `add -A`'s staging behind."""
+        hook = git_repo / ".git" / "hooks" / "pre-commit"
+        hook.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+        hook.chmod(0o755)
+        (git_repo / "wip.txt").write_text("half", encoding="utf-8")
+        assert salvage_uncommitted(git_repo) is False
+        staged = git(git_repo, "diff", "--cached", "--name-only").stdout.strip()
+        assert staged == ""
+        assert (git_repo / "wip.txt").read_text() == "half"  # worktree untouched
+
     def test_run_logs_never_ride_along_even_without_gitignore(self, tmp_path):
         """Belt-and-braces: in a repo missing the .omater gitignore, salvage
         must still not commit run logs, and a repo dirty ONLY in .omater is

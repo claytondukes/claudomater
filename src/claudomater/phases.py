@@ -212,7 +212,17 @@ def salvage_uncommitted(project_root: Path, message: str = "wip(phase-crash)") -
         text=True,
         timeout=60,
     )
-    return commit.returncode == 0
+    if commit.returncode != 0:
+        # Side-effect-free on failure: unstage what `add -A` staged (mixed
+        # reset never touches the working tree) so retries and verifiers
+        # don't operate on a half-staged index.
+        subprocess.run(
+            ["git", "-C", str(project_root), "reset", "-q"],
+            capture_output=True,
+            timeout=60,
+        )
+        return False
+    return True
 
 
 @dataclass
