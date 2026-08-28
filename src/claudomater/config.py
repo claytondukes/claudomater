@@ -226,8 +226,15 @@ def load_project_config(root: Path | str) -> ProjectConfig:
             )
 
     merge_raw = _require_mapping("merge", data.get("merge"))
+    converge_raw = merge_raw.get("converge", "required")
+    # YAML 1.1 parses bare off/on as booleans — the documented values must
+    # work unquoted, so map them back before validating.
+    if converge_raw is False:
+        converge_raw = "off"
+    elif converge_raw is True:
+        converge_raw = "required"
     merge = MergeConfig(
-        converge=merge_raw.get("converge", "required"),
+        converge=converge_raw,
         reviewer=merge_raw.get("reviewer", "copilot"),
     )
     if merge.converge not in ("required", "off"):
