@@ -356,7 +356,11 @@ class PhaseRunner:
                 path.write_text(self._scrub(transcript_text), encoding="utf-8")
 
             result: dict[str, Any] | None = None
-            if exec_result is not None:
+            if exec_result is not None and exec_result.returncode != 0:
+                # A JSON blob in the output of a FAILED executor run is not a
+                # result — the agent errored; treat the attempt as failed.
+                failure = f"executor-failed: exit {exec_result.returncode}"
+            elif exec_result is not None:
                 result = extract_json_result(exec_result.text)
                 if result is None:
                     failure = "no-structured-result: agent ended without its JSON result"

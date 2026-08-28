@@ -325,6 +325,20 @@ class UserConfig:
         return bool(self.slack_webhook)
 
 
+def _require_mapping(name: str, value: Any) -> dict[str, Any]:
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ConfigError(f"{name} must be a mapping, got {type(value).__name__}")
+    return value
+
+
+def _require_int(name: str, value: Any) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ConfigError(f"{name} must be an integer, got {value!r}")
+    return value
+
+
 def load_user_config(path: Path | str | None = None) -> UserConfig:
     """Load `~/.omater/config.yaml`; a missing file yields spec defaults."""
     cfg_path = Path(path) if path else USER_CONFIG_PATH.expanduser()
@@ -332,16 +346,25 @@ def load_user_config(path: Path | str | None = None) -> UserConfig:
         return UserConfig()
     data = expand_env(_load_yaml(cfg_path))
 
-    usage_raw = data.get("usage") or {}
+    usage_raw = _require_mapping("usage", data.get("usage"))
     usage = UsageConfig()
     if "pause_at" in usage_raw:
-        usage.pause_at.update(usage_raw["pause_at"] or {})
+        usage.pause_at.update(_require_mapping("usage.pause_at", usage_raw["pause_at"]))
     if "on_threshold" in usage_raw:
-        usage.on_threshold.update(usage_raw["on_threshold"] or {})
-    usage.degrade_scoped_at = int(usage_raw.get("degrade_scoped_at", 80))
+        usage.on_threshold.update(
+            _require_mapping("usage.on_threshold", usage_raw["on_threshold"])
+        )
+    usage.degrade_scoped_at = _require_int(
+        "usage.degrade_scoped_at", usage_raw.get("degrade_scoped_at", 80)
+    )
     if "degrade_path" in usage_raw:
-        usage.degrade_path = list(usage_raw["degrade_path"] or [])
-    usage.max_stale_seconds = int(usage_raw.get("max_stale_seconds", 300))
+        raw_path = usage_raw["degrade_path"]
+        if not isinstance(raw_path, list):
+            raise ConfigError("usage.degrade_path must be a list")
+        usage.degrade_path = list(raw_path)
+    usage.max_stale_seconds = _require_int(
+        "usage.max_stale_seconds", usage_raw.get("max_stale_seconds", 300)
+    )
 
     for window, pct in usage.pause_at.items():
         if window not in ("five_hour", "seven_day"):
@@ -357,8 +380,8 @@ def load_user_config(path: Path | str | None = None) -> UserConfig:
             )
     _validate_degrade_path(usage.degrade_path)
 
-    notify_raw = data.get("notify") or {}
-    learning_raw = data.get("learning") or {}
+    notify_raw = _require_mapping("notify", data.get("notify"))
+    learning_raw = _require_mapping("learning", data.get("learning"))
 
     cfg = UserConfig(usage=usage, slack_webhook=notify_raw.get("slack_webhook"))
     if learning_raw.get("db_path"):

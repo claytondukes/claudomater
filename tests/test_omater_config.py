@@ -226,3 +226,27 @@ class TestUserConfig:
 
     def test_defaults_object_is_valid(self):
         assert UserConfig().usage.max_stale_seconds == 300
+
+    def test_non_mapping_sections_are_config_errors(self, tmp_path):
+        for text in ("usage: [a, b]\n", "notify: just-a-string\n", "learning: 3\n"):
+            path = tmp_path / "config.yaml"
+            path.write_text(text, encoding="utf-8")
+            with pytest.raises(ConfigError, match="must be a mapping"):
+                load_user_config(path)
+
+    def test_non_integer_knobs_are_config_errors(self, tmp_path):
+        for text in (
+            "usage:\n  degrade_scoped_at: soon\n",
+            "usage:\n  max_stale_seconds: [300]\n",
+            "usage:\n  degrade_scoped_at: true\n",
+        ):
+            path = tmp_path / "config.yaml"
+            path.write_text(text, encoding="utf-8")
+            with pytest.raises(ConfigError, match="must be an integer"):
+                load_user_config(path)
+
+    def test_non_list_degrade_path_is_a_config_error(self, tmp_path):
+        path = tmp_path / "config.yaml"
+        path.write_text("usage:\n  degrade_path: claude-opus-5\n", encoding="utf-8")
+        with pytest.raises(ConfigError, match="must be a list"):
+            load_user_config(path)

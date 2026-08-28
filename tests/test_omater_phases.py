@@ -185,6 +185,25 @@ class TestRunPhase:
         assert outcome.status == "escalated"
         assert "missing required fields" in outcome.failure_reasons[0]
 
+    def test_nonzero_exit_fails_even_with_json_output(self, tmp_path):
+        """A JSON blob in a FAILED executor run's output is not a result —
+        the agent errored and the attempt must fail."""
+
+        class FailingExitExecutor:
+            def __init__(self):
+                self.n = 0
+
+            def run(self, spec, model):
+                self.n += 1
+                return ExecutionResult(text=GOOD, returncode=1 if self.n == 1 else 0)
+
+        log = RunLog.create(tmp_path)
+        runner = PhaseRunner(tmp_path, log, FailingExitExecutor())
+        outcome = runner.run_phase(PhaseSpec("dev", "m", "p"))
+        assert outcome.status == "verified"
+        assert outcome.attempts == 2
+        assert "executor-failed: exit 1" in outcome.failure_reasons[0]
+
     def test_timeout_is_a_failed_attempt(self, tmp_path):
         runner, log, *_ = make_runner(
             tmp_path, [PhaseTimeout("phase 'dev' exceeded 1s"), GOOD]
