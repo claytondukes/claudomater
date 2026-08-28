@@ -465,6 +465,19 @@ class TestCredentialProviders:
         )
         assert ident == {"id": "box-b"}
 
+    def test_refresh_path_honors_injected_env_override(self, tmp_path):
+        """OMATER_ACCOUNT_ID in the caller-provided env must reach the
+        refreshed (source=live) snapshot's identity, not just the cache path."""
+        payload = {"limits": [{"kind": "session", "percent": 1, "resets_at": None}]}
+        snap = read_usage(
+            cache_path=tmp_path / "cache.json",
+            providers=[EnvTokenProvider(env={"OMATER_OAUTH_TOKEN": "tok-A"})],
+            http=lambda url, headers, timeout: json.dumps(payload).encode(),
+            env={"OMATER_ACCOUNT_ID": "box-b"},
+        )
+        assert snap.source == "live"
+        assert snap.account == {"id": "box-b"}
+
     def test_snapshot_account_follows_the_fetching_credential(self, tmp_path):
         """read_usage attributes a refreshed snapshot to the credential that
         fetched it, so an account switch is detectable."""

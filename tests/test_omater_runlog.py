@@ -124,6 +124,8 @@ class TestAdoption:
         stray.mkdir(parents=True)
         with pytest.raises(RunError, match="not a symlink"):
             RunLog.create(tmp_path)
+        # fail-fast: no orphan run dir may be left behind by the attempt
+        assert sorted(p.name for p in rr(tmp_path).iterdir()) == ["current"]
 
     def test_duplicate_run_id_is_a_run_error(self, tmp_path):
         log = RunLog.create(tmp_path, run_id="dup")
@@ -146,3 +148,18 @@ class TestControl:
         log = RunLog.create(tmp_path)
         with pytest.raises(RunError, match="unknown control action"):
             log.write_control("skip")
+
+    def test_torn_final_control_line_is_dropped(self, tmp_path):
+        log = RunLog.create(tmp_path)
+        log.write_control("resume")
+        with open(log.run_dir / "control.jsonl", "a", encoding="utf-8") as fh:
+            fh.write('{"ts": "2026-08-28T22:00:00Z", "action": "abo')
+        assert [c["action"] for c in log.read_controls()] == ["resume"]
+
+    def test_corrupt_middle_control_line_is_a_run_error(self, tmp_path):
+        log = RunLog.create(tmp_path)
+        with open(log.run_dir / "control.jsonl", "a", encoding="utf-8") as fh:
+            fh.write("garbage\n")
+        log.write_control("resume")
+        with pytest.raises(RunError, match="corrupt"):
+            log.read_controls()

@@ -116,6 +116,7 @@ def refresh_cache(
     providers: list[Any] | None = None,
     http: HttpFn | None = None,
     timeout: float = 10.0,
+    env: dict[str, str] | None = None,
 ) -> tuple[bool, str | None, dict[str, str] | None]:
     """Fetch fresh usage into the cache (atomic write). Returns
     (refreshed, failure_reason, account_identity). Never raises — the
@@ -126,7 +127,7 @@ def refresh_cache(
         token, provider = acquire_token(providers)
     except CredentialsUnavailable as exc:
         return False, f"no-credentials: {exc}", None
-    account = account_identity(token=token, provider=provider)
+    account = account_identity(token=token, provider=provider, env=env)
     headers = {
         "Authorization": f"Bearer {token}",
         "anthropic-beta": OAUTH_BETA_HEADER,
@@ -210,7 +211,7 @@ def read_usage(
     refreshed, failure, fetch_account = False, None, None
     if cache_age > refresh_ttl:
         refreshed, failure, fetch_account = refresh_cache(
-            cache, providers=providers, http=http
+            cache, providers=providers, http=http, env=env
         )
 
     try:

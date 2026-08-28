@@ -67,6 +67,13 @@ class RunLog:
     def create(cls, project_root: Path | str, run_id: str | None = None) -> "RunLog":
         root = runs_root(project_root)
         current = root / CURRENT_LINK
+        if current.exists() and not current.is_symlink():
+            # Fail BEFORE creating the run dir — failing later (in
+            # _point_current) leaks an orphan run folder per attempt.
+            raise RunError(
+                f"{current} exists but is not a symlink; remove it manually "
+                "before starting a run"
+            )
         if current.is_symlink() or current.exists():
             live = cls._attach(current)
             if live is not None and live.is_live():
@@ -172,8 +179,12 @@ class RunLog:
             os.fsync(fh.fileno())
         return record
 
-    def events(self) -> list[dict[str, Any]]:
-        path = self.run_dir / EVENTS_JSONL
+    def _read_jsonl_tolerant(self, filename: str) -> list[dict[str, Any]]:
+        """Read an append-only jsonl file, tolerating a torn FINAL line (what
+        a crash mid-append leaves behind; the write-ahead discipline means the
+        action it described never committed). Corrupt middle lines raise
+        RunError — that is damage, not a crash artifact."""
+        path = self.run_dir / filename
         if not path.exists():
             return []
         lines = [
@@ -185,16 +196,15 @@ class RunLog:
                 out.append(json.loads(line))
             except json.JSONDecodeError:
                 if i == len(lines) - 1:
-                    # A torn final line is exactly what a crash mid-append
-                    # leaves behind. Write-ahead means the action it described
-                    # never committed — drop it and let adoption replay from
-                    # the last durable event.
                     break
                 raise RunError(
-                    f"corrupt {EVENTS_JSONL} at line {i + 1} in {self.run_dir}: "
+                    f"corrupt {filename} at line {i + 1} in {self.run_dir}: "
                     "not valid JSON (only a torn FINAL line is recoverable)"
                 ) from None
         return out
+
+    def events(self) -> list[dict[str, Any]]:
+        return self._read_jsonl_tolerant(EVENTS_JSONL)
 
     def is_live(self) -> bool:
         evs = self.events()
@@ -226,11 +236,4 @@ class RunLog:
         return record
 
     def read_controls(self) -> list[dict[str, Any]]:
-        path = self.run_dir / CONTROL_JSONL
-        if not path.exists():
-            return []
-        return [
-            json.loads(line)
-            for line in path.read_text(encoding="utf-8").splitlines()
-            if line.strip()
-        ]
+        return self._read_jsonl_tolerant(CONTROL_JSONL)
