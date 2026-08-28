@@ -350,3 +350,23 @@ class TestInit:
     def test_verify_reports_all_drift(self, tmp_path):
         problems = run_verify(tmp_path)
         assert len(problems) >= 3  # settings, config, gitignore
+
+    def test_unreadable_settings_reports_not_crashes(self, tmp_path):
+        hooks.provision(tmp_path)
+        path = hooks.settings_path(tmp_path)
+        path.chmod(0o000)
+        try:
+            problems = hooks.verify(tmp_path)
+            assert problems and "cannot read" in problems[0]
+        finally:
+            path.chmod(0o644)
+
+    def test_unreadable_gitignore_reports_not_crashes(self, tmp_path):
+        run_init(tmp_path)
+        gitignore = tmp_path / ".gitignore"
+        gitignore.chmod(0o000)
+        try:
+            problems = run_verify(tmp_path)
+            assert any("cannot read" in p and ".gitignore" in p for p in problems)
+        finally:
+            gitignore.chmod(0o644)

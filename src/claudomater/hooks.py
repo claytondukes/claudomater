@@ -189,6 +189,8 @@ def _load_settings(path: Path) -> dict[str, Any]:
         return json.loads(path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, ValueError) as exc:
         raise HookProvisionError(f"cannot parse {path}: {exc}") from exc
+    except OSError as exc:  # unreadable settings must report, not crash verify
+        raise HookProvisionError(f"cannot read {path}: {exc}") from exc
 
 
 class HookProvisionError(Exception):

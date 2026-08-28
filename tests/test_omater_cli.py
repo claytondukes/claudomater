@@ -132,6 +132,18 @@ class TestHookCommand:
         assert main(["hook", "pre-tool-use", "--root", str(tmp_path)]) == EXIT_OK
         assert capsys.readouterr().out == ""
 
+    def test_failing_stdin_read_allows_without_raising(self, tmp_path, monkeypatch, capsys):
+        """An OSError reading stdin must allow, not raise — a raised hook is
+        a disarmed fence for that invocation."""
+
+        class BrokenStdin:
+            def read(self, *a, **k):
+                raise OSError("stdin gone")
+
+        monkeypatch.setattr("sys.stdin", BrokenStdin())
+        assert main(["hook", "pre-tool-use", "--root", str(tmp_path)]) == EXIT_OK
+        assert capsys.readouterr().out == ""
+
 
 class TestControlCommand:
     def test_control_writes_to_current_run(self, tmp_path, capsys):

@@ -36,6 +36,16 @@ class TestProjectConfig:
         with pytest.raises(ConfigError, match="not found"):
             load_project_config(tmp_path)
 
+    def test_unreadable_file_is_a_config_error(self, tmp_path):
+        cfg = tmp_path / PROJECT_CONFIG_NAME
+        cfg.write_text("project: x\n", encoding="utf-8")
+        cfg.chmod(0o000)
+        try:
+            with pytest.raises(ConfigError, match="cannot read"):
+                load_project_config(tmp_path)
+        finally:
+            cfg.chmod(0o644)
+
     def test_missing_project_name_raises(self, tmp_path):
         with pytest.raises(ConfigError, match="'project'"):
             load_project_config(write_project(tmp_path, "deployment_type: sandbox\n"))

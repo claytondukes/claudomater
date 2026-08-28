@@ -126,8 +126,10 @@ def _cmd_hook(args: argparse.Namespace) -> int:
         return EXIT_ERROR
     try:
         payload = json.load(sys.stdin)
-    except (json.JSONDecodeError, ValueError):
-        return EXIT_OK  # unrecognized input: the fence denies only what it can parse
+    except (json.JSONDecodeError, ValueError, TypeError, OSError):
+        # unrecognized/unreadable input: the fence denies only what it can
+        # parse — raising here would disarm it for this invocation
+        return EXIT_OK
     allow, reason = hooks.evaluate_pre_tool_use(payload, args.root)
     response = hooks.hook_response(allow, reason)
     if response is not None:
@@ -239,7 +241,7 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
         return args.fn(args)
-    except ConfigError as exc:
+    except (ConfigError, hooks.HookProvisionError) as exc:
         print(f"config error: {exc}", file=sys.stderr)
         return EXIT_ERROR
 

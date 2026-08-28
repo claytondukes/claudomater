@@ -116,11 +116,15 @@ def run_verify(root: Path | str) -> list[str]:
             problems.append(str(exc))
 
     gitignore = root / ".gitignore"
-    lines = (
-        gitignore.read_text(encoding="utf-8").splitlines()
-        if gitignore.exists()
-        else []
-    )
+    try:
+        lines = (
+            gitignore.read_text(encoding="utf-8").splitlines()
+            if gitignore.exists()
+            else []
+        )
+    except OSError as exc:
+        lines = []
+        problems.append(f"cannot read {gitignore}: {exc}")
     if GITIGNORE_LINE not in lines:
         problems.append(
             f"{GITIGNORE_LINE} not in .gitignore — run logs must never be committed"

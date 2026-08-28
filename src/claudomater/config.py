@@ -114,6 +114,8 @@ def _load_yaml(path: Path) -> dict[str, Any]:
         raw = path.read_text(encoding="utf-8")
     except FileNotFoundError:
         raise ConfigError(f"config file not found: {path}") from None
+    except OSError as exc:  # permissions, is-a-directory, IO errors
+        raise ConfigError(f"cannot read {path}: {exc}") from exc
     try:
         data = yaml.safe_load(raw)
     except yaml.YAMLError as exc:
