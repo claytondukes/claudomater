@@ -200,9 +200,12 @@ def _read_fake(path: Path) -> UsageSnapshot:
             "seven_day_resets_at": data.get("seven_day_resets_at"),
             "scoped_resets_at": data.get("scoped_resets_at"),
         }
+    account = data.get("account")
+    if not isinstance(account, dict):  # non-object account would crash .get() consumers
+        account = {"fake": "true"}
     return UsageSnapshot(
         **fields,
-        account=data.get("account") or {"fake": "true"},
+        account=account,
         fetched_at=mtime,
         source="fake",
     )

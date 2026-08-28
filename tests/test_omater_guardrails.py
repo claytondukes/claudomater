@@ -389,6 +389,15 @@ class TestRealPathFailClosed:
             assert ok is False
             assert "fetch-failed" in reason
 
+    def test_non_object_fake_account_degrades_to_placeholder(self, tmp_path, monkeypatch):
+        write_fake(
+            tmp_path,
+            monkeypatch,
+            {"five_hour": 1, "seven_day": 1, "scoped": 1, "account": "just-a-string"},
+        )
+        snap = read_usage()
+        assert snap.account == {"fake": "true"}  # dict consumers stay safe
+
     def test_non_string_scoped_model_in_fake_degrades_to_none(self, tmp_path, monkeypatch):
         write_fake(
             tmp_path,

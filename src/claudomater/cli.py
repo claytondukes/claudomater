@@ -155,7 +155,15 @@ def _cmd_control(args: argparse.Namespace) -> int:
             run_dir = runs_root(root) / validate_run_id(args.run)
             if not run_dir.is_dir():
                 raise RunError(f"no run {args.run!r} under {runs_root(root)}")
-            log = RunLog(run_dir, args.run)
+            # Same containment rule as the current-link check in RunLog:
+            # a symlinked run dir must not carry control writes elsewhere.
+            resolved = run_dir.resolve()
+            if resolved.parent != runs_root(root).resolve():
+                raise RunError(
+                    f"run {args.run!r} resolves outside the runs directory "
+                    f"({resolved}); remove the symlink manually"
+                )
+            log = RunLog(resolved, args.run)
         else:
             log = RunLog._attach(runs_root(root) / "current")
             if log is None:

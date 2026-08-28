@@ -151,6 +151,20 @@ class TestControlCommand:
         )
         assert [c["action"] for c in log.read_controls()] == ["abort"]
 
+    def test_symlinked_run_dir_is_rejected(self, tmp_path, capsys):
+        """A symlink planted at .omater/runs/<id> must not carry control
+        writes outside the runs directory."""
+        from claudomater.runlog import runs_root
+
+        RunLog.create(tmp_path, run_id="real-run")
+        outside = tmp_path / "elsewhere"
+        outside.mkdir()
+        (runs_root(tmp_path) / "evil-link").symlink_to(outside)
+        rc = main(["control", "resume", "--root", str(tmp_path), "--run", "evil-link"])
+        assert rc == EXIT_ERROR
+        assert "resolves outside" in capsys.readouterr().err
+        assert not (outside / "control.jsonl").exists()
+
     def test_run_path_traversal_is_rejected(self, tmp_path, capsys):
         RunLog.create(tmp_path)
         rc = main(["control", "resume", "--root", str(tmp_path), "--run", "../../evil"])
