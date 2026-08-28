@@ -511,6 +511,33 @@ class TestParseLimits:
         assert out["five_hour"] is None
         assert out["scoped_model"] is None
 
+    def test_malformed_shapes_degrade_to_none_not_crash(self):
+        """Unknown shapes must map to None (which evaluate() fails closed
+        on), never raise mid-guardrail."""
+        for payload in (
+            {"limits": {"kind": "session"}},  # dict, not list
+            {"limits": ["session", 42]},  # list of non-dicts
+            {"limits": [{"kind": "session", "percent": "46%"}]},  # string pct
+            {"limits": [{"kind": "session", "percent": True}]},  # bool pct
+            {"limits": [{"kind": "session", "percent": 5, "resets_at": 12}]},
+        ):
+            out = parse_limits(payload)
+            assert out["five_hour"] in (None, 5.0)
+            assert out["five_hour_resets_at"] is None
+        d = evaluate(
+            UsageSnapshot(**parse_limits({"limits": ["junk"]}), account={}, fetched_at=0),
+            UserConfig(),
+        )
+        assert d.action == "pause"
+
+    def test_string_percentages_in_fake_fail_closed(self, tmp_path, monkeypatch):
+        write_fake(
+            tmp_path, monkeypatch, {"five_hour": "97", "seven_day": 10, "scoped": 10}
+        )
+        snap = read_usage()
+        assert snap.five_hour is None  # strict: no guessing at strings
+        assert evaluate(snap, UserConfig()).action == "pause"
+
     def test_scope_model_as_plain_string(self):
         out = parse_limits(
             {"limits": [{"kind": "weekly_scoped", "percent": 5, "scope": {"model": "Fable"}}]}

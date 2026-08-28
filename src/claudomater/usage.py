@@ -82,8 +82,19 @@ def _default_http(url: str, headers: dict[str, str], timeout: float) -> bytes:
         return resp.read()
 
 
+def _num_or_none(value: Any) -> float | None:
+    """Strictly numeric or unknown. Guardrails fail CLOSED on None (a
+    missing window pauses), so an unexpected type must map to None — never
+    crash mid-guardrail with a TypeError, never guess at strings."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value)
+
+
 def parse_limits(payload: dict[str, Any]) -> dict[str, Any]:
-    """Extract the three windows from the API response's `limits` array."""
+    """Extract the three windows from the API response's `limits` array.
+    Unexpected shapes degrade to None fields, which the guardrails treat as
+    unknown = over-threshold."""
     out: dict[str, Any] = {
         "five_hour": None,
         "seven_day": None,
@@ -93,10 +104,17 @@ def parse_limits(payload: dict[str, Any]) -> dict[str, Any]:
         "seven_day_resets_at": None,
         "scoped_resets_at": None,
     }
-    for limit in payload.get("limits") or []:
+    limits = payload.get("limits")
+    if not isinstance(limits, list):
+        return out
+    for limit in limits:
+        if not isinstance(limit, dict):
+            continue
         kind = limit.get("kind")
-        pct = limit.get("percent")
+        pct = _num_or_none(limit.get("percent"))
         resets = limit.get("resets_at")
+        if not isinstance(resets, str):
+            resets = None
         if kind == "session":
             out["five_hour"], out["five_hour_resets_at"] = pct, resets
         elif kind == "weekly_all":
@@ -165,9 +183,11 @@ def _read_fake(path: Path) -> UsageSnapshot:
         fields = parse_limits(data)
     else:  # simplified shape: {"five_hour": 50, "seven_day": 60, "scoped": 70, ...}
         fields = {
-            "five_hour": data.get("five_hour"),
-            "seven_day": data.get("seven_day"),
-            "scoped": data.get("scoped"),
+            # non-numeric values degrade to None = unknown = fail closed,
+            # never a TypeError inside evaluate()
+            "five_hour": _num_or_none(data.get("five_hour")),
+            "seven_day": _num_or_none(data.get("seven_day")),
+            "scoped": _num_or_none(data.get("scoped")),
             "scoped_model": data.get("scoped_model", "Fable"),
             "five_hour_resets_at": data.get("five_hour_resets_at"),
             "seven_day_resets_at": data.get("seven_day_resets_at"),
