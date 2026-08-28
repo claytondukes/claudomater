@@ -215,6 +215,26 @@ class TestBashFence:
             assert allow, cmd
 
 
+class TestPayloadTypeRobustness:
+    def test_unrecognized_payload_shapes_allow_without_raising(self, tmp_path):
+        """A fence that raises is a fence disarmed (non-2 hook exits allow).
+        Unrecognized input — including unexpected TYPES — must allow."""
+        weird = [
+            ["not", "a", "dict"],
+            {"tool_name": "Write", "tool_input": "not-a-dict"},
+            {"tool_name": "Write", "tool_input": {"file_path": 42}},
+            {"tool_name": "Bash", "tool_input": {"command": ["ls"]}},
+            {"tool_name": "Write", "tool_input": {"file_path": "/tmp_x/f"}, "cwd": 7},
+        ]
+        for payload_obj in weird:
+            allow, _ = hooks.evaluate_pre_tool_use(payload_obj, tmp_path)
+            # the last case still carries a recognizable bad write; the rest allow
+            if payload_obj is weird[-1]:
+                assert not allow
+            else:
+                assert allow, payload_obj
+
+
 class TestHookResponse:
     def test_allow_has_no_output(self):
         assert hooks.hook_response(True, None) is None

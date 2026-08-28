@@ -90,6 +90,32 @@ class TestEvents:
         assert [e["event"] for e in log.events()] == ["run-created", "phase-spawn"]
         assert log.is_live()
 
+    def test_non_object_json_lines_get_the_same_treatment(self, tmp_path):
+        log = RunLog.create(tmp_path)
+        log.event("dev", "phase-spawn")
+        with open(log.run_dir / "events.jsonl", "a", encoding="utf-8") as fh:
+            fh.write("42\n")  # valid JSON, not an object — torn tail case
+        assert [e["event"] for e in log.events()] == ["run-created", "phase-spawn"]
+        log2 = RunLog(log.run_dir, log.run_id)
+        with open(log.run_dir / "events.jsonl", "a", encoding="utf-8") as fh:
+            fh.write('{"event": "phase-failed", "phase": "dev", "ts": "t", "run_id": "r"}\n')
+        with pytest.raises(RunError, match="not a JSON object"):
+            log2.events()  # the bare 42 is now a MIDDLE line -> damage
+
+    def test_tampered_current_symlink_fails_loudly(self, tmp_path):
+        """A hand-edited runs/current pointing outside the runs dir must not
+        let adopt/control write logs elsewhere."""
+        outside = tmp_path / "elsewhere"
+        outside.mkdir()
+        from claudomater.runlog import runs_root as rr
+
+        rr(tmp_path).mkdir(parents=True)
+        (rr(tmp_path) / "current").symlink_to(outside)
+        with pytest.raises(RunError, match="points outside"):
+            RunLog.adopt(tmp_path)
+        with pytest.raises(RunError, match="points outside"):
+            RunLog.create(tmp_path)
+
     def test_corrupt_middle_line_is_a_run_error(self, tmp_path):
         log = RunLog.create(tmp_path)
         with open(log.run_dir / "events.jsonl", "a", encoding="utf-8") as fh:

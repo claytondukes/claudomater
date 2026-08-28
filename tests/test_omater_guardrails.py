@@ -543,3 +543,11 @@ class TestParseLimits:
             {"limits": [{"kind": "weekly_scoped", "percent": 5, "scope": {"model": "Fable"}}]}
         )
         assert out["scoped_model"] == "Fable"
+
+    def test_malformed_scope_shapes_degrade_to_none(self):
+        """A non-string scoped_model would crash scope_applies (.lower())."""
+        for scope in ("Fable", 42, ["Fable"], {"model": 42}, {"model": {"display_name": 7}}):
+            out = parse_limits(
+                {"limits": [{"kind": "weekly_scoped", "percent": 5, "scope": scope}]}
+            )
+            assert out["scoped_model"] is None, scope

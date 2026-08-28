@@ -121,11 +121,13 @@ def parse_limits(payload: dict[str, Any]) -> dict[str, Any]:
             out["seven_day"], out["seven_day_resets_at"] = pct, resets
         elif kind == "weekly_scoped":
             out["scoped"], out["scoped_resets_at"] = pct, resets
-            scope = limit.get("scope") or {}
-            model = scope.get("model")
+            scope = limit.get("scope")
+            model = scope.get("model") if isinstance(scope, dict) else None
             if isinstance(model, dict):
                 model = model.get("display_name")
-            out["scoped_model"] = model
+            # strictly a string or unknown — a non-string here would crash
+            # scope_applies() (.lower()) instead of degrading
+            out["scoped_model"] = model if isinstance(model, str) else None
     return out
 
 

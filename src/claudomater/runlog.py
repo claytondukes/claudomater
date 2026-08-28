@@ -135,6 +135,15 @@ class RunLog:
             return None
         if not run_dir.is_dir():
             return None
+        # The current link must point at an immediate child of the runs
+        # root — a hand-edited symlink to an arbitrary path would make
+        # adopt/control write logs outside .omater/runs and defeat
+        # one-live-run bookkeeping. Tampering fails loudly, never silently.
+        if run_dir.parent != current.parent.resolve():
+            raise RunError(
+                f"{current} points outside the runs directory ({run_dir}); "
+                "remove the symlink manually before continuing"
+            )
         return cls(run_dir, run_dir.name)
 
     def _point_current(self) -> None:
@@ -212,14 +221,21 @@ class RunLog:
         out = []
         for i, line in enumerate(lines):
             try:
-                out.append(json.loads(line))
+                obj = json.loads(line)
             except json.JSONDecodeError:
+                obj = None
+            # Valid-but-non-object JSON (a torn line can parse as a bare
+            # number or string) gets the same treatment as unparsable:
+            # crashing later in is_live()/adoption with a KeyError would
+            # hide WHERE the damage is.
+            if not isinstance(obj, dict):
                 if i == len(lines) - 1:
                     break
                 raise RunError(
                     f"corrupt {filename} at line {i + 1} in {self.run_dir}: "
-                    "not valid JSON (only a torn FINAL line is recoverable)"
+                    "not a JSON object (only a torn FINAL line is recoverable)"
                 ) from None
+            out.append(obj)
         return out
 
     def events(self) -> list[dict[str, Any]]:

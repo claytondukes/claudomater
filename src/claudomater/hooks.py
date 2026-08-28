@@ -112,14 +112,22 @@ def evaluate_pre_tool_use(
     env: dict[str, str] | None = None,
 ) -> tuple[bool, str | None]:
     """Returns (allow, deny_reason). Unrecognized input allows — the fence
-    denies only what it can positively recognize as an out-of-tree write."""
+    denies only what it can positively recognize as an out-of-tree write.
+    That contract includes TYPES: a payload shape we don't understand must
+    allow, never raise (an exception here stalls or silently disarms the
+    fence, hook exit codes being what they are)."""
+    if not isinstance(payload, dict):
+        return True, None
     root = Path(os.path.realpath(Path(root).expanduser()))
     scratch = [
         Path(os.path.realpath(d)) for d in scratch_dirs_for(root, env)
     ]
-    cwd = Path(payload.get("cwd") or root)
+    raw_cwd = payload.get("cwd")
+    cwd = Path(raw_cwd) if isinstance(raw_cwd, str) and raw_cwd else root
     tool = payload.get("tool_name", "")
-    tool_input = payload.get("tool_input") or {}
+    tool_input = payload.get("tool_input")
+    if not isinstance(tool_input, dict):
+        tool_input = {}
     # Name every allowed scratch location, including an operator-declared
     # OMATER_SCRATCH_DIR — a hint pointing only at the default sends the
     # agent to the wrong place when a declared dir exists.
@@ -130,7 +138,7 @@ def evaluate_pre_tool_use(
 
     if tool in WRITE_TOOLS:
         raw = tool_input.get("file_path") or tool_input.get("notebook_path")
-        if not raw:
+        if not raw or not isinstance(raw, str):
             return True, None
         path = _norm(str(raw), cwd)
         if _allowed(path, root, scratch):
@@ -140,7 +148,9 @@ def evaluate_pre_tool_use(
         )
 
     if tool == "Bash":
-        command = tool_input.get("command") or ""
+        command = tool_input.get("command")
+        if not isinstance(command, str):
+            return True, None
         for raw in bash_write_targets(command):
             path = _norm(raw, cwd)
             if not _allowed(path, root, scratch):
