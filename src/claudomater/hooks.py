@@ -64,6 +64,54 @@ def _allowed(path: Path, root: Path, scratch_dirs: list[Path]) -> bool:
     return False
 
 
+def _escape_parity(text: str, idx: int) -> int:
+    """1 when the char at idx is backslash-escaped (odd run before it)."""
+    run = 0
+    j = idx - 1
+    while j >= 0 and text[j] == "\\":
+        run += 1
+        j -= 1
+    return run % 2
+
+
+def _data_spans(text: str) -> list[tuple[int, int]]:
+    """Rough spans of RAW text that are data (quoted spans and comments) —
+    used only to keep the heredoc pass from consuming a `<<` bash treats as
+    data (`echo ok # <<EOF`, `echo '<<EOF'`). Misclassifying here degrades
+    to the residual-<< wall (fail open), never to a guess."""
+    spans: list[tuple[int, int]] = []
+    i, n = 0, len(text)
+    while i < n:
+        c = text[i]
+        if c in "'\"" and _escape_parity(text, i) == 0:
+            if c == "'":
+                end = text.find("'", i + 1)
+            else:
+                end = i + 1
+                while end < n and not (
+                    text[end] == '"' and _escape_parity(text, end) == 0
+                ):
+                    end += 1
+                if end >= n:
+                    end = -1
+            if end != -1:
+                spans.append((i, end + 1))
+                i = end + 1
+                continue
+        elif c == "#":
+            prev = text[i - 1] if i else ""
+            if i == 0 or (
+                prev in " \t\n;&|(<>" and _escape_parity(text, i - 1) == 0
+            ):
+                end = text.find("\n", i)
+                end = n if end == -1 else end
+                spans.append((i, end))
+                i = end
+                continue
+        i += 1
+    return spans
+
+
 # Bash write patterns: redirections, tee, file-creating commands, copy/move
 # targets. Only recognizable shapes — the deny is best-effort by design.
 # group 1 = the heredoc intro line (kept scannable: `cat <<EOF > /etc/x`
@@ -297,6 +345,8 @@ def _bare_ampersands(text: str) -> list[int]:
         nxt = text[i + 1] if i + 1 < len(text) else ""
         if prev in (">", "<", "&", "|") or nxt in ("&", ">"):
             continue
+        if _escape_parity(text, i) == 1:  # \& is word data, not control
+            continue
         out.append(i)
     return out
 # Constructs that make the effective cwd untrackable from here on: subshells
@@ -351,7 +401,16 @@ def _scannable(command: str) -> str:
         cut = delim_end - m.start(1)
         return " " * cut + intro[cut:]
 
-    scannable = _HEREDOC.sub(_heredoc_repl, command)
+    data = _data_spans(command)
+
+    def _outside_data(m: re.Match) -> str:
+        # a << inside a comment or quoted span is DATA — bash starts no
+        # heredoc there, and eating the following lines hid real commands
+        if any(start <= m.start(1) < end for start, end in data):
+            return m.group(0)
+        return _heredoc_repl(m)
+
+    scannable = _HEREDOC.sub(_outside_data, command)
     # No padding around the placeholder: quotes glued to other characters
     # (`echo "x"#suffix`, `cp x"a b"y t`) must keep their word intact — a
     # space-padded placeholder invented a word boundary that turned #suffix
@@ -421,6 +480,8 @@ def resolved_bash_targets(
         (pos, "target", raw) for pos, raw in _positioned_write_targets(scannable)
     ]
     for m in _CWD_OPAQUE.finditer(scannable):
+        if _escape_parity(scannable, m.start()) == 1:
+            continue  # \( \) \` are literal word chars, not delimiters
         events.append((m.start(), "opaque", None))
     # Command-induced opacity (an unnameable/current-shell command) takes
     # effect at the SEGMENT boundary, not the command start: bash opens
@@ -462,7 +523,16 @@ def resolved_bash_targets(
         events.append((m.start(), "orelse", None))
     for m in re.finditer(r"[;\n]", scannable):
         events.append((m.start(), "listsep", None))
-    chdir_matches = list(_CHDIR.finditer(scannable))
+    def _real_separator(m: re.Match) -> bool:
+        # `echo \; cd /etc` never runs cd — an escaped metachar is word
+        # data, not a command separator; the skipped cd then follows the
+        # unmatched-token fail-open path below.
+        sep = m.group(1)
+        if len(sep) == 1 and sep in ";&|(":
+            return _escape_parity(scannable, m.start(1)) == 0
+        return True
+
+    chdir_matches = [m for m in _CHDIR.finditer(scannable) if _real_separator(m)]
     matched_verb_spans = [(m.start(2), m.end(2)) for m in chdir_matches]
     for m in _CD_WORD.finditer(scannable):
         # a cd-ish token the parser did not positively match voids tracking

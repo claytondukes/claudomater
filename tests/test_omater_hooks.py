@@ -433,6 +433,35 @@ class TestBashFence:
             allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
             assert allow, (cmd, reason)
 
+    def test_heredoc_introducer_inside_data_is_not_a_heredoc(self, tmp_path):
+        """A << inside a comment or quoted span starts no heredoc — eating
+        the following lines as a body hid a real out-of-tree write."""
+        for cmd in (
+            "echo ok # <<EOF\ncat > /tmp_probe/real\nEOF",
+            "echo '<<EOF'\ncat > /tmp_probe/real\nEOF",
+        ):
+            p = payload("Bash", command=cmd)
+            p["cwd"] = str(tmp_path)
+            allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+            assert not allow, cmd
+
+    def test_escaped_metachars_are_word_data_everywhere(self, tmp_path):
+        """Escaped separators/operators are arguments, not syntax:
+        `echo \\; cd /etc` never runs cd (false deny closed), and `echo \\&`
+        / `echo \\\\`` must not void a correctly tracked cwd (miss closed)."""
+        p = payload("Bash", command="echo \\; cd /etc; cat > out.txt")
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+        for cmd in (
+            "cd /etc; echo \\&; cat > passwd",
+            "cd /etc; echo \\`; cat > passwd",
+        ):
+            p = payload("Bash", command=cmd)
+            p["cwd"] = str(tmp_path)
+            allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+            assert not allow, cmd
+
     def test_ansi_c_quoting_allows_escaped_quotes(self, tmp_path):
         """$'text \\' more' is ONE argument (ANSI-C quoting) — ending the
         span at the escaped quote exposed its text as a redirect target."""
