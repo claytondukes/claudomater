@@ -91,6 +91,15 @@ class TestReviewGate:
         (reason,) = gate.blocking_reasons()
         assert "MUST-FIX" in reason and "a.py:7" in reason and "evidence" in reason
 
+    def test_blocking_reason_without_line_omits_the_suffix(self):
+        """line is optional; 'a.py:None' is not actionable retry feedback."""
+        f = finding("MUST-FIX", file="a.py")
+        del f["line"]
+        gate = review_gate([f], "MUST-FIX")
+        (reason,) = gate.blocking_reasons()
+        assert "None" not in reason
+        assert "at a.py:" in reason  # the location, straight into the prose colon
+
     def test_every_policy_floor_is_a_valid_gate_floor(self):
         """DEPLOYMENT_POLICY.review_floor and the gate's severity vocabulary
         must never drift apart."""

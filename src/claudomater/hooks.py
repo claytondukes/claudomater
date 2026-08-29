@@ -127,6 +127,15 @@ def _bare_ampersands(text: str) -> list[int]:
 # Constructs that make the effective cwd untrackable from here on: subshells
 # and command substitution (both paren forms) and backticks.
 _CWD_OPAQUE = re.compile(r"[()`]")
+# Compound control flow this scanner does not model: a cd inside
+# `if false; then cd /etc; fi`, a function body, or a zero-iteration loop
+# may never execute, so applying it would guess-deny. Any of these reserved
+# words at a command position (or a brace group) makes the cwd untrackable
+# from that point on — same monotone fail-open rule as subshells.
+_COMPOUND = re.compile(
+    r"(?:^|[\n;&|(])\s*(?:if|then|elif|else|fi|for|while|until|do|done|case|esac|function)\b"
+    r"|[{}]"
+)
 
 
 def _scannable(command: str) -> str:
@@ -185,6 +194,8 @@ def resolved_bash_targets(command: str, cwd: Path) -> list[tuple[str, Path | Non
         (pos, "target", raw) for pos, raw in _positioned_write_targets(scannable)
     ]
     for m in _CWD_OPAQUE.finditer(scannable):
+        events.append((m.start(), "opaque", None))
+    for m in _COMPOUND.finditer(scannable):
         events.append((m.start(), "opaque", None))
     for pos in _bare_ampersands(scannable):
         events.append((pos, "opaque", None))

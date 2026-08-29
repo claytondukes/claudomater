@@ -48,11 +48,17 @@ class GateResult:
 
     def blocking_reasons(self) -> list[str]:
         """Failure-reason strings ready for retry feedback / run_escalated."""
-        return [
-            f"sr-review {f['severity']} at {f.get('file')}:{f.get('line')}: "
-            f"{f['finding']}" + (f" — {f['why']}" if f.get("why") else "")
-            for f in self.blocking
-        ]
+        reasons = []
+        for f in self.blocking:
+            # line is optional — "a.py:None" is not actionable feedback
+            location = f["file"]
+            if f.get("line") is not None:
+                location += f":{f['line']}"
+            reasons.append(
+                f"sr-review {f['severity']} at {location}: {f['finding']}"
+                + (f" — {f['why']}" if f.get("why") else "")
+            )
+        return reasons
 
 
 def review_gate(findings: Any, floor: str) -> GateResult:

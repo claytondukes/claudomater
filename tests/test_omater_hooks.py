@@ -338,6 +338,25 @@ class TestBashFence:
         allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
         assert not allow
 
+    def test_cd_inside_compound_control_flow_fails_open(self, tmp_path):
+        """A cd inside `if false; then … fi`, a function body, or a
+        zero-iteration loop may never execute — applying it guess-denied a
+        write that lands in the original cwd. Compound keywords make the
+        tracked cwd opaque; absolute targets still enforce."""
+        for cmd in (
+            "if false; then\n cd /etc\nfi\ncat > out.txt",
+            "while false; do cd /etc; done; cat > out.txt",
+            "deploy() { cd /etc; }; cat > out.txt",
+        ):
+            p = payload("Bash", command=cmd)
+            p["cwd"] = str(tmp_path)
+            allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+            assert allow, (cmd, reason)
+        p = payload("Bash", command="if true; then cat > /tmp_probe/x; fi")
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+
     def test_guarded_cd_applies_within_its_list_and_voids_after_it(self, tmp_path):
         """`A && cd /x` is conditional: within the same && list every later
         member ran only if the cd succeeded (apply), but past the `;` the
