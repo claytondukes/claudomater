@@ -274,6 +274,8 @@ class TestBashFence:
             "cd /etc | cat > out.txt",  # pipeline segment = subshell
             "cd /etc & cat > out.txt",  # backgrounded cd = subshell
             "false || cd /etc; cat > out.txt",  # ||-guarded: conditional
+            "cd /definitely-missing || cat > out.txt",  # || RHS = cd FAILED
+            "cd /etc >/dev/null & cat > out.txt",  # redirect hid the `&`
         ):
             p = payload("Bash", command=cmd)
             p["cwd"] = str(tmp_path)
@@ -311,6 +313,27 @@ class TestBashFence:
         assert allow, reason
         # ...while a target in the NEXT segment is post-cd and still denies
         p = payload("Bash", command="cd /etc > cd.log && cat > shadow")
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+
+    def test_pushd_n_does_not_move_the_cwd(self, tmp_path):
+        """pushd -n updates the directory stack only — the cwd stays put, so
+        a following relative write is still in-tree (was a false deny)."""
+        p = payload("Bash", command="pushd -n /etc && cat > out.txt")
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+        # plain pushd still tracks
+        p = payload("Bash", command="pushd /etc && cat > out.txt")
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+
+    def test_redirect_does_not_stop_cd_from_applying_across_and_and(self, tmp_path):
+        """`cd /etc >/dev/null && cat > x`: the redirect belongs to the cd,
+        but the && boundary still applies the cd for the next segment."""
+        p = payload("Bash", command="cd /etc >/dev/null && cat > x")
         p["cwd"] = str(tmp_path)
         allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
         assert not allow
