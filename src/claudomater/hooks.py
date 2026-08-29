@@ -126,8 +126,16 @@ def evaluate_pre_tool_use(
     scratch = [
         Path(os.path.realpath(d)) for d in scratch_dirs_for(root, env)
     ]
+    # A relative cwd would make relative tool paths resolve against the hook
+    # PROCESS's working directory — environment-dependent decisions and an
+    # avoidable bypass surface. Only an absolute cwd is trusted; anything
+    # else falls back to the project root.
     raw_cwd = payload.get("cwd")
-    cwd = Path(raw_cwd) if isinstance(raw_cwd, str) and raw_cwd else root
+    cwd = root
+    if isinstance(raw_cwd, str) and raw_cwd:
+        candidate = Path(os.path.expanduser(raw_cwd))
+        if candidate.is_absolute():
+            cwd = candidate
     tool = payload.get("tool_name", "")
     tool_input = payload.get("tool_input")
     if not isinstance(tool_input, dict):

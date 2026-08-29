@@ -51,6 +51,19 @@ def runs_root(project_root: Path | str) -> Path:
     return Path(project_root) / OMATER_DIR / RUNS_DIR
 
 
+def _remove_lock(lock: Path) -> None:
+    """Remove the create lock whatever it is. rmtree alone silently no-ops
+    on a file/symlink (tampering, older versions), leaving run creation
+    permanently wedged on 'in progress'."""
+    try:
+        if lock.is_symlink() or lock.is_file():
+            lock.unlink(missing_ok=True)
+        else:
+            shutil.rmtree(lock, ignore_errors=True)
+    except OSError:
+        pass
+
+
 def validate_run_id(run_id: str) -> str:
     """A run id is a simple directory name. Anything with path separators
     (or dot-names) could escape `.omater/runs/` — a path-traversal hole and
@@ -101,7 +114,7 @@ class RunLog:
                 raise RunError(
                     f"another run creation is in progress (lock {lock})"
                 ) from None
-            shutil.rmtree(lock, ignore_errors=True)
+            _remove_lock(lock)
             try:
                 lock.mkdir()
             except FileExistsError:
@@ -111,7 +124,7 @@ class RunLog:
         try:
             return cls._create_locked(root, run_id)
         finally:
-            shutil.rmtree(lock, ignore_errors=True)
+            _remove_lock(lock)
 
     @classmethod
     def _create_locked(cls, root: Path, run_id: str | None) -> "RunLog":

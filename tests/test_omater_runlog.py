@@ -50,6 +50,23 @@ class TestRunLifecycle:
         assert log.is_live()
         assert not lock.exists()  # released after create
 
+    def test_file_shaped_lock_cannot_wedge_create_forever(self, tmp_path):
+        """rmtree silently no-ops on a file lock — a stale FILE at the lock
+        path must still be broken, not wedge creation permanently."""
+        import os
+        import time as _time
+
+        from claudomater.runlog import CREATE_LOCK, runs_root as rr
+
+        rr(tmp_path).mkdir(parents=True)
+        lock = rr(tmp_path) / CREATE_LOCK
+        lock.write_text("tampered", encoding="utf-8")  # file, not dir
+        old = _time.time() - 300
+        os.utime(lock, (old, old))
+        log = RunLog.create(tmp_path)
+        assert log.is_live()
+        assert not lock.exists()
+
     def test_failed_create_leaves_no_orphans(self, tmp_path, monkeypatch):
         """An IO failure after mkdir must not strand an orphan run dir or a
         dangling current link — repeated attempts would accumulate them."""

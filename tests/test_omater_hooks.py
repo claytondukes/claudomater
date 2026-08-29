@@ -39,6 +39,19 @@ class TestWriteToolFence:
         allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
         assert not allow
 
+    def test_relative_cwd_falls_back_to_project_root(self, tmp_path):
+        """A relative cwd in the payload is untrusted — resolving against
+        the hook process's own working directory would make decisions
+        environment-dependent."""
+        p = payload("Write", file_path="inside.txt")
+        p["cwd"] = "some/relative/dir"
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason  # resolved against root, in-tree
+        p = payload("Write", file_path="../escape.txt")
+        p["cwd"] = "some/relative/dir"
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow  # root/../escape.txt is out of tree
+
     def test_scratch_dir_allowed(self, tmp_path):
         allow, _ = hooks.evaluate_pre_tool_use(
             payload(
