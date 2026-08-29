@@ -484,7 +484,17 @@ def _used_models(model_usage: Any) -> Any:
             k not in _CONSUMPTION_FIELDS and k not in _CAPACITY_FIELDS and _is_number(v)
             for k, v in stats.items()
         )
-        if known and not unknown_numeric and all(v == 0 for v in known):
+        # a recognized counter in an unrecognized shape ({"inputTokens":
+        # "5"}) means the zeros we CAN read do not establish "unused"
+        malformed_known = any(
+            k in _CONSUMPTION_FIELDS and not _is_number(v) for k, v in stats.items()
+        )
+        if (
+            known
+            and not unknown_numeric
+            and not malformed_known
+            and all(v == 0 for v in known)
+        ):
             continue
         kept[model] = stats
     return kept or None

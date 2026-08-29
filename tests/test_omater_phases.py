@@ -795,8 +795,9 @@ class TestFullSessionCapture:
             "a": {"futureCapacity": 0},  # no known counters -> kept
             "b": {"inputTokens": 0, "costUSD": 0, "futureThing": 0},  # unknown numeric -> kept
             "c": {"inputTokens": 0, "costUSD": 0, "provider": "x"},  # known all-zero -> dropped
+            "d": {"inputTokens": "5", "costUSD": 0},  # malformed known counter -> kept
         }
-        assert list(_used_models(usage)) == ["a", "b"]
+        assert list(_used_models(usage)) == ["a", "b", "d"]
         assert _used_models("weird") == "weird"
         assert _used_models({"m": {"inputTokens": 0}}) is None
 

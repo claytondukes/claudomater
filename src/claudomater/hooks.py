@@ -213,6 +213,18 @@ def resolved_bash_targets(command: str, cwd: Path) -> list[tuple[str, Path | Non
                 (m.group(1), m.group(2), m.group(3), m.group(4), unusable),
             )
         )
+        if m.group(1) == "&&" and not unusable:
+            # A &&-guarded cd is CONDITIONAL: within its own && list every
+            # later member runs only if the cd succeeded, so applying it is
+            # sound — but past the list's end (`;`, newline, `)`) execution
+            # resumes whether or not the guard passed, and the cwd there is
+            # unknowable (`false && cd /etc; cat > out.txt` writes in the
+            # ORIGINAL cwd). Void the tracked cwd at the list boundary.
+            list_end = effect_pos
+            while list_end < len(scannable) and scannable[list_end] not in ";\n)":
+                list_end += 1
+            if list_end < len(scannable):
+                events.append((list_end, "opaque", None))
     # Same-position ties: resolve targets first (pre-cd), apply the cd next,
     # and let an opacity marker (e.g. the `)` closing a subshell that both
     # ends the cd's segment and discards its effect) win last.
@@ -244,6 +256,13 @@ def resolved_bash_targets(command: str, cwd: Path) -> list[tuple[str, Path | Non
             continue
         target = str(target or "")
         if not target or target == "-" or "$" in target or "_quoted_data_" in target:
+            current = None
+            continue
+        if "\\" in target or (verb == "pushd" and re.fullmatch(r"[+-]\d+", target)):
+            # Not a literal path: a backslash means the token was truncated
+            # at an escaped character (`cd a\ b/c` scans as `a\`), and
+            # pushd +N/-N rotates the directory stack to an entry this scan
+            # cannot know. Both -> unknown, fail open.
             current = None
             continue
         step = Path(os.path.expanduser(target))

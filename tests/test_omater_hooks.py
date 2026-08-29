@@ -338,6 +338,36 @@ class TestBashFence:
         allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
         assert not allow
 
+    def test_guarded_cd_applies_within_its_list_and_voids_after_it(self, tmp_path):
+        """`A && cd /x` is conditional: within the same && list every later
+        member ran only if the cd succeeded (apply), but past the `;` the
+        guard's outcome is unknowable — `false && cd /etc; cat > out.txt`
+        writes in the ORIGINAL cwd and was falsely denied."""
+        p = payload("Bash", command="false && cd /etc; cat > out.txt")
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+        # within the guarded list the cd is sound and still denies
+        p = payload("Bash", command="true && cd /etc && cat > shadow")
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+
+    def test_non_literal_cd_targets_fail_open(self, tmp_path):
+        """Backslash-escaped whitespace truncates the scanned token (`cd
+        a\\ b/c` reads as `a\\`), and pushd +N/-N rotates the directory
+        stack — neither names a knowable path, so relative targets after
+        them must fail open, never resolve against a wrong guess."""
+        for cmd in (
+            "cd a\\ b/c && cat > ../../.omater/scratch/x",
+            "pushd +1 && cat > out.txt",
+            "pushd -2 && cat > out.txt",
+        ):
+            p = payload("Bash", command=cmd)
+            p["cwd"] = str(tmp_path)
+            allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+            assert allow, (cmd, reason)
+
     def test_fd_duplication_ampersand_is_not_a_control_operator(self, tmp_path):
         """`cd /etc >/dev/null 2>&1 && cat > passwd`: the `&` in `2>&1` is
         fd duplication, not backgrounding — the cd still applies at the &&
