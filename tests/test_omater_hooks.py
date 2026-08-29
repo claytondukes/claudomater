@@ -433,6 +433,42 @@ class TestBashFence:
             allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
             assert allow, (cmd, reason)
 
+    def test_dash_p_realpaths_before_lexical_normalization(self, tmp_path):
+        """`cd link && cd -P ..` lands in the link TARGET's parent —
+        normalizing `..` away first erased the symlink hop and let the
+        out-of-tree write pass."""
+        outside = tmp_path / "outside-tree"
+        (outside / "child").mkdir(parents=True)
+        root = tmp_path / "project"
+        root.mkdir()
+        (root / "link").symlink_to(outside / "child")
+        p = payload("Bash", command="cd link && cd -P .. && cat > out.txt")
+        p["cwd"] = str(root)
+        allow, _ = hooks.evaluate_pre_tool_use(p, root)
+        assert not allow
+
+    def test_popd_n_does_not_move_the_cwd(self, tmp_path):
+        """popd -n edits the stack only — discarding a known cwd there made
+        the fence miss a still-in-/etc relative write."""
+        p = payload("Bash", command="cd /etc; popd -n; cat > passwd")
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+
+    def test_assignment_prefixed_source_voids_tracking(self, tmp_path):
+        """`MODE=x source env.sh` is valid bash and the sourced code can cd
+        anywhere — missing the prefix form kept a stale cwd that falsely
+        denied a legitimate relative write."""
+        (tmp_path / "server").mkdir()
+        cmd = (
+            f"cd {tmp_path}/server && MODE=x source setup.sh && "
+            "cat > ../../might-be-fine.txt"
+        )
+        p = payload("Bash", command=cmd)
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+
     def test_command_opacity_lands_after_its_own_redirects(self, tmp_path):
         """Redirects attached to a command open BEFORE it runs: after
         `cd /etc`, `source env.sh > audit.log` writes /etc/audit.log — the

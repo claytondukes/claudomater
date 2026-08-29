@@ -254,7 +254,9 @@ _COMPOUND = re.compile(
 # their opacity is soft (an unconditional absolute cd afterwards recovers) —
 # unlike a compound body, whose extent is unparseable (hard, above).
 _SHELL_EXEC = re.compile(
-    r"(?:^|[\n;&|(])\s*(?:(?:eval|source)\b|\.(?![^\s;&|)\n]))"
+    r"(?:^|[\n;&|(])\s*"
+    r"(?:[A-Za-z_][A-Za-z0-9_]*=[^\s;|&<>()]*[ \t]+)*"  # MODE=x source ... is valid
+    r"(?:(?:eval|source)\b|\.(?![^\s;&|)\n]))"
 )
 
 
@@ -466,14 +468,19 @@ def resolved_bash_targets(
             # inside (or after) an unmodeled compound body: even an
             # absolute cd may never have executed — no recovery
             continue
+        flags = str(flags or "")
+        # -n manipulates the directory STACK without changing the working
+        # directory — for BOTH stack builtins the cwd genuinely stays put
+        # (checked before the generic popd-unknown). A trailing `-n` with no
+        # operand lands in the TARGET slot (the flags group needs a trailing
+        # space), so check both.
+        if verb in ("pushd", "popd") and (
+            "-n" in flags.split() or str(target or "") == "-n"
+        ):
+            continue
         if sep == "|" or sep == "||" or unusable or verb == "popd":
             current = None
             cd_applied_in_list = False
-            continue
-        flags = str(flags or "")
-        if verb == "pushd" and "-n" in flags.split():
-            # pushd -n updates the directory STACK without changing the
-            # working directory — the cwd genuinely stays where it is
             continue
         target = str(target or "")
         # any dash-leading remnant is an option, `-` (OLDPWD), or a flag the
@@ -516,8 +523,13 @@ def resolved_bash_targets(
             new_cwd = posixpath.join(str(current), str(step))
         else:
             continue  # relative cd from an unknown cwd stays unknown
-        new_cwd = posixpath.normpath(new_cwd)
-        current = Path(os.path.realpath(new_cwd)) if physical else Path(new_cwd)
+        if physical:
+            # realpath the UNNORMALIZED join: lexically dropping `..` first
+            # would erase the symlink hop -P exists to resolve
+            # (`cd link && cd -P ..` lands in the link TARGET's parent)
+            current = Path(os.path.realpath(new_cwd))
+        else:
+            current = Path(posixpath.normpath(new_cwd))
         cd_applied_in_list = True
     return out
 
