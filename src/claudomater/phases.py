@@ -127,7 +127,12 @@ class ClaudeCliExecutor:
         try:
             payload = json.loads(proc.stdout)
             if isinstance(payload, dict):
-                text = payload.get("result") or proc.stdout
+                result_text = payload.get("result")
+                # string check, not truthiness: an EMPTY result must stay
+                # empty — falling back to the raw JSON wrapper pollutes the
+                # transcript and can be mis-parsed as the phase result
+                if isinstance(result_text, str):
+                    text = result_text
                 usage = payload.get("usage")
         except (json.JSONDecodeError, ValueError):
             pass

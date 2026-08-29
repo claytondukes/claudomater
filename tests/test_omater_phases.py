@@ -107,6 +107,24 @@ class TestClaudeCliExecutor:
         assert argv[argv.index("--permission-mode") + 1] == "bypassPermissions"
         assert ex.cwd == tmp_path
 
+    def test_empty_result_string_is_preserved(self, tmp_path):
+        """An empty `result` in the CLI's JSON wrapper must stay empty —
+        truthiness fallback returned the raw wrapper, which pollutes the
+        transcript and can be mis-parsed as the phase result."""
+        from claudomater.phases import ClaudeCliExecutor
+
+        stub = tmp_path / "claude-stub"
+        stub.write_text(
+            '#!/bin/sh\necho \'{"result": "", "usage": {"output_tokens": 1}}\'\n',
+            encoding="utf-8",
+        )
+        stub.chmod(0o755)
+        result = ClaudeCliExecutor(claude_bin=str(stub)).run(
+            PhaseSpec("dev", "m", "p"), "m"
+        )
+        assert result.text == ""
+        assert result.token_usage == {"output_tokens": 1}
+
     def test_permission_mode_is_a_knob(self):
         from claudomater.phases import ClaudeCliExecutor
 
