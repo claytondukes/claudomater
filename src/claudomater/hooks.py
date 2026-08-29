@@ -709,7 +709,20 @@ def resolved_bash_targets(
             return _escape_parity(scannable, m.start(1)) == 0
         return True
 
-    chdir_matches = [m for m in _CHDIR.finditer(scannable) if _real_separator(m)]
+    def _in_arith(pos: int) -> bool:
+        # identifiers inside arithmetic are VARIABLES, not builtins:
+        # `((cd /etc))` evaluates `cd / etc` and moves nothing — applying
+        # it falsely denied an in-root write, and voiding on the token
+        # would trade that for a miss. Neither: arithmetic cds are inert
+        # (one in a NESTED substitution is subshell-scoped, and the impure
+        # span's parens already void tracking).
+        return any(start <= pos < end for start, end in arith)
+
+    chdir_matches = [
+        m
+        for m in _CHDIR.finditer(scannable)
+        if _real_separator(m) and not _in_arith(m.start(2))
+    ]
     matched_verb_spans = [(m.start(2), m.end(2)) for m in chdir_matches]
     def _cd_word_can_execute(pos: int) -> bool:
         # An unmatched cd-ish token can move THIS shell's cwd only when
@@ -736,9 +749,11 @@ def resolved_bash_targets(
         # Effect at the segment boundary: a redirect attached to the same
         # command (`command cd /etc > ../escape.txt`) opens against the
         # PRE-command cwd and must still resolve (and deny).
-        if not any(
-            start <= m.start() < end for start, end in matched_verb_spans
-        ) and _cd_word_can_execute(m.start()):
+        if (
+            not any(start <= m.start() < end for start, end in matched_verb_spans)
+            and not _in_arith(m.start())
+            and _cd_word_can_execute(m.start())
+        ):
             events.append((_segment_boundary(scannable, m.end()), "opaque", None))
     for m in chdir_matches:
         # The cd takes effect at its segment's END, not at the verb: a

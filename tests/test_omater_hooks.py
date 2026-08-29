@@ -553,6 +553,21 @@ class TestBashFence:
             allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
             assert allow, (cmd, reason)
 
+    def test_identifiers_inside_arithmetic_are_not_builtins(self, tmp_path):
+        """`((cd /etc))` evaluates the arithmetic expression `cd / etc` —
+        no chdir happens, and applying the target falsely denied the
+        in-root write. A cd token inside arithmetic must not void
+        tracking either: `cd /etc; ((cd /tmp))` keeps /etc and the later
+        relative write stays recognized."""
+        p = payload("Bash", command="((cd /etc)); cat > passwd")
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+        p = payload("Bash", command="cd /etc; ((cd /tmp)); cat > passwd")
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+
     def test_escaped_separators_are_not_command_anchors_anywhere(self, tmp_path):
         """The parity rule applies at EVERY command-position scan: an
         escaped `;`/`|` is word data, so the word after it is an ARGUMENT
