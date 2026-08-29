@@ -63,20 +63,27 @@ def review_gate(findings: Any, floor: str) -> GateResult:
     or above the floor blocks. An empty list passes — whether an empty list
     is *believable* is the caller's judgment, not this gate's.
     """
-    if floor not in SEVERITY_RANK:
+    # Type checks BEFORE membership/truthiness: an unhashable severity or
+    # floor (a list decoded from malformed agent output) must raise
+    # GateError, never a TypeError the fail-closed caller isn't catching.
+    if not isinstance(floor, str) or floor not in SEVERITY_RANK:
         raise GateError(f"unknown review floor {floor!r} (known: {SEVERITIES})")
     if not isinstance(findings, list):
         raise GateError(f"findings must be a list, got {type(findings).__name__}")
     for i, f in enumerate(findings):
         if not isinstance(f, dict):
             raise GateError(f"finding {i} is not an object: {f!r}")
-        if f.get("severity") not in SEVERITY_RANK:
+        severity = f.get("severity")
+        if not isinstance(severity, str) or severity not in SEVERITY_RANK:
             raise GateError(
-                f"finding {i} has unknown severity {f.get('severity')!r} "
+                f"finding {i} has unknown severity {severity!r} "
                 f"(known: {SEVERITIES})"
             )
-        if not f.get("finding") or not f.get("file"):
-            raise GateError(f"finding {i} lacks 'finding'/'file': {f!r}")
+        for key in ("finding", "file"):
+            if not isinstance(f.get(key), str) or not f[key]:
+                raise GateError(
+                    f"finding {i}: {key!r} must be a non-empty string: {f!r}"
+                )
     floor_rank = SEVERITY_RANK[floor]
     blocking = [f for f in findings if SEVERITY_RANK[f["severity"]] >= floor_rank]
     return GateResult(floor=floor, findings=list(findings), blocking=blocking)

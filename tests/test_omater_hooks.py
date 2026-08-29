@@ -301,6 +301,28 @@ class TestBashFence:
         allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
         assert not allow
 
+    def test_redirect_on_the_cd_command_itself_is_pre_cd(self, tmp_path):
+        """Bash opens redirections BEFORE running the builtin: `cd /etc >
+        cd.log` creates ./cd.log in the pre-cd cwd. Resolving it post-cd
+        falsely denied an in-tree write."""
+        p = payload("Bash", command="cd /etc > cd.log")
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+        # ...while a target in the NEXT segment is post-cd and still denies
+        p = payload("Bash", command="cd /etc > cd.log && cat > shadow")
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+
+    def test_double_dash_option_terminator_is_not_the_directory(self, tmp_path):
+        """`cd -- /etc && cat > passwd`: parsing `--` as the target pinned
+        the cwd to <root>/-- and let the /etc/passwd write through."""
+        p = payload("Bash", command="cd -- /etc && cat > passwd")
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+
     def test_cd_mentioned_in_prose_does_not_move_the_cwd(self, tmp_path):
         """Only cd at a command position counts: `echo cd /etc` is prose."""
         p = payload("Bash", command="echo cd /etc; cat > out.txt")

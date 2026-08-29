@@ -69,6 +69,21 @@ class TestReviewGate:
         with pytest.raises(GateError, match="unknown review floor"):
             review_gate([], "BLOCKER")
 
+    def test_unhashable_and_non_string_values_raise_gate_error_not_type_error(self):
+        """Malformed agent output can decode to ANY JSON type. Every invalid
+        shape must surface as GateError — a TypeError from dict membership
+        would bypass the fail-closed catch at the call site."""
+        with pytest.raises(GateError):
+            review_gate([], ["MUST-FIX"])  # unhashable floor
+        with pytest.raises(GateError):
+            review_gate(
+                [{"severity": [], "file": "x", "finding": "y"}], "MUST-FIX"
+            )  # unhashable severity
+        for bad_field in ({"file": 42}, {"finding": ["y"]}, {"file": True}):
+            f = {"severity": "NOTE", "file": "x", "finding": "y", **bad_field}
+            with pytest.raises(GateError, match="non-empty string"):
+                review_gate([f], "MUST-FIX")
+
     def test_blocking_reasons_feed_retry_and_escalation(self):
         gate = review_gate(
             [finding("MUST-FIX", file="a.py", line=7)], "MUST-FIX"

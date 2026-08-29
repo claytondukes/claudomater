@@ -83,8 +83,12 @@ _COPY = re.compile(r"\b(?:cp|mv|rsync|install)\s+(?:-[^\s]+\s+)*(?:[^\s;|&<>()]+
 # runs in a subshell and moves NOTHING), group 2 = verb, group 3 = target
 # token ('' when bare / immediately followed by && etc).
 _CHDIR = re.compile(
-    r"(^|\|\||&&|[\n;&|(])\s*(cd|pushd|popd)\b\s*(?:-[A-Za-z]+\s+)*([^\s;|&<>()]*)"
+    r"(^|\|\||&&|[\n;&|(])\s*(cd|pushd|popd)\b\s*(?:--\s+|-[A-Za-z]+\s+)*([^\s;|&<>()]*)"
 )
+# End of a command segment: where a cd's effect BEGINS. Redirections on the
+# cd command itself (`cd /etc > cd.log`) are opened by the shell BEFORE the
+# builtin runs, so they resolve against the pre-cd cwd.
+_SEGMENT_END = re.compile(r"[;&|\n)]")
 # Constructs that make the effective cwd untrackable from here on: subshells
 # and command substitution (both paren forms) and backticks.
 _CWD_OPAQUE = re.compile(r"[()`]")
@@ -155,10 +159,19 @@ def resolved_bash_targets(command: str, cwd: Path) -> list[tuple[str, Path | Non
         backgrounded = (
             rest.startswith("&") and not rest.startswith("&&")
         ) or (rest.startswith("|") and not rest.startswith("||"))
+        # The cd takes effect at its segment's END, not at the verb: a
+        # redirect attached to the cd command itself (`cd /etc > cd.log`)
+        # opens against the PRE-cd cwd.
+        seg = _SEGMENT_END.search(scannable, m.end())
+        effect_pos = seg.start() if seg else len(scannable)
         events.append(
-            (m.start(2), "chdir", (m.group(1), m.group(2), m.group(3), backgrounded))
+            (effect_pos, "chdir", (m.group(1), m.group(2), m.group(3), backgrounded))
         )
-    events.sort(key=lambda e: e[0])
+    # Same-position ties: resolve targets first (pre-cd), apply the cd next,
+    # and let an opacity marker (e.g. the `)` closing a subshell that both
+    # ends the cd's segment and discards its effect) win last.
+    priority = {"target": 0, "chdir": 1, "opaque": 2}
+    events.sort(key=lambda e: (e[0], priority[e[1]]))
 
     current: Path | None = cwd
     out: list[tuple[str, Path | None]] = []
