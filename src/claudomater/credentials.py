@@ -87,8 +87,14 @@ def _token_from_credentials_blob(blob: str) -> str | None:
         data = json.loads(blob)
     except (json.JSONDecodeError, ValueError):
         return None
-    token = (data.get("claudeAiOauth") or {}).get("accessToken")
-    return token or None
+    if not isinstance(data, dict):
+        return None
+    oauth = data.get("claudeAiOauth")
+    token = oauth.get("accessToken") if isinstance(oauth, dict) else None
+    # strictly a non-empty string: a number/object here would crash
+    # token.encode() in account_identity and breach the never-raises
+    # contract of the refresh path
+    return token if isinstance(token, str) and token else None
 
 
 def default_providers() -> list[Any]:

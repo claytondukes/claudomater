@@ -455,6 +455,20 @@ class TestCredentialProviders:
         path.write_text("not json", encoding="utf-8")
         assert CredsFileProvider(path).get_token() is None
 
+    def test_non_string_access_token_is_none(self, tmp_path):
+        """A number/object accessToken would crash token.encode() downstream
+        and breach the refresh path's never-raises contract."""
+        path = tmp_path / ".credentials.json"
+        for blob in (
+            {"claudeAiOauth": {"accessToken": 12345}},
+            {"claudeAiOauth": {"accessToken": {"nested": "x"}}},
+            {"claudeAiOauth": {"accessToken": ""}},
+            {"claudeAiOauth": "not-a-dict"},
+            ["not-a-dict-at-all"],
+        ):
+            path.write_text(json.dumps(blob), encoding="utf-8")
+            assert CredsFileProvider(path).get_token() is None, blob
+
     def test_acquire_token_chain_order_and_fail_closed(self, tmp_path):
         with pytest.raises(CredentialsUnavailable):
             acquire_token([EnvTokenProvider(env={})])

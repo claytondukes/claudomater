@@ -30,6 +30,26 @@ class TestRunLifecycle:
         current = runs_root(tmp_path) / "current"
         assert current.resolve().name == "run-b"
 
+    def test_concurrent_create_is_locked(self, tmp_path):
+        """A held (fresh) create lock blocks a second create instead of
+        letting last-repoint-wins orphan the first run."""
+        import os
+        import time as _time
+
+        from claudomater.runlog import CREATE_LOCK, runs_root as rr
+
+        rr(tmp_path).mkdir(parents=True)
+        lock = rr(tmp_path) / CREATE_LOCK
+        lock.mkdir()  # another process is mid-create
+        with pytest.raises(RunError, match="in progress"):
+            RunLog.create(tmp_path)
+        # a stale lock (crashed holder) is broken and create proceeds
+        old = _time.time() - 300
+        os.utime(lock, (old, old))
+        log = RunLog.create(tmp_path)
+        assert log.is_live()
+        assert not lock.exists()  # released after create
+
     def test_failed_create_leaves_no_orphans(self, tmp_path, monkeypatch):
         """An IO failure after mkdir must not strand an orphan run dir or a
         dangling current link — repeated attempts would accumulate them."""

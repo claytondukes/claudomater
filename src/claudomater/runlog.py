@@ -30,6 +30,8 @@ PROGRESS_LOG = "progress.log"
 EVENTS_JSONL = "events.jsonl"
 CONTROL_JSONL = "control.jsonl"
 TRANSCRIPTS_DIR = "transcripts"
+CREATE_LOCK = ".create.lock"
+CREATE_LOCK_STALE_S = 60
 
 # Events that end a run; a run whose last event is none of these is live.
 TERMINAL_EVENTS = {"run-complete", "run-aborted", "run-failed"}
@@ -81,6 +83,38 @@ class RunLog:
     @classmethod
     def create(cls, project_root: Path | str, run_id: str | None = None) -> "RunLog":
         root = runs_root(project_root)
+        root.mkdir(parents=True, exist_ok=True)
+        # One-live-run is check-then-act; without a lock, two concurrent
+        # starts both pass the liveness check and the last `current` repoint
+        # wins, orphaning the other run. mkdir is the atomic mutex (same
+        # pattern the statusline uses); a crash while holding it goes stale
+        # and is broken after CREATE_LOCK_STALE_S.
+        lock = root / CREATE_LOCK
+        try:
+            lock.mkdir()
+        except FileExistsError:
+            try:
+                age = time.time() - lock.stat().st_mtime
+            except OSError:
+                age = 0.0
+            if age <= CREATE_LOCK_STALE_S:
+                raise RunError(
+                    f"another run creation is in progress (lock {lock})"
+                ) from None
+            shutil.rmtree(lock, ignore_errors=True)
+            try:
+                lock.mkdir()
+            except FileExistsError:
+                raise RunError(
+                    f"another run creation is in progress (lock {lock})"
+                ) from None
+        try:
+            return cls._create_locked(root, run_id)
+        finally:
+            shutil.rmtree(lock, ignore_errors=True)
+
+    @classmethod
+    def _create_locked(cls, root: Path, run_id: str | None) -> "RunLog":
         current = root / CURRENT_LINK
         if current.exists() and not current.is_symlink():
             # Fail BEFORE creating the run dir — failing later (in
