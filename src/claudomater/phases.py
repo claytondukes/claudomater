@@ -16,12 +16,15 @@ Survival contracts honored here:
 
 from __future__ import annotations
 
+import inspect
 import json
+import os
 import re
+import signal
 import subprocess
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any, Callable, Protocol
+from typing import Any, Callable, Protocol, Sequence
 
 from claudomater import notify as notify_mod
 from claudomater.config import UserConfig
@@ -51,6 +54,15 @@ class ExecutionResult:
     text: str
     returncode: int = 0
     token_usage: dict[str, Any] | None = None  # cost accounting per phase
+    # Full-session capture (stream-json): everything the agent DID — tool
+    # calls, file edits, test runs — not just its final message. None means
+    # the executor could only capture the final text.
+    transcript: str | None = None
+    cost_usd: float | None = None  # the CLI's own total_cost_usd
+    model_usage: dict[str, Any] | None = None  # per-model token/cost splits
+    # Structured denial list from the CLI envelope — the §3 zero-stall /
+    # fence-audit metric, measured instead of inferred.
+    permission_denials: list[Any] | None = None
 
 
 class Executor(Protocol):
@@ -76,8 +88,19 @@ class ClaudeCliExecutor:
       file. The containment for bypassed permissions is the PreToolUse write
       fence provisioned by `omater init` (design §3/§12), which is why
       `omater start` refuses to run when that hook has drifted.
-    - `--output-format json` gives us the result text plus token usage for
-      the run report's cost accounting.
+    - `--output-format stream-json --verbose` (the CLI requires --verbose
+      with stream-json in print mode) captures the agent's FULL session —
+      tool calls, file edits, test runs — as the retained transcript. The
+      plain `json` format keeps only the final message (measured: 706 bytes
+      for a whole story), which breaks §3's post-mortem promise.
+    - the terminal `result` event also carries `total_cost_usd`,
+      `modelUsage`, and `permission_denials`; all three land in
+      `run_event.detail` so dollar cost is recorded (not re-derived from
+      pricing tables) and the zero-stall/fence metric is measured.
+    - the child runs in its own session (process group) and its PID is
+      reported through `on_spawn` BEFORE any waiting, so the run log records
+      it write-ahead and an adopting orchestrator can reap a still-live
+      orphan instead of racing it in the same worktree.
     """
 
     def __init__(
@@ -100,43 +123,90 @@ class ClaudeCliExecutor:
             "--model",
             model,
             "--output-format",
-            "json",
+            "stream-json",
+            "--verbose",
         ]
         if self.permission_mode:
             argv += ["--permission-mode", self.permission_mode]
         return argv + list(self.extra_args)
 
-    def run(self, spec: PhaseSpec, model: str) -> ExecutionResult:
+    def run(
+        self,
+        spec: PhaseSpec,
+        model: str,
+        on_spawn: Callable[[int], None] | None = None,
+    ) -> ExecutionResult:
+        proc = subprocess.Popen(
+            self.build_argv(spec, model),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            cwd=self.cwd,
+            start_new_session=True,
+        )
+        if on_spawn is not None:
+            on_spawn(proc.pid)
         try:
-            proc = subprocess.run(
-                self.build_argv(spec, model),
-                capture_output=True,
-                text=True,
-                timeout=spec.timeout_s,
-                cwd=self.cwd,
-            )
+            stdout, _stderr = proc.communicate(timeout=spec.timeout_s)
         except subprocess.TimeoutExpired as exc:
-            partial = exc.stdout
-            if isinstance(partial, bytes):
-                partial = partial.decode("utf-8", errors="replace")
+            # Kill the whole process group: killing only the leader leaves
+            # grandchildren (test runners, builds) running unsupervised.
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except OSError:
+                proc.kill()
+            stdout, _stderr = proc.communicate()
             raise PhaseTimeout(
                 f"phase {spec.name!r} exceeded {spec.timeout_s}s",
-                partial_text=partial,
+                partial_text=stdout,
             ) from exc
-        text, usage = proc.stdout, None
-        try:
-            payload = json.loads(proc.stdout)
+        result = self._parse_output(stdout)
+        result.returncode = proc.returncode
+        return result
+
+    @staticmethod
+    def _parse_output(stdout: str) -> ExecutionResult:
+        """stream-json: one JSON object per line; the terminal `result` event
+        carries the result text and the accounting fields. A single-object
+        payload (the old `json` format, reachable via extra_args) still
+        parses. Anything else is passed through raw."""
+        final: dict[str, Any] | None = None
+        object_lines = 0
+        for line in stdout.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                payload = json.loads(line)
+            except (json.JSONDecodeError, ValueError):
+                continue
             if isinstance(payload, dict):
-                result_text = payload.get("result")
-                # string check, not truthiness: an EMPTY result must stay
-                # empty — falling back to the raw JSON wrapper pollutes the
-                # transcript and can be mis-parsed as the phase result
-                if isinstance(result_text, str):
-                    text = result_text
-                usage = payload.get("usage")
-        except (json.JSONDecodeError, ValueError):
-            pass
-        return ExecutionResult(text=text, returncode=proc.returncode, token_usage=usage)
+                object_lines += 1
+                if payload.get("type") == "result" or "result" in payload:
+                    final = payload
+        if final is None:
+            if object_lines > 1:
+                # A session stream that never reached its result event — the
+                # agent died mid-run. The stream is still the transcript, but
+                # there is NO result: letting raw event objects reach
+                # extract_json_result would hand the runner a stream event as
+                # a bogus phase result.
+                return ExecutionResult(text="", transcript=stdout)
+            return ExecutionResult(text=stdout)
+        result_text = final.get("result")
+        # string check, not truthiness: an EMPTY result must stay empty —
+        # falling back to the raw wrapper pollutes the transcript and can be
+        # mis-parsed as the phase result
+        text = result_text if isinstance(result_text, str) else stdout
+        return ExecutionResult(
+            text=text,
+            token_usage=final.get("usage"),
+            # a lone result object IS the full output, not a session stream
+            transcript=stdout if object_lines > 1 else None,
+            cost_usd=final.get("total_cost_usd"),
+            model_usage=final.get("modelUsage"),
+            permission_denials=final.get("permission_denials"),
+        )
 
 
 _JSON_FENCE = re.compile(r"```json\s*\n(.*?)```", re.DOTALL)
@@ -172,6 +242,115 @@ def extract_json_result(text: str) -> dict[str, Any] | None:
             pass
         idx = start + 1
     return last
+
+
+RETRY_FEEDBACK_HEADER = "## Previous attempt failures (address these first)"
+
+
+def amend_prompt_with_failures(prompt: str, reasons: Sequence[str]) -> str:
+    """A respawn byte-identical to the failed attempt mostly fails
+    identically (measured: OM-5 failed twice on the same verifier). The
+    verifier reasons already live in the run log; put them in front of the
+    retry agent too."""
+    lines = [f"{i}. {reason}" for i, reason in enumerate(reasons, 1)]
+    return f"{prompt}\n\n{RETRY_FEEDBACK_HEADER}\n" + "\n".join(lines) + "\n"
+
+
+def escalation_spec(
+    spec: PhaseSpec, escalation_model: str, failure_reasons: Sequence[str] = ()
+) -> PhaseSpec:
+    """The §4 escalation rule as a first-class seam: a story with failure
+    history re-drives on the policy's `escalation` model, marked
+    `escalated=True` (never runs degraded), with the failure history amended
+    into the prompt. Callers go through `PhaseRunner.run_escalated` so the
+    amendment is a recorded event, not a silent edit."""
+    prompt = spec.prompt
+    if failure_reasons:
+        prompt = amend_prompt_with_failures(prompt, failure_reasons)
+    return replace(spec, model=escalation_model, escalated=True, prompt=prompt)
+
+
+def _pid_command(pid: int) -> str | None:
+    """The command line a live PID is running, None if it is gone (or
+    unreadable). `ps` rather than /proc so macOS and Linux behave alike."""
+    try:
+        proc = subprocess.run(
+            ["ps", "-o", "command=", "-p", str(pid)],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if proc.returncode != 0:
+        return None
+    return proc.stdout.strip() or None
+
+
+def orphaned_agent_pids(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """`phase-agent-pid` events whose (phase, story, attempt) never got a
+    phase-verified/phase-failed verdict — the write-ahead orphan shape a dead
+    orchestrator leaves. Verdicts answer the most recent open spawn with the
+    same key, so an escalated re-drive of the same story/attempt is tracked
+    separately from the original."""
+    open_spawns: dict[tuple, list[dict[str, Any]]] = {}
+    for ev in events:
+        detail = ev.get("detail") or {}
+        key = (ev.get("phase"), ev.get("story_key"), detail.get("attempt"))
+        if ev.get("event") == "phase-agent-pid" and isinstance(detail.get("pid"), int):
+            open_spawns.setdefault(key, []).append(ev)
+        elif ev.get("event") in ("phase-verified", "phase-failed"):
+            if open_spawns.get(key):
+                open_spawns[key].pop()
+    return [ev for spawns in open_spawns.values() for ev in spawns]
+
+
+def reap_orphaned_agents(
+    runlog: RunLog, expect_command: str = "claude"
+) -> list[dict[str, Any]]:
+    """Kill phase agents a dead orchestrator left running, BEFORE re-driving
+    their stories: a live orphan races the adopting orchestrator's respawn in
+    the same worktree (the crash drill measured an orphan finishing and
+    committing after its orchestrator died).
+
+    PID-reuse guard: a recorded PID now running something whose command does
+    not contain `expect_command` is someone else's process — logged as
+    `pid-reused` and never killed. Kills target the process GROUP (spawn uses
+    start_new_session) so agent grandchildren die too. Idempotent: reaping an
+    already-dead PID just records `already-dead`."""
+    dispositions = []
+    for ev in orphaned_agent_pids(runlog.events()):
+        pid = ev["detail"]["pid"]
+        # write-ahead: the kill intent is logged before the signal fires
+        runlog.event(
+            ev.get("phase", "run"),
+            "phase-agent-reap",
+            {"pid": pid},
+            story_key=ev.get("story_key"),
+        )
+        command = _pid_command(pid)
+        if command is None:
+            disposition = "already-dead"
+        elif expect_command not in command:
+            disposition = "pid-reused"
+        else:
+            try:
+                os.killpg(pid, signal.SIGKILL)
+                disposition = "killed"
+            except OSError:
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                    disposition = "killed"
+                except OSError:
+                    disposition = "already-dead"
+        runlog.event(
+            ev.get("phase", "run"),
+            "phase-agent-reaped",
+            {"pid": pid, "disposition": disposition},
+            story_key=ev.get("story_key"),
+        )
+        dispositions.append({"pid": pid, "disposition": disposition})
+    return dispositions
 
 
 def salvage_uncommitted(project_root: Path, message: str = "wip(phase-crash)") -> bool:
@@ -233,6 +412,21 @@ def salvage_uncommitted(project_root: Path, message: str = "wip(phase-crash)") -
     return True
 
 
+def _accounting(exec_result: ExecutionResult | None) -> dict[str, Any]:
+    """The CLI envelope's cost accounting, ready to merge into event detail.
+    `permission_denials` rides along even when empty — zero denials is the
+    zero-stall metric, and absence must mean 'not measured', never 'clean'."""
+    if exec_result is None:
+        return {}
+    fields = {
+        "token_usage": exec_result.token_usage,
+        "cost_usd": exec_result.cost_usd,
+        "model_usage": exec_result.model_usage,
+        "permission_denials": exec_result.permission_denials,
+    }
+    return {k: v for k, v in fields.items() if v is not None}
+
+
 @dataclass
 class PhaseOutcome:
     phase: str
@@ -265,6 +459,14 @@ class PhaseRunner:
         self.secrets_deny = tuple(secrets_deny)
         self.guardrail_check = guardrail_check
         self.project = project
+        # An executor that reports its child PID (`on_spawn`) gets the run
+        # log's pid recorder; simpler executors keep the two-arg contract.
+        try:
+            self._executor_reports_pid = "on_spawn" in inspect.signature(
+                executor.run
+            ).parameters
+        except (TypeError, ValueError):
+            self._executor_reports_pid = False
 
     # ---- helpers ---------------------------------------------------------
 
@@ -325,6 +527,35 @@ class PhaseRunner:
 
     # ---- the runner ------------------------------------------------------
 
+    def run_escalated(
+        self,
+        spec: PhaseSpec,
+        escalation_model: str,
+        failure_reasons: Sequence[str] = (),
+    ) -> PhaseOutcome:
+        """Re-drive a phase under the §4 escalation rule: strongest model,
+        `escalated=True` (never runs degraded — a scoped trip on its tier
+        pauses instead), failure history amended into the prompt. The
+        amendment is logged write-ahead so a mid-run prompt change is a
+        recorded event, never a silent edit. Typical call site:
+
+            outcome = runner.run_phase(spec)
+            if outcome.status == "escalated":
+                runner.run_escalated(
+                    spec, cfg.model_for("escalation"), outcome.failure_reasons
+                )
+        """
+        self.runlog.event(
+            spec.name,
+            "phase-escalation-redrive",
+            {
+                "model": escalation_model,
+                "reasons": [self._scrub(r) for r in failure_reasons],
+            },
+            story_key=spec.story_key,
+        )
+        return self.run_phase(escalation_spec(spec, escalation_model, failure_reasons))
+
     def run_phase(self, spec: PhaseSpec) -> PhaseOutcome:
         if spec.model == "skip":
             self.runlog.event(spec.name, "phase-skipped", story_key=spec.story_key)
@@ -345,25 +576,59 @@ class PhaseRunner:
             outcome.model = model
             outcome.attempts = attempt
 
+            run_spec = spec
+            spawn_detail: dict[str, Any] = {
+                "model": model,
+                "attempt": attempt,
+                "timeout_s": spec.timeout_s,
+            }
             if attempt > 1:
                 # A retry always starts from the branch's last committed
                 # state; salvage happens before the respawn.
                 self._salvage(spec)
+                if outcome.failure_reasons:
+                    # A byte-identical respawn mostly fails identically: the
+                    # retry agent gets the prior attempts' failure reasons
+                    # (already scrubbed) amended into its prompt.
+                    run_spec = replace(
+                        spec,
+                        prompt=amend_prompt_with_failures(
+                            spec.prompt, outcome.failure_reasons
+                        ),
+                    )
+                    spawn_detail["retry_feedback"] = len(outcome.failure_reasons)
 
             # Write-ahead: intent hits the log BEFORE the agent spawns.
-            self.runlog.event(
-                spec.name,
-                "phase-spawn",
-                {"model": model, "attempt": attempt, "timeout_s": spec.timeout_s},
-                story_key=spec.story_key,
+            spawn_record = self.runlog.event(
+                spec.name, "phase-spawn", spawn_detail, story_key=spec.story_key
             )
+
+            def _record_pid(pid: int, _attempt: int = attempt) -> None:
+                # logged the moment the child exists, before any waiting, so
+                # an adopting orchestrator can reap it (reap_orphaned_agents)
+                self.runlog.event(
+                    spec.name,
+                    "phase-agent-pid",
+                    {"pid": pid, "attempt": _attempt},
+                    story_key=spec.story_key,
+                )
 
             failure: str | None = None
             exec_result: ExecutionResult | None = None
             transcript_text: str | None = None
+            transcript_suffix = ".md"
             try:
-                exec_result = self.executor.run(spec, model)
-                transcript_text = exec_result.text
+                if self._executor_reports_pid:
+                    exec_result = self.executor.run(run_spec, model, on_spawn=_record_pid)
+                else:
+                    exec_result = self.executor.run(run_spec, model)
+                if exec_result.transcript is not None:
+                    # full session stream (tool calls and all), not just the
+                    # final message — keep the structured form
+                    transcript_text = exec_result.transcript
+                    transcript_suffix = ".jsonl"
+                else:
+                    transcript_text = exec_result.text
             except PhaseTimeout as exc:
                 failure = f"timeout: {exc}"
                 transcript_text = exc.partial_text
@@ -372,7 +637,13 @@ class PhaseRunner:
             # produced nothing" is post-mortem information); only a timeout
             # that yielded no partial text leaves no file.
             if transcript_text is not None:
-                path = self.runlog.transcript_path(spec.name, attempt)
+                path = self.runlog.transcript_path(
+                    spec.name,
+                    attempt,
+                    story_key=spec.story_key,
+                    ts=spawn_record["ts"],
+                    suffix=transcript_suffix,
+                )
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text(self._scrub(transcript_text), encoding="utf-8")
 
@@ -403,9 +674,8 @@ class PhaseRunner:
                 detail: dict[str, Any] = {
                     "attempt": attempt,
                     "verdicts": outcome.verdicts,
+                    **_accounting(exec_result),
                 }
-                if exec_result and exec_result.token_usage:
-                    detail["token_usage"] = exec_result.token_usage
                 if ok:
                     self.runlog.event(
                         spec.name, "phase-verified", detail, story_key=spec.story_key
@@ -422,9 +692,8 @@ class PhaseRunner:
             fail_detail: dict[str, Any] = {
                 "attempt": attempt,
                 "reason": outcome.failure_reasons[-1],
+                **_accounting(exec_result),
             }
-            if exec_result and exec_result.token_usage:
-                fail_detail["token_usage"] = exec_result.token_usage
             self.runlog.event(
                 spec.name, "phase-failed", fail_detail, story_key=spec.story_key
             )

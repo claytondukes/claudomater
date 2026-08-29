@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import secrets
 import shutil
 import time
@@ -76,6 +77,18 @@ def validate_run_id(run_id: str) -> str:
     ):
         raise RunError(f"invalid run id {run_id!r}: must be a simple name")
     return run_id
+
+
+def _path_component(value: str) -> str:
+    """A story key / phase name becomes part of a transcript filename; strip
+    anything that could escape the transcripts dir or hide the file."""
+    cleaned = re.sub(r"[^A-Za-z0-9._-]+", "_", value).lstrip(".")
+    return cleaned or "unnamed"
+
+
+# Bookkeeping phases: events under these carry no recoverable phase work, so
+# attaching to a run that has ONLY them is a first attach, not an adoption.
+_BOOKKEEPING_PHASES = {"run", "control", "notify"}
 
 
 def _detail_summary(detail: Any) -> str:
@@ -175,19 +188,31 @@ class RunLog:
 
     @classmethod
     def adopt(cls, project_root: Path | str) -> "RunLog":
-        """Attach to the current run (dead orchestrator recovery). The caller
-        replays `events()` against reality; state is derived, never trusted."""
+        """Attach to the current run. The caller replays `events()` against
+        reality; state is derived, never trusted.
+
+        Two verbs, one mechanism: a run with phase activity logs
+        `run-adopted` (dead-orchestrator recovery — there is orphaned state to
+        derive), while a fresh run that has only bookkeeping events logs
+        `run-attached` (`omater start` + a separate orchestrator process is
+        the normal shape, not a crash)."""
         current = runs_root(project_root) / CURRENT_LINK
         log = cls._attach(current)
         if log is None:
             raise RunError(f"no current run under {current}")
-        if not log.is_live():
-            # A finished run must stay finished — "adopting" it would flip it
-            # live again and wedge one-live-run enforcement.
+        events = log.events()
+        if not events or events[-1]["event"] in TERMINAL_EVENTS:
+            # A finished (or never-committed) run must stay that way —
+            # "adopting" it would flip it live again and wedge one-live-run
+            # enforcement (is_live() says the same thing to create()).
             raise RunError(
                 f"run {log.run_id} already ended; start a new run instead"
             )
-        log.event("run", "run-adopted", {"pid": os.getpid()})
+        has_phase_activity = any(
+            ev.get("phase") not in _BOOKKEEPING_PHASES for ev in events
+        )
+        verb = "run-adopted" if has_phase_activity else "run-attached"
+        log.event("run", verb, {"pid": os.getpid()})
         return log
 
     @classmethod
@@ -321,8 +346,29 @@ class RunLog:
 
     # ---- paths -----------------------------------------------------------
 
-    def transcript_path(self, phase: str, attempt: int) -> Path:
-        return self.run_dir / TRANSCRIPTS_DIR / f"{phase}-attempt-{attempt}.md"
+    def transcript_path(
+        self,
+        phase: str,
+        attempt: int,
+        story_key: str | None = None,
+        ts: str | None = None,
+        suffix: str = ".md",
+    ) -> Path:
+        """Transcript file for one phase attempt. The name carries the story
+        key and the phase-spawn timestamp: without them every story's
+        `dev-attempt-1` overwrites the previous story's (a 5-story sandbox run
+        kept exactly one dev transcript), and a crash-recovery re-drive of the
+        same story overwrites its own attempt 1."""
+        parts = []
+        if story_key:
+            parts.append(_path_component(story_key))
+        parts.append(_path_component(phase))
+        parts.append(f"attempt-{attempt}")
+        if ts:
+            # event timestamps are %Y-%m-%dT%H:%M:%SZ; strip the separators
+            # that are hostile in filenames
+            parts.append(re.sub(r"[:-]", "", ts))
+        return self.run_dir / TRANSCRIPTS_DIR / ("-".join(parts) + suffix)
 
     # ---- inbound control (omater resume | abort | approve) ---------------
 

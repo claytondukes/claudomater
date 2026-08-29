@@ -43,7 +43,11 @@ Phase 0 skeleton — the pieces every pipeline run stands on:
   consumer repo's `.claude/settings.json` (denies Write/Edit outside the
   project root, pattern-matches Bash for out-of-tree writes), writes a
   starter `.omater.yaml`, and gitignores the runs dir. `omater init --verify`
-  is the drift check run at every run start.
+  is the drift check run at every run start. The fence is a redirector for
+  tool-shaped writes, **not a jail**: writes constructed inside quoted
+  interpreter code (`python -c`, tempfile) pass the Bash scan by design; the
+  measured backstop is the per-phase `permission_denials` capture in the run
+  log plus verifier discipline.
 
 ### Install
 
