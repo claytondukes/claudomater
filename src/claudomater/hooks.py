@@ -71,6 +71,9 @@ _HEREDOC = re.compile(
     r"(<<-?\s*(['\"]?)(\w+)\2[^\n]*\n).*?^\s*\3\s*$", re.DOTALL | re.MULTILINE
 )
 _QUOTED = re.compile(r"'[^']*'|\"[^\"]*\"")
+# A bash comment starts at `#` only at the start of a word (start of the
+# string or after whitespace) — `file#1` and `${#var}` are not comments.
+_COMMENT = re.compile(r"(?:(?<=\s)|^)#[^\n]*")
 _REDIRECT = re.compile(r"(?<![<>&\d])\d?>{1,2}\s*([^\s;|&<>()]+)")
 _TEE = re.compile(r"\btee\s+(?:-[a-zA-Z]+\s+)*([^\s;|&<>()]+)")
 _CREATE = re.compile(r"\b(?:mkdir|touch)\s+(?:-[a-zA-Z=]+\s+)*([^\s;|&<>()]+)")
@@ -78,13 +81,25 @@ _DD_OF = re.compile(r"\bdd\b[^;|&]*\bof=([^\s;|&<>()]+)")
 _COPY = re.compile(r"\b(?:cp|mv|rsync|install)\s+(?:-[^\s]+\s+)*(?:[^\s;|&<>()]+\s+)+([^\s;|&<>()]+)")
 
 
-# cd/pushd/popd at a command position. group 1 = the separator BEFORE it
-# (distinguishes `&&`/`;` from a single `|`: a cd inside a pipeline segment
-# runs in a subshell and moves NOTHING), group 2 = verb, group 3 = target
-# token ('' when bare / immediately followed by && etc).
+# cd/pushd/popd at a command position, optionally preceded by assignment
+# words (`MODE=x cd /path` legally prefixes a builtin). The verb must end at
+# a shell token boundary — `cd/etc` is a command NAMED cd/etc, not a cd.
+# group 1 = the separator BEFORE it (distinguishes `&&`/`;` from a single
+# `|`: a cd inside a pipeline segment runs in a subshell and moves NOTHING),
+# group 2 = verb, group 3 = option/flag prefix, group 4 = target token
+# ('' when bare / immediately followed by && etc).
 _CHDIR = re.compile(
-    r"(^|\|\||&&|[\n;&|(])\s*(cd|pushd|popd)\b\s*((?:--\s+|-[A-Za-z]+\s+)*)([^\s;|&<>()]*)"
+    r"(^|\|\||&&|[\n;&|(])\s*"
+    r"(?:[A-Za-z_][A-Za-z0-9_]*=[^\s;|&<>()]*\s+)*"
+    r"(cd|pushd|popd)(?![^\s;&|)\n])\s*"
+    r"((?:--\s+|-[A-Za-z]+\s+)*)([^\s;|&<>()]*)"
 )
+# Any cd-ish token the pattern above did NOT positively match (quoted
+# assignment values, `command cd`, unmodeled prefixes, prose...) voids the
+# tracked cwd instead of being silently ignored — an unrecognized cd left
+# untracked would resolve later relative targets against a STALE cwd, which
+# is exactly the false-deny shape this resolver exists to close.
+_CD_WORD = re.compile(r"\b(?:cd|pushd|popd)\b")
 def _segment_boundary(text: str, start: int) -> int:
     """Position of the control operator ending the command segment at
     `start` (or len(text)). An `&` inside redirection syntax — `>&`/`<&`
@@ -149,7 +164,11 @@ def _scannable(command: str) -> str:
     # (relative, in-tree) placeholder, which the deny-on-recognized
     # contract accepts.
     scannable = _HEREDOC.sub(lambda m: m.group(1), command)
-    return _QUOTED.sub(" _quoted_data_ ", scannable)
+    scannable = _QUOTED.sub(" _quoted_data_ ", scannable)
+    # Unquoted comments are data too: `cd x  # note; cd /etc` must not have
+    # its comment text scanned as commands. Same-length spaces keep every
+    # event offset in this string consistent.
+    return _COMMENT.sub(lambda m: " " * len(m.group(0)), scannable)
 
 
 def _positioned_write_targets(scannable: str) -> list[tuple[int, str]]:
@@ -199,7 +218,14 @@ def resolved_bash_targets(command: str, cwd: Path) -> list[tuple[str, Path | Non
         events.append((m.start(), "opaque", None))
     for pos in _bare_ampersands(scannable):
         events.append((pos, "opaque", None))
-    for m in _CHDIR.finditer(scannable):
+    chdir_matches = list(_CHDIR.finditer(scannable))
+    matched_verb_spans = [(m.start(2), m.end(2)) for m in chdir_matches]
+    for m in _CD_WORD.finditer(scannable):
+        # a cd-ish token the parser did not positively match voids tracking
+        # (see _CD_WORD) — never leave an unrecognized cd silently untracked
+        if not any(start <= m.start() < end for start, end in matched_verb_spans):
+            events.append((m.start(), "opaque", None))
+    for m in chdir_matches:
         # The cd takes effect at its segment's END, not at the verb: a
         # redirect attached to the cd command itself (`cd /etc > cd.log`)
         # opens against the PRE-cd cwd. The segment boundary is ALSO where

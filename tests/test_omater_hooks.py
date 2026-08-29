@@ -338,6 +338,63 @@ class TestBashFence:
         allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
         assert not allow
 
+    def test_comment_text_is_not_scanned_as_commands(self, tmp_path):
+        """`cd <root>/server # note; cd /etc` — bash ignores everything from
+        the unquoted `#`; scanning it applied the /etc cd and falsely denied
+        the in-root scratch write."""
+        (tmp_path / "server").mkdir()
+        cmd = (
+            f"cd {tmp_path}/server # note; cd /etc\n"
+            "cat > ../.omater/scratch/x"
+        )
+        p = payload("Bash", command=cmd)
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+        # a hash inside a word is NOT a comment: the redirect still denies
+        p = payload("Bash", command="cat > /tmp_probe/file#1")
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+
+    def test_cd_needs_a_token_boundary(self, tmp_path):
+        """`cd/etc; cat > out.txt` runs a command NAMED cd/etc — bash stays
+        in the project root and out.txt is in-tree; parsing it as `cd /etc`
+        falsely denied the write."""
+        p = payload("Bash", command="cd/etc; cat > out.txt")
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+
+    def test_assignment_prefixed_cd_is_tracked(self, tmp_path):
+        """`MODE=x cd dir` legally prefixes the builtin — missing it would
+        re-open the original stale-cwd false deny with an env prefix."""
+        (tmp_path / "server").mkdir()
+        cmd = f"MODE=x cd {tmp_path}/server && cat > ../.omater/scratch/x"
+        p = payload("Bash", command=cmd)
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+        p = payload("Bash", command="MODE=x cd /etc && cat > passwd")
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+
+    def test_unrecognized_cd_forms_void_tracking_not_silently_ignored(self, tmp_path):
+        """Invariant: every cd-ish token either tracks correctly or voids
+        the cwd. An unmodeled form (quoted assignment value, `command cd`)
+        left silently untracked would resolve later relative targets against
+        a STALE cwd — the original false-deny shape."""
+        (tmp_path / "server").mkdir()
+        for cmd in (
+            f'MODE="a b" cd {tmp_path}/server && cat > ../.omater/scratch/x',
+            f"command cd {tmp_path}/server && cat > ../.omater/scratch/x",
+        ):
+            p = payload("Bash", command=cmd)
+            p["cwd"] = str(tmp_path)
+            allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+            assert allow, (cmd, reason)
+
     def test_cd_inside_compound_control_flow_fails_open(self, tmp_path):
         """A cd inside `if false; then … fi`, a function body, or a
         zero-iteration loop may never execute — applying it guess-denied a
