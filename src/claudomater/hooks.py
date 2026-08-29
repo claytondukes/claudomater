@@ -88,6 +88,17 @@ def _strip_comments(text: str) -> str:
     in_backtick = False
     i, n = 0, len(text)
 
+    def escaped(idx: int) -> bool:
+        """Is the char at idx backslash-escaped? (odd run of backslashes
+        before it). An escaped space/metachar is part of the WORD —
+        `echo foo\\ #bar` keeps #bar in the argument, not a comment."""
+        backslashes = 0
+        j = idx - 1
+        while j >= 0 and text[j] == "\\":
+            backslashes += 1
+            j -= 1
+        return backslashes % 2 == 1
+
     def blank_to_eol(start: int) -> int:
         end = text.find("\n", start)
         end = n if end == -1 else end
@@ -111,7 +122,7 @@ def _strip_comments(text: str) -> str:
             # even mid-comment, so blank only up to newline or backtick.
             if c == "#":
                 prev = text[i - 1] if i else ""
-                if i == 0 or prev in " \t\n;&|(<>":
+                if i == 0 or (prev in " \t\n;&|(<>" and not escaped(i - 1)):
                     while i < n and text[i] not in "\n`":
                         res[i] = " "
                         i += 1
@@ -131,7 +142,7 @@ def _strip_comments(text: str) -> str:
             continue
         if c == "#":
             prev = text[i - 1] if i else ""
-            if i == 0 or prev in " \t\n;&|(<>":
+            if i == 0 or (prev in " \t\n;&|(<>" and not escaped(i - 1)):
                 i = blank_to_eol(i)
                 continue
         i += 1

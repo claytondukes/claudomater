@@ -433,6 +433,20 @@ class TestBashFence:
             allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
             assert allow, (cmd, reason)
 
+    def test_escaped_space_before_hash_is_not_a_comment_boundary(self, tmp_path):
+        """`echo foo\\ #bar > /tmp_probe/out`: the escaped space keeps #bar
+        inside the word, so the absolute redirect EXECUTES — blanking from
+        the # hid a recognizable out-of-tree write."""
+        p = payload("Bash", command="echo foo\\ #bar > /tmp_probe/out")
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+        # an unescaped space before # is still a comment
+        p = payload("Bash", command="echo foo #bar > /tmp_probe/out")
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+
     def test_non_literal_targets_fail_open_even_under_a_tracked_cwd(self, tmp_path):
         """A quoted or expansion-bearing target is not a literal filename:
         resolving the placeholder against a tracked /etc cwd falsely denied
