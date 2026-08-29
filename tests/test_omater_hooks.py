@@ -553,6 +553,18 @@ class TestBashFence:
             allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
             assert allow, (cmd, reason)
 
+    def test_negated_cd_voids_tracking_never_goes_stale(self, tmp_path):
+        """`! cd server` runs cd in the CURRENT shell (status negation) —
+        rejecting the `!` prefix kept the stale pre-cd cwd and falsely
+        denied the in-root scratch write. Untrackable (fail open), not
+        stale."""
+        (tmp_path / "server").mkdir()
+        cmd = f"! cd {tmp_path}/server; cat > ../.omater/scratch/x"
+        p = payload("Bash", command=cmd)
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+
     def test_unresolved_target_constructs_fail_open_by_grammar(self, tmp_path):
         """THE conservative target grammar (ratified fence contract:
         seatbelt, not a security boundary): any construct the resolver has

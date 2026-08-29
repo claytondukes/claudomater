@@ -368,10 +368,12 @@ _GLUED_COMMAND = re.compile(
 )
 # Words that can precede a cd token without changing WHICH shell executes
 # it: assignments, redirections, wrapper options, and the current-shell
-# wrappers themselves (`command cd` / `builtin cd` / `time cd` all move
-# the cwd; `echo cd`, `env cd`, `xargs cd` cannot).
+# prefixes themselves (`command cd` / `builtin cd` / `time cd` / `! cd`
+# all move the cwd; `echo cd`, `env cd`, `xargs cd` cannot). `!` is the
+# status-negation reserved word — rejecting it resolved a later relative
+# write against the STALE pre-cd cwd (false deny).
 _TRANSPARENT_PREFIX_WORD = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=\S*|\d*[<>]\S*|&>\S*|-\S*")
-_CD_WRAPPERS = frozenset({"command", "builtin", "time"})
+_CD_WRAPPERS = frozenset({"command", "builtin", "time", "!"})
 def _segment_boundary(text: str, start: int) -> int:
     """Position of the control operator ending the command segment at
     `start` (or len(text)). An `&` inside redirection syntax — `>&`/`<&`
