@@ -637,15 +637,27 @@ def resolved_bash_targets(
         if ai < len(arith) and arith[ai][0] <= m.start() and arith_pure[ai]:
             continue
         events.append((m.start(), "opaque", None))
+    def _real_anchor(m: re.Match) -> bool:
+        # The leading command-position anchor must be REAL: a match whose
+        # separator char is backslash-escaped anchors on word data —
+        # `echo \; source x` runs source as an echo ARGUMENT, and the
+        # spurious opacity cleared a known cwd (parity rule, same as
+        # _real_separator / _segment_boundary; newlines stay unconditional
+        # — \<newline> pairs were already removed by _scannable).
+        first = scannable[m.start()]
+        return first not in ";&|()" or _escape_parity(scannable, m.start()) == 0
+
     # Command-induced opacity (an unnameable/current-shell command) takes
     # effect at the SEGMENT boundary, not the command start: bash opens
     # redirects attached to the command BEFORE running it, so
     # `source env.sh > audit.log` resolves audit.log against the pre-source
     # cwd — clearing tracking first let a recognized out-of-tree write pass.
     for m in _GLUED_COMMAND.finditer(scannable):
-        events.append((_segment_boundary(scannable, m.end()), "opaque", None))
+        if _real_anchor(m):
+            events.append((_segment_boundary(scannable, m.end()), "opaque", None))
     for m in _SHELL_EXEC.finditer(scannable):
-        events.append((_segment_boundary(scannable, m.end()), "opaque", None))
+        if _real_anchor(m):
+            events.append((_segment_boundary(scannable, m.end()), "opaque", None))
     for m in _COMPOUND.finditer(scannable):
         # HARD opacity: a compound body's extent is unparseable here, so a
         # cd inside it must never recover tracking — `if false; then cd
@@ -654,11 +666,13 @@ def resolved_bash_targets(
         # redirect. Sticky for the rest of the command; soft opacity
         # (subshells, eval, bare &) stays recoverable because top-level
         # flow demonstrably resumes after those.
-        events.append((m.start(), "hard", None))
+        if _real_anchor(m):
+            events.append((m.start(), "hard", None))
     for pos in _bare_ampersands(scannable, arith):
         events.append((pos, "opaque", None))
     for m in _SET_PHYSICAL.finditer(scannable):
-        events.append((m.end(), "setmode", None))
+        if _real_anchor(m):
+            events.append((m.end(), "setmode", None))
     # A `<<` surviving _scannable is a heredoc shape the parser does not
     # support (exotic delimiters: END@MARK, <<\EOF, ...) — its BODY stayed
     # scannable, and body text is DATA: neither cds nor redirects in it
@@ -679,9 +693,13 @@ def resolved_bash_targets(
     # the "a cd was applied in this list" state: a || in a LATER list says
     # nothing about an earlier list's cd.
     for m in re.finditer(r"\|\|", scannable):
-        events.append((m.start(), "orelse", None))
+        # `echo \|| true` is word data + a PIPE, not a || operator
+        if _escape_parity(scannable, m.start()) == 0:
+            events.append((m.start(), "orelse", None))
     for m in re.finditer(r"[;\n]", scannable):
-        events.append((m.start(), "listsep", None))
+        # an escaped ; is word data (newlines cannot be escaped here)
+        if m.group() == "\n" or _escape_parity(scannable, m.start()) == 0:
+            events.append((m.start(), "listsep", None))
     def _real_separator(m: re.Match) -> bool:
         # `echo \; cd /etc` never runs cd — an escaped metachar is word
         # data, not a command separator; the skipped cd then follows the
@@ -772,7 +790,15 @@ def resolved_bash_targets(
             # unknowable (`false && cd /etc; cat > out.txt` writes in the
             # ORIGINAL cwd). Void the tracked cwd at the list boundary.
             list_end = effect_pos
-            while list_end < len(scannable) and scannable[list_end] not in ";\n)":
+            while list_end < len(scannable) and (
+                scannable[list_end] not in ";\n)"
+                # an escaped ;/) is word data (`echo \;`), not the list's
+                # terminator — voiding there cleared a still-guarded cwd
+                or (
+                    scannable[list_end] != "\n"
+                    and _escape_parity(scannable, list_end) == 1
+                )
+            ):
                 list_end += 1
             if list_end < len(scannable):
                 events.append((list_end, "opaque", None))

@@ -553,6 +553,26 @@ class TestBashFence:
             allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
             assert allow, (cmd, reason)
 
+    def test_escaped_separators_are_not_command_anchors_anywhere(self, tmp_path):
+        """The parity rule applies at EVERY command-position scan: an
+        escaped `;`/`|` is word data, so the word after it is an ARGUMENT
+        (`echo \\; source x` runs no source) — anchoring opacity there
+        cleared a known /etc and hid the recognized write. One shape per
+        affected scanner: shell-exec, compound, glued, ||, &&-list-end,
+        set -P."""
+        for cmd in (
+            "cd /etc && echo \\; source x && cat > passwd",
+            "cd /etc && echo \\; if x && cat > passwd",
+            "cd /etc && echo \\; $CMD && cat > passwd",
+            "cd /etc && echo \\|| true && cat > passwd",
+            "true && cd /etc && echo \\; && cat > passwd",
+            "cd /etc && echo \\; set -P && cd .. && cat > passwd",
+        ):
+            p = payload("Bash", command=cmd)
+            p["cwd"] = str(tmp_path)
+            allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+            assert not allow, cmd
+
     def test_quotes_inside_nested_substitution_never_falsely_deny(self, tmp_path):
         """Bash gives $(...) its own quote context inside double quotes:
         in `echo "$(echo "> /tmp_probe/x")"` the `>` is quoted argument
