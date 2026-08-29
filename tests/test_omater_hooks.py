@@ -442,6 +442,15 @@ class TestBashFence:
         allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
         assert not allow
 
+    def test_comment_after_a_grouping_paren_is_a_comment(self, tmp_path):
+        """`(echo ok)# ignored > /tmp_probe/x`: after a GROUP-closing `)` the
+        `#` starts a comment — bash never executes that redirect, so keeping
+        it scannable falsely denied the command."""
+        p = payload("Bash", command="(echo ok)# ignored > /tmp_probe/x")
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+
     def test_hash_after_command_substitution_is_not_a_comment(self, tmp_path):
         """`$(printf x)#suffix` continues the word — a `)` ends a
         substitution whose result can be word-glued, so it must not count

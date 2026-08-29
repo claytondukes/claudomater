@@ -72,13 +72,56 @@ _HEREDOC = re.compile(
     r"(<<-?\s*(['\"]?)(\w+)\2[^\n]*\n).*?^\s*\3\s*$", re.DOTALL | re.MULTILINE
 )
 _QUOTED = re.compile(r"'[^']*'|\"[^\"]*\"")
-# A bash comment starts at `#` at the start of a WORD: after whitespace or a
-# shell metacharacter (`echo ok;# ignored` is a comment too) or the string
-# start — while `file#1` and `${#var}` are not comments. `)` and backtick
-# are deliberately NOT in the class: they end command substitutions whose
-# results can be word-glued (`$(printf x)#suffix` continues the word), and
-# erasing from there would hide a recognizable absolute write.
-_COMMENT = re.compile(r"(?:(?<=[\s;&|(<>])|^)#[^\n]*")
+def _strip_comments(text: str) -> str:
+    """Blank bash comments (space-preserving, offsets intact). A comment
+    starts at `#` at the start of a WORD: after whitespace, a shell
+    metacharacter, the string start — or a GROUP-closing `)` (`(echo ok)#
+    ignored`), but NOT a substitution-closing `)` (`$(printf x)#suffix`
+    continues the word). Telling those apart needs pair matching, so this
+    is a scanner, not a regex: `(` openers are classified by their preceding
+    char ($/</> = substitution, else grouping) and each `)` inherits its
+    opener's kind. Backtick spans are left untouched (a blanked comment
+    inside one could eat the closing backtick; backticks already make the
+    cwd opaque). `file#1` and `${#var}` are not comments."""
+    res = list(text)
+    stack: list[str] = []
+    in_backtick = False
+    i, n = 0, len(text)
+
+    def blank_to_eol(start: int) -> int:
+        end = text.find("\n", start)
+        end = n if end == -1 else end
+        for k in range(start, end):
+            res[k] = " "
+        return end
+
+    while i < n:
+        c = text[i]
+        if c == "`":
+            in_backtick = not in_backtick
+            i += 1
+            continue
+        if in_backtick:
+            i += 1
+            continue
+        if c == "(":
+            prev = text[i - 1] if i else ""
+            stack.append("sub" if prev in ("$", "<", ">") else "group")
+            i += 1
+            continue
+        if c == ")":
+            kind = stack.pop() if stack else "group"
+            i += 1
+            if kind == "group" and i < n and text[i] == "#":
+                i = blank_to_eol(i)
+            continue
+        if c == "#":
+            prev = text[i - 1] if i else ""
+            if i == 0 or prev in " \t\n;&|(<>":
+                i = blank_to_eol(i)
+                continue
+        i += 1
+    return "".join(res)
 _REDIRECT = re.compile(r"(?<![<>&\d])\d?>{1,2}\s*([^\s;|&<>()]+)")
 _TEE = re.compile(r"\btee\s+(?:-[a-zA-Z]+\s+)*([^\s;|&<>()]+)")
 _CREATE = re.compile(r"\b(?:mkdir|touch)\s+(?:-[a-zA-Z=]+\s+)*([^\s;|&<>()]+)")
@@ -118,7 +161,7 @@ def _segment_boundary(text: str, start: int) -> int:
         if c == "&":
             prev = text[i - 1] if i > 0 else ""
             nxt = text[i + 1] if i + 1 < n else ""
-            if prev in "><":  # >& / <& — fd duplication
+            if prev in (">", "<"):  # >& / <& — fd duplication
                 i += 1
                 continue
             if nxt == ">":  # &> redirect shorthand
@@ -151,7 +194,7 @@ def _bare_ampersands(text: str) -> list[int]:
         i = m.start()
         prev = text[i - 1] if i > 0 else ""
         nxt = text[i + 1] if i + 1 < len(text) else ""
-        if prev in "><&" or nxt in "&>":
+        if prev in (">", "<", "&") or nxt in ("&", ">"):
             continue
         out.append(i)
     return out
@@ -192,9 +235,9 @@ def _scannable(command: str) -> str:
     # into a comment and erased the recognizable write after it.
     scannable = _QUOTED.sub("_quoted_data_", scannable)
     # Unquoted comments are data too: `cd x  # note; cd /etc` must not have
-    # its comment text scanned as commands. Same-length spaces keep every
-    # event offset in this string consistent.
-    return _COMMENT.sub(lambda m: " " * len(m.group(0)), scannable)
+    # its comment text scanned as commands. Blanking is space-preserving so
+    # every event offset in this string stays consistent.
+    return _strip_comments(scannable)
 
 
 def _positioned_write_targets(scannable: str) -> list[tuple[int, str]]:
