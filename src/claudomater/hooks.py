@@ -85,10 +85,45 @@ _COPY = re.compile(r"\b(?:cp|mv|rsync|install)\s+(?:-[^\s]+\s+)*(?:[^\s;|&<>()]+
 _CHDIR = re.compile(
     r"(^|\|\||&&|[\n;&|(])\s*(cd|pushd|popd)\b\s*((?:--\s+|-[A-Za-z]+\s+)*)([^\s;|&<>()]*)"
 )
-# End of a command segment: where a cd's effect BEGINS. Redirections on the
-# cd command itself (`cd /etc > cd.log`) are opened by the shell BEFORE the
-# builtin runs, so they resolve against the pre-cd cwd.
-_SEGMENT_END = re.compile(r"[;&|\n)]")
+def _segment_boundary(text: str, start: int) -> int:
+    """Position of the control operator ending the command segment at
+    `start` (or len(text)). An `&` inside redirection syntax — `>&`/`<&`
+    fd-duplication (`2>&1`) or the `&>` shorthand — is data, not control;
+    treating it as control let a redirect-carrying cd read as backgrounded."""
+    i, n = start, len(text)
+    while i < n:
+        c = text[i]
+        if c in ";\n)|":
+            return i
+        if c == "&":
+            prev = text[i - 1] if i > 0 else ""
+            nxt = text[i + 1] if i + 1 < n else ""
+            if prev in "><":  # >& / <& — fd duplication
+                i += 1
+                continue
+            if nxt == ">":  # &> redirect shorthand
+                i += 2
+                continue
+            return i  # & or &&
+        i += 1
+    return n
+
+
+# A standalone `&` backgrounds the ENTIRE list before it (`cd /x && true &`
+# runs the whole list in a subshell), so any cd applied earlier in that list
+# never reaches the foreground shell — after a bare `&` the tracked cwd is
+# unknowable. Skips the same redirect forms as _segment_boundary and both
+# halves of `&&`.
+def _bare_ampersands(text: str) -> list[int]:
+    out = []
+    for m in re.finditer(r"&", text):
+        i = m.start()
+        prev = text[i - 1] if i > 0 else ""
+        nxt = text[i + 1] if i + 1 < len(text) else ""
+        if prev in "><&" or nxt in "&>":
+            continue
+        out.append(i)
+    return out
 # Constructs that make the effective cwd untrackable from here on: subshells
 # and command substitution (both paren forms) and backticks.
 _CWD_OPAQUE = re.compile(r"[()`]")
@@ -151,6 +186,8 @@ def resolved_bash_targets(command: str, cwd: Path) -> list[tuple[str, Path | Non
     ]
     for m in _CWD_OPAQUE.finditer(scannable):
         events.append((m.start(), "opaque", None))
+    for pos in _bare_ampersands(scannable):
+        events.append((pos, "opaque", None))
     for m in _CHDIR.finditer(scannable):
         # The cd takes effect at its segment's END, not at the verb: a
         # redirect attached to the cd command itself (`cd /etc > cd.log`)
@@ -158,8 +195,7 @@ def resolved_bash_targets(command: str, cwd: Path) -> list[tuple[str, Path | Non
         # the control operator lives — reading it right after the target
         # token instead let `cd /etc >/dev/null &` hide the `&` behind the
         # redirect.
-        seg = _SEGMENT_END.search(scannable, m.end())
-        effect_pos = seg.start() if seg else len(scannable)
+        effect_pos = _segment_boundary(scannable, m.end())
         boundary = scannable[effect_pos : effect_pos + 2]
         # `cd /x &` (backgrounded) and `cd /x | ...` (pipeline segment) run
         # the cd in a subshell that moves nothing; `cd /x || ...` makes the

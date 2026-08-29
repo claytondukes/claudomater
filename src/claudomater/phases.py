@@ -441,17 +441,35 @@ def salvage_uncommitted(project_root: Path, message: str = "wip(phase-crash)") -
     return True
 
 
-# modelUsage fields that describe CAPACITY, not consumption — a row is
-# "unused" only when its actual usage counters are all zero.
+# modelUsage consumption counters (documented CLI envelope fields) vs
+# capacity descriptors. A row is dropped only on the strength of fields we
+# positively recognize — the same deny-on-recognized posture as the fence.
+_CONSUMPTION_FIELDS = frozenset(
+    {
+        "inputTokens",
+        "outputTokens",
+        "cacheCreationInputTokens",
+        "cacheReadInputTokens",
+        "webSearchRequests",
+        "costUSD",
+    }
+)
 _CAPACITY_FIELDS = frozenset({"contextWindow", "maxOutputTokens"})
 
 
+def _is_number(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
 def _used_models(model_usage: Any) -> Any:
-    """Drop modelUsage rows for models the run never actually consumed
-    (every usage counter zero) — configured-but-unused entries are noise in
-    cost rollups. Rows with ANY real consumption stay untouched (the CLI's
-    internal fast-path models carry small but real cost). Unknown shapes
-    pass through unfiltered — accounting must never guess."""
+    """Drop modelUsage rows for models the run never actually consumed —
+    configured-but-unused entries are noise in cost rollups. A row is
+    dropped only when it carries at least one KNOWN consumption counter,
+    every known counter is zero, and no unrecognized numeric field is
+    present (an unknown numeric might be consumption under a future CLI
+    schema — retain rather than guess). Rows with any real consumption stay
+    untouched (the CLI's internal fast-path models carry small but real
+    cost), and unknown shapes pass through unfiltered."""
     if not isinstance(model_usage, dict):
         return model_usage
     kept: dict[str, Any] = {}
@@ -459,14 +477,14 @@ def _used_models(model_usage: Any) -> Any:
         if not isinstance(stats, dict):
             kept[model] = stats
             continue
-        counters = [
-            v
-            for k, v in stats.items()
-            if k not in _CAPACITY_FIELDS
-            and isinstance(v, (int, float))
-            and not isinstance(v, bool)
+        known = [
+            v for k, v in stats.items() if k in _CONSUMPTION_FIELDS and _is_number(v)
         ]
-        if counters and all(v == 0 for v in counters):
+        unknown_numeric = any(
+            k not in _CONSUMPTION_FIELDS and k not in _CAPACITY_FIELDS and _is_number(v)
+            for k, v in stats.items()
+        )
+        if known and not unknown_numeric and all(v == 0 for v in known):
             continue
         kept[model] = stats
     return kept or None

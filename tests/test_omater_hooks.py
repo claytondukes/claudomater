@@ -338,6 +338,28 @@ class TestBashFence:
         allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
         assert not allow
 
+    def test_fd_duplication_ampersand_is_not_a_control_operator(self, tmp_path):
+        """`cd /etc >/dev/null 2>&1 && cat > passwd`: the `&` in `2>&1` is
+        fd duplication, not backgrounding — the cd still applies at the &&
+        and the /etc write is a recognized deny. Same for the `&>` shorthand."""
+        for cmd in (
+            "cd /etc >/dev/null 2>&1 && cat > passwd",
+            "cd /etc &> cd.log && cat > passwd",
+        ):
+            p = payload("Bash", command=cmd)
+            p["cwd"] = str(tmp_path)
+            allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+            assert not allow, cmd
+
+    def test_bare_ampersand_backgrounds_the_whole_list(self, tmp_path):
+        """`cd /etc && true & cat > out.txt`: the trailing `&` backgrounds
+        the ENTIRE `cd && true` list in a subshell, so cat writes under the
+        original cwd — was falsely denied as /etc/out.txt."""
+        p = payload("Bash", command="cd /etc && true & cat > out.txt")
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+
     def test_double_dash_option_terminator_is_not_the_directory(self, tmp_path):
         """`cd -- /etc && cat > passwd`: parsing `--` as the target pinned
         the cwd to <root>/-- and let the /etc/passwd write through."""

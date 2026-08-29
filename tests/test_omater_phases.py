@@ -784,6 +784,22 @@ class TestFullSessionCapture:
         )
         assert list(result.model_usage) == ["claude-haiku-4-5-20251001"]
 
+    def test_unknown_numeric_fields_never_cause_a_drop(self):
+        """Deny-on-recognized for accounting too: a row is dropped only on
+        the strength of KNOWN consumption counters. An unrecognized numeric
+        field (future CLI schema) must retain the row, and a row with no
+        known counters at all passes through."""
+        from claudomater.phases import _used_models
+
+        usage = {
+            "a": {"futureCapacity": 0},  # no known counters -> kept
+            "b": {"inputTokens": 0, "costUSD": 0, "futureThing": 0},  # unknown numeric -> kept
+            "c": {"inputTokens": 0, "costUSD": 0, "provider": "x"},  # known all-zero -> dropped
+        }
+        assert list(_used_models(usage)) == ["a", "b"]
+        assert _used_models("weird") == "weird"
+        assert _used_models({"m": {"inputTokens": 0}}) is None
+
     def test_stderr_is_retained_not_discarded(self, tmp_path):
         """CLI warnings/errors land on stderr; discarding them strips exactly
         the context a post-mortem needs. In a stream transcript it rides
