@@ -433,6 +433,31 @@ class TestBashFence:
             allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
             assert allow, (cmd, reason)
 
+    def test_line_continuation_is_not_a_boundary(self, tmp_path):
+        """`false && \\<newline> cd /etc; cat > out.txt` is ONE guarded list
+        — the cd never runs; parsing the newline as a boundary made it an
+        unconditional cd and falsely denied out.txt."""
+        p = payload("Bash", command="false && \\\n cd /etc; cat > out.txt")
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+        # joined lists keep deny power: the continuation glues one && list
+        p = payload("Bash", command="cd /etc && \\\n cat > passwd")
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+
+    def test_cdpath_searches_dot_hidden_names_too(self, tmp_path):
+        """Bash bypasses CDPATH only for ./.. and ./-anchored paths —
+        `.hidden` IS CDPATH-searched and can land anywhere on the search
+        path, so it must be untrackable when a CDPATH is active."""
+        (tmp_path / ".hidden").mkdir()
+        env = {"CDPATH": "/tmp_probe"}
+        p = payload("Bash", command="cd .hidden && cat > ../../evil.txt")
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path, env=env)
+        assert allow, reason  # untrackable -> fail open, never guess-deny
+
     def test_quote_spliced_cd_voids_tracking(self, tmp_path):
         """Bash concatenates quoted spans: `c""d server` and `"cd" server`
         both RUN cd, invisibly to the scanner — a stale cwd then falsely

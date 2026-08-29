@@ -247,6 +247,12 @@ def _scannable(command: str) -> str:
     # space-padded placeholder invented a word boundary that turned #suffix
     # into a comment and erased the recognizable write after it.
     scannable = _QUOTED.sub("_quoted_data_", scannable)
+    # Backslash-newline is a line CONTINUATION, not a boundary: `false && \
+    # cd /etc` is one guarded list, and leaving the newline in made the cd
+    # read as an unconditional new command. Quoted spans were already
+    # placeholdered, so what remains is a real continuation; two spaces keep
+    # offsets intact.
+    scannable = scannable.replace("\\\n", "  ")
     # Unquoted comments are data too: `cd x  # note; cd /etc` must not have
     # its comment text scanned as commands. Blanking is space-preserving so
     # every event offset in this string stays consistent.
@@ -454,9 +460,13 @@ def resolved_bash_targets(
         physical = _last_lp_flag(flags) == "P"
         if step.is_absolute():
             new_cwd = str(step)
-        elif cdpath_active and not target.startswith("."):
-            # a bare relative target under an effective CDPATH may land
-            # ANYWHERE on that search path — untrackable
+        elif cdpath_active and not (
+            target in (".", "..") or target.startswith(("./", "../"))
+        ):
+            # a relative target under an effective CDPATH may land ANYWHERE
+            # on that search path — untrackable. Bash bypasses CDPATH only
+            # for the exact ./.. components and ./ ../ anchored paths;
+            # `.hidden` IS searched.
             current = None
             continue
         elif current is not None:
