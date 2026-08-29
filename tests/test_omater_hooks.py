@@ -433,6 +433,21 @@ class TestBashFence:
             allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
             assert allow, (cmd, reason)
 
+    def test_command_opacity_lands_after_its_own_redirects(self, tmp_path):
+        """Redirects attached to a command open BEFORE it runs: after
+        `cd /etc`, `source env.sh > audit.log` writes /etc/audit.log — the
+        source's opacity must not clear tracking before that target
+        resolves (and denies). Same for an unmatched-cd command's redirect
+        resolving against the pre-command cwd."""
+        p = payload("Bash", command="cd /etc && source env.sh > audit.log")
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+        p = payload("Bash", command="command cd /etc > ../escape.txt")
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow  # ../escape.txt opens against the PRE-command cwd
+
     def test_comments_inside_backtick_substitutions_are_blanked(self, tmp_path):
         """A comment inside a substitution is a real comment — its text
         (`# > /tmp_probe/never`) must not stay scannable as a write."""

@@ -166,7 +166,10 @@ _CHDIR = re.compile(
 # tracked cwd instead of being silently ignored — an unrecognized cd left
 # untracked would resolve later relative targets against a STALE cwd, which
 # is exactly the false-deny shape this resolver exists to close.
-_CD_WORD = re.compile(r"\b(?:cd|pushd|popd)\b")
+# A standalone shell WORD, not a regex word: `cd.log` contains \bcd\b but
+# is a filename, and `./cd` runs a subprocess that cannot move the parent
+# shell's cwd — neither may void tracking.
+_CD_WORD = re.compile(r"(?<![^\s;&|(<>])(?:cd|pushd|popd)(?![^\s;&|)<>\n])")
 # A command-position word containing the quote placeholder is a command we
 # cannot name: bash concatenates quoted spans (`c""d server` runs cd, `"cd"
 # server` runs cd), so the expanded command may move the cwd invisibly —
@@ -335,10 +338,15 @@ def resolved_bash_targets(
     ]
     for m in _CWD_OPAQUE.finditer(scannable):
         events.append((m.start(), "opaque", None))
+    # Command-induced opacity (an unnameable/current-shell command) takes
+    # effect at the SEGMENT boundary, not the command start: bash opens
+    # redirects attached to the command BEFORE running it, so
+    # `source env.sh > audit.log` resolves audit.log against the pre-source
+    # cwd — clearing tracking first let a recognized out-of-tree write pass.
     for m in _GLUED_COMMAND.finditer(scannable):
-        events.append((m.start(), "opaque", None))
+        events.append((_segment_boundary(scannable, m.end()), "opaque", None))
     for m in _SHELL_EXEC.finditer(scannable):
-        events.append((m.start(), "opaque", None))
+        events.append((_segment_boundary(scannable, m.end()), "opaque", None))
     for m in _COMPOUND.finditer(scannable):
         # HARD opacity: a compound body's extent is unparseable here, so a
         # cd inside it must never recover tracking — `if false; then cd
@@ -363,9 +371,12 @@ def resolved_bash_targets(
     matched_verb_spans = [(m.start(2), m.end(2)) for m in chdir_matches]
     for m in _CD_WORD.finditer(scannable):
         # a cd-ish token the parser did not positively match voids tracking
-        # (see _CD_WORD) — never leave an unrecognized cd silently untracked
+        # (see _CD_WORD) — never leave an unrecognized cd silently untracked.
+        # Effect at the segment boundary: a redirect attached to the same
+        # command (`command cd /etc > ../escape.txt`) opens against the
+        # PRE-command cwd and must still resolve (and deny).
         if not any(start <= m.start() < end for start, end in matched_verb_spans):
-            events.append((m.start(), "opaque", None))
+            events.append((_segment_boundary(scannable, m.end()), "opaque", None))
     for m in chdir_matches:
         # The cd takes effect at its segment's END, not at the verb: a
         # redirect attached to the cd command itself (`cd /etc > cd.log`)
