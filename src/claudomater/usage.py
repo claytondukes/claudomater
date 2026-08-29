@@ -187,18 +187,24 @@ def _read_fake(path: Path) -> UsageSnapshot:
         fields = parse_limits(data)
     else:  # simplified shape: {"five_hour": 50, "seven_day": 60, "scoped": 70, ...}
         scoped_model = data.get("scoped_model", "Fable")
+
+        def _str_or_none(value: Any) -> str | None:
+            return value if isinstance(value, str) else None
+
         fields = {
             # non-numeric values degrade to None = unknown = fail closed,
             # never a TypeError inside evaluate()
             "five_hour": _num_or_none(data.get("five_hour")),
             "seven_day": _num_or_none(data.get("seven_day")),
             "scoped": _num_or_none(data.get("scoped")),
-            # string-or-unknown, same rule as parse_limits: a non-string
-            # would crash scope_applies (.lower())
-            "scoped_model": scoped_model if isinstance(scoped_model, str) else None,
-            "five_hour_resets_at": data.get("five_hour_resets_at"),
-            "seven_day_resets_at": data.get("seven_day_resets_at"),
-            "scoped_resets_at": data.get("scoped_resets_at"),
+            # string-or-unknown, same rules as parse_limits: a non-string
+            # scoped_model would crash scope_applies, and non-string
+            # resets_at values would leak inconsistent types into CLI
+            # output and notification detail
+            "scoped_model": _str_or_none(scoped_model),
+            "five_hour_resets_at": _str_or_none(data.get("five_hour_resets_at")),
+            "seven_day_resets_at": _str_or_none(data.get("seven_day_resets_at")),
+            "scoped_resets_at": _str_or_none(data.get("scoped_resets_at")),
         }
     account = data.get("account")
     if not isinstance(account, dict):  # non-object account would crash .get() consumers

@@ -389,6 +389,16 @@ class TestRealPathFailClosed:
             assert ok is False
             assert "fetch-failed" in reason
 
+    def test_non_string_resets_at_in_fake_degrades_to_none(self, tmp_path, monkeypatch):
+        write_fake(
+            tmp_path,
+            monkeypatch,
+            {"five_hour": 96, "seven_day": 1, "scoped": 1, "five_hour_resets_at": 12345},
+        )
+        snap = read_usage()
+        assert snap.five_hour_resets_at is None  # str|None, same as the API path
+        assert evaluate(snap, UserConfig()).action == "pause"  # decision unaffected
+
     def test_non_object_fake_account_degrades_to_placeholder(self, tmp_path, monkeypatch):
         write_fake(
             tmp_path,
