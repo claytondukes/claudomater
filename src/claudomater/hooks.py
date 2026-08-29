@@ -77,11 +77,15 @@ _COPY = re.compile(r"\b(?:cp|mv|rsync|install)\s+(?:-[^\s]+\s+)*(?:[^\s;|&<>()]+
 def bash_write_targets(command: str) -> list[str]:
     # Heredoc bodies and quoted strings are DATA (script contents, commit
     # messages, doc text) — scanning them produces false denies on
-    # legitimate in-tree work. Strip them before matching; the cost is that
-    # a quoted redirect target ('> "/x y"') goes unrecognized, which the
-    # deny-on-recognized contract accepts.
+    # legitimate in-tree work. Quoted strings become a placeholder TOKEN,
+    # not a bare space: erasing them entirely also erased argument
+    # structure, so `cp "a b" /tmp/out` lost its source token and the
+    # copy-target regex no longer saw the out-of-tree write. The remaining
+    # cost is that a quoted redirect TARGET ('> "/x y"') reads as the
+    # (relative, in-tree) placeholder, which the deny-on-recognized
+    # contract accepts.
     scannable = _HEREDOC.sub(lambda m: m.group(1), command)
-    scannable = _QUOTED.sub(" ", scannable)
+    scannable = _QUOTED.sub(" _quoted_data_ ", scannable)
     targets: list[str] = []
     for pattern in (_REDIRECT, _TEE, _CREATE, _DD_OF, _COPY):
         for m in pattern.finditer(scannable):

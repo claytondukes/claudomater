@@ -190,6 +190,18 @@ class TestBashFence:
         allow, _ = hooks.evaluate_pre_tool_use(payload("Bash", command=cmd), tmp_path)
         assert not allow
 
+    def test_quoted_source_does_not_hide_the_copy_target(self, tmp_path):
+        """Quoted args are data but must keep their SLOT: erasing them made
+        `cp "a b" /tmp/out` lose its source token and slip past the fence."""
+        for cmd in (
+            'cp "a b" /tmp_probe/out',
+            "mv 'spaced name.txt' /usr/local/bin/x",
+        ):
+            allow, _ = hooks.evaluate_pre_tool_use(
+                payload("Bash", command=cmd), tmp_path
+            )
+            assert not allow, cmd
+
     def test_symlinked_root_spellings_compare_equal(self, tmp_path):
         """macOS /tmp -> /private/tmp: a write via the resolved spelling of a
         symlinked root must not be falsely denied (that stalls the phase)."""
