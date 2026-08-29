@@ -728,6 +728,62 @@ class TestFullSessionCapture:
             )
         assert '"tool_use"' in (exc.value.partial_text or "")
 
+    def test_child_stdin_is_devnull_by_decision(self, monkeypatch):
+        """An inherited stdin made the CLI wait 3s for piped data and warn
+        (measured in the Phase 0.5 smoke); behavior varied by host process.
+        The prompt travels in argv — the child gets DEVNULL, deterministically."""
+        captured = {}
+
+        class FakeProc:
+            pid = 4242
+            returncode = 0
+
+            def communicate(self, timeout=None):
+                return (RESULT_EVENT + "\n", "")
+
+        def fake_popen(argv, **kwargs):
+            captured.update(kwargs)
+            return FakeProc()
+
+        monkeypatch.setattr("claudomater.phases.subprocess.Popen", fake_popen)
+        ClaudeCliExecutor().run(PhaseSpec("dev", "m", "p"), "m")
+        assert captured["stdin"] is subprocess.DEVNULL
+
+    def test_unused_model_rows_filtered_but_real_fast_path_usage_kept(self, tmp_path):
+        """modelUsage lists every model the CLI touched. A configured-but-
+        unused row (all usage counters zero) is rollup noise — but capacity
+        fields (contextWindow, maxOutputTokens) are not usage, and the CLI's
+        internal fast-path models carry SMALL BUT REAL cost that accounting
+        must keep (measured on the rehearsal: haiku rows had real tokens)."""
+        envelope = json.dumps(
+            {
+                "type": "result",
+                "result": "done",
+                "modelUsage": {
+                    "claude-sonnet-5": {  # configured, never used
+                        "inputTokens": 0,
+                        "outputTokens": 0,
+                        "cacheReadInputTokens": 0,
+                        "costUSD": 0,
+                        "contextWindow": 1000000,
+                        "maxOutputTokens": 64000,
+                        "provider": "firstParty",
+                    },
+                    "claude-haiku-4-5-20251001": {  # real fast-path usage
+                        "inputTokens": 1126,
+                        "outputTokens": 15,
+                        "costUSD": 0.001201,
+                        "contextWindow": 200000,
+                    },
+                },
+            }
+        )
+        stub = stream_stub(tmp_path, ['{"type":"system"}', envelope])
+        result = ClaudeCliExecutor(claude_bin=str(stub)).run(
+            PhaseSpec("dev", "m", "p"), "m"
+        )
+        assert list(result.model_usage) == ["claude-haiku-4-5-20251001"]
+
     def test_stderr_is_retained_not_discarded(self, tmp_path):
         """CLI warnings/errors land on stderr; discarding them strips exactly
         the context a post-mortem needs. In a stream transcript it rides

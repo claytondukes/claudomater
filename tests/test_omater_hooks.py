@@ -239,6 +239,75 @@ class TestBashFence:
             )
             assert allow, cmd
 
+    def test_relative_target_honors_in_command_cd(self, tmp_path):
+        """The Phase 0.5 measured false deny: `cd <root>/server && cat >
+        ../.omater/scratch/x` resolved the redirect against the SESSION cwd
+        (repo root) instead of server/, landing one level ABOVE the repo —
+        denied, though the real target was in-root scratch."""
+        (tmp_path / "server").mkdir()
+        cmd = f"cd {tmp_path}/server && cat > ../.omater/scratch/probe.py"
+        p = payload("Bash", command=cmd)
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+
+    def test_cd_tracking_also_catches_true_out_of_tree_writes(self, tmp_path):
+        """The same tracking that fixes the false deny makes the deny
+        smarter: a relative write after cd-ing out of the tree is now a
+        RECOGNIZED out-of-tree write."""
+        cmd = "cd /etc && cat > passwd"
+        p = payload("Bash", command=cmd)
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+
+    def test_untrackable_cwd_fails_open_never_falsely_denies(self, tmp_path):
+        """Deny-on-recognized: when the effective cwd is unknowable, a
+        RELATIVE target is not a recognized out-of-tree write — allow."""
+        for cmd in (
+            "cd $BUILD_DIR && cat > out.txt",  # variable cd target
+            'cd "some dir" && cat > out.txt',  # quoted cd target (placeholder)
+            "cd - && cat > out.txt",  # OLDPWD
+            "pushd /tmp && popd && cat > out.txt",  # popd
+            "(cd /tmp && echo hi) && cat > out.txt",  # subshell scoping
+            "cd $(mktemp -d) && cat > out.txt",  # command substitution
+            "cd /etc | cat > out.txt",  # pipeline segment = subshell
+            "cd /etc & cat > out.txt",  # backgrounded cd = subshell
+            "false || cd /etc; cat > out.txt",  # ||-guarded: conditional
+        ):
+            p = payload("Bash", command=cmd)
+            p["cwd"] = str(tmp_path)
+            allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+            assert allow, (cmd, reason)
+
+    def test_absolute_targets_deny_regardless_of_cwd_tracking(self, tmp_path):
+        """Losing the cwd must not disarm the fence for absolute targets."""
+        cmd = "cd $BUILD_DIR && cat > /tmp_probe/evil.txt"
+        p = payload("Bash", command=cmd)
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+
+    def test_relative_cd_chain_tracks_and_write_inside_subshell_denies(self, tmp_path):
+        (tmp_path / "a" / "b").mkdir(parents=True)
+        # chained relative cds stay in-tree -> allowed
+        p = payload("Bash", command="cd a && cd b && cat > out.txt")
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+        # a write INSIDE `(cd /tmp && ...)` is linearly tracked -> denied
+        p = payload("Bash", command="(cd /tmp_probe && cat > evil.txt)")
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+
+    def test_cd_mentioned_in_prose_does_not_move_the_cwd(self, tmp_path):
+        """Only cd at a command position counts: `echo cd /etc` is prose."""
+        p = payload("Bash", command="echo cd /etc; cat > out.txt")
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+
     def test_writes_inside_quoted_interpreter_code_pass_by_design(self, tmp_path):
         """CHARACTERIZATION, not a bug (report rough edge #7, measured in the
         sandbox proof): the fence is a redirector for tool-shaped writes, not

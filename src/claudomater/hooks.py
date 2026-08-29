@@ -78,7 +78,19 @@ _DD_OF = re.compile(r"\bdd\b[^;|&]*\bof=([^\s;|&<>()]+)")
 _COPY = re.compile(r"\b(?:cp|mv|rsync|install)\s+(?:-[^\s]+\s+)*(?:[^\s;|&<>()]+\s+)+([^\s;|&<>()]+)")
 
 
-def bash_write_targets(command: str) -> list[str]:
+# cd/pushd/popd at a command position. group 1 = the separator BEFORE it
+# (distinguishes `&&`/`;` from a single `|`: a cd inside a pipeline segment
+# runs in a subshell and moves NOTHING), group 2 = verb, group 3 = target
+# token ('' when bare / immediately followed by && etc).
+_CHDIR = re.compile(
+    r"(^|\|\||&&|[\n;&|(])\s*(cd|pushd|popd)\b\s*(?:-[A-Za-z]+\s+)*([^\s;|&<>()]*)"
+)
+# Constructs that make the effective cwd untrackable from here on: subshells
+# and command substitution (both paren forms) and backticks.
+_CWD_OPAQUE = re.compile(r"[()`]")
+
+
+def _scannable(command: str) -> str:
     # Heredoc bodies and quoted strings are DATA (script contents, commit
     # messages, doc text) — scanning them produces false denies on
     # legitimate in-tree work. Quoted strings become a placeholder TOKEN,
@@ -89,14 +101,95 @@ def bash_write_targets(command: str) -> list[str]:
     # (relative, in-tree) placeholder, which the deny-on-recognized
     # contract accepts.
     scannable = _HEREDOC.sub(lambda m: m.group(1), command)
-    scannable = _QUOTED.sub(" _quoted_data_ ", scannable)
-    targets: list[str] = []
+    return _QUOTED.sub(" _quoted_data_ ", scannable)
+
+
+def _positioned_write_targets(scannable: str) -> list[tuple[int, str]]:
+    targets: list[tuple[int, str]] = []
     for pattern in (_REDIRECT, _TEE, _CREATE, _DD_OF, _COPY):
         for m in pattern.finditer(scannable):
             target = m.group(1).strip("'\"")
             if target and not target.startswith("&"):
-                targets.append(target)
+                targets.append((m.start(1), target))
     return targets
+
+
+def bash_write_targets(command: str) -> list[str]:
+    """The raw write-shaped targets the scan recognizes (shape only; see
+    resolved_bash_targets for where each one actually lands)."""
+    return [raw for _, raw in _positioned_write_targets(_scannable(command))]
+
+
+def resolved_bash_targets(command: str, cwd: Path) -> list[tuple[str, Path | None]]:
+    """Each recognized write target paired with the path it resolves to,
+    honoring in-command `cd`/`pushd` when resolving RELATIVE targets.
+
+    Measured false deny this exists to close (Phase 0.5, bugtool):
+    `cd <root>/server && cat > ../.omater/scratch/probe.py` resolved the
+    redirect against the SESSION cwd (the repo root), landing one level
+    above the repo — denied, though the real target was in-root scratch.
+
+    A None path means the target is relative but the effective cwd is no
+    longer knowable, so the caller must fail OPEN (deny-on-recognized: an
+    unresolvable relative target is not a *recognized* out-of-tree write,
+    and a guess would falsely deny). Unknowable covers: cd to a variable /
+    quoted value / `-` / bare, popd, any subshell or command substitution
+    seen earlier, a cd inside a pipeline segment or backgrounded with `&`
+    (both run in subshells and move nothing), and a `||`-guarded cd (runs
+    only on the failure path). One assumption is made on purpose: a tracked
+    cd is assumed to SUCCEED — `cd x && write` even guarantees it, and the
+    happy path is the universal agent idiom; a cd that failed mid-`;`-chain
+    can still mis-resolve a later relative target, which deny-on-recognized
+    accepts. Absolute targets never depend on the cwd and always resolve."""
+    scannable = _scannable(command)
+    events: list[tuple[int, str, Any]] = [
+        (pos, "target", raw) for pos, raw in _positioned_write_targets(scannable)
+    ]
+    for m in _CWD_OPAQUE.finditer(scannable):
+        events.append((m.start(), "opaque", None))
+    for m in _CHDIR.finditer(scannable):
+        # `cd /x & ...` (backgrounded) and `cd /x | ...` (first pipeline
+        # segment) both run the cd in a subshell that moves nothing — detect
+        # a single `&`/`|` (not `&&`/`||`) right after the cd's own tokens
+        rest = scannable[m.end() :].lstrip()
+        backgrounded = (
+            rest.startswith("&") and not rest.startswith("&&")
+        ) or (rest.startswith("|") and not rest.startswith("||"))
+        events.append(
+            (m.start(2), "chdir", (m.group(1), m.group(2), m.group(3), backgrounded))
+        )
+    events.sort(key=lambda e: e[0])
+
+    current: Path | None = cwd
+    out: list[tuple[str, Path | None]] = []
+    for _pos, kind, value in events:
+        if kind == "target":
+            raw = str(value)
+            if Path(os.path.expanduser(raw)).is_absolute():
+                out.append((raw, _norm(raw, cwd)))
+            elif current is None:
+                out.append((raw, None))
+            else:
+                out.append((raw, _norm(raw, current)))
+            continue
+        if kind == "opaque":
+            current = None
+            continue
+        sep, verb, target, backgrounded = value
+        if sep == "|" or sep == "||" or backgrounded or verb == "popd":
+            current = None
+            continue
+        target = str(target or "")
+        if not target or target == "-" or "$" in target or "_quoted_data_" in target:
+            current = None
+            continue
+        step = Path(os.path.expanduser(target))
+        if step.is_absolute():
+            current = Path(os.path.realpath(step))
+        elif current is not None:
+            current = Path(os.path.realpath(current / step))
+        # relative cd from an unknown cwd stays unknown
+    return out
 
 
 def scratch_dirs_for(root: Path, env: dict[str, str] | None = None) -> list[Path]:
@@ -167,8 +260,13 @@ def evaluate_pre_tool_use(
         command = tool_input.get("command")
         if not isinstance(command, str):
             return True, None
-        for raw in bash_write_targets(command):
-            path = _norm(raw, cwd)
+        for raw, path in resolved_bash_targets(command, cwd):
+            if path is None:
+                # Relative target, untrackable effective cwd: not a
+                # RECOGNIZED out-of-tree write — fail open, never guess-deny
+                # (the false-deny cost is a stalled phase; the miss is
+                # covered by verifiers + permission_denials accounting).
+                continue
             if not _allowed(path, root, scratch):
                 return False, (
                     f"Bash out-of-tree write denied: {raw!r} resolves to {path}. "

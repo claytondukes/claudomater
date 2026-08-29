@@ -147,6 +147,11 @@ class ClaudeCliExecutor:
     ) -> ExecutionResult:
         proc = subprocess.Popen(
             self.build_argv(spec, model),
+            # DEVNULL, not inherited: with a live inherited stdin the CLI
+            # waits 3s for piped data and warns on stderr (measured in the
+            # Phase 0.5 smoke); behavior varied by host process. The prompt
+            # travels in argv — the child never needs stdin.
+            stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -228,7 +233,7 @@ class ClaudeCliExecutor:
             # a lone result object IS the full output, not a session stream
             transcript=stdout if object_lines > 1 else None,
             cost_usd=final.get("total_cost_usd"),
-            model_usage=final.get("modelUsage"),
+            model_usage=_used_models(final.get("modelUsage")),
             permission_denials=final.get("permission_denials"),
         )
 
@@ -434,6 +439,37 @@ def salvage_uncommitted(project_root: Path, message: str = "wip(phase-crash)") -
         _unstage()
         return False
     return True
+
+
+# modelUsage fields that describe CAPACITY, not consumption — a row is
+# "unused" only when its actual usage counters are all zero.
+_CAPACITY_FIELDS = frozenset({"contextWindow", "maxOutputTokens"})
+
+
+def _used_models(model_usage: Any) -> Any:
+    """Drop modelUsage rows for models the run never actually consumed
+    (every usage counter zero) — configured-but-unused entries are noise in
+    cost rollups. Rows with ANY real consumption stay untouched (the CLI's
+    internal fast-path models carry small but real cost). Unknown shapes
+    pass through unfiltered — accounting must never guess."""
+    if not isinstance(model_usage, dict):
+        return model_usage
+    kept: dict[str, Any] = {}
+    for model, stats in model_usage.items():
+        if not isinstance(stats, dict):
+            kept[model] = stats
+            continue
+        counters = [
+            v
+            for k, v in stats.items()
+            if k not in _CAPACITY_FIELDS
+            and isinstance(v, (int, float))
+            and not isinstance(v, bool)
+        ]
+        if counters and all(v == 0 for v in counters):
+            continue
+        kept[model] = stats
+    return kept or None
 
 
 def _tail(text: str, limit: int = 500) -> str:
