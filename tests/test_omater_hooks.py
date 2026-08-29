@@ -553,6 +553,75 @@ class TestBashFence:
             allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
             assert allow, (cmd, reason)
 
+    def test_cd_as_an_argument_does_not_void_tracking(self, tmp_path):
+        """`echo cd` is an argument, not a command — the fallback voiding
+        a known /etc there hid the recognized write behind the fail-open
+        path. Current-shell wrappers (`command cd`) still void."""
+        p = payload("Bash", command="cd /etc; echo cd; cat > passwd")
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+        # `command cd` DOES move the current shell's cwd: still unmodeled,
+        # still voids (fail open)
+        p = payload("Bash", command=f"cd /etc; command cd {tmp_path}; cat > passwd")
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+
+    def test_assignment_only_segment_keeps_the_tracked_cwd(self, tmp_path):
+        """`HOME=$HOME` runs no command word — the cwd genuinely stays
+        put, and reading it as an unnameable command hid the recognized
+        /etc write. `HOME=x $CMD` still voids: $CMD can expand to `cd`,
+        which runs in the CURRENT shell."""
+        p = payload("Bash", command="cd /etc; HOME=$HOME; cat > passwd")
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+        p = payload("Bash", command="cd /etc; HOME=x $CMD; cat > passwd")
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+
+    def test_bitwise_and_in_arithmetic_is_not_backgrounding(self, tmp_path):
+        """`$((x & 1))` is a bitwise AND — reading it as a background `&`
+        voided the tracked /etc and hid the recognized write."""
+        p = payload("Bash", command="cd /etc; echo $((x & 1)); cat > passwd")
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+
+    def test_pipeline_cd_keeps_the_parent_cwd(self, tmp_path):
+        """A cd in a pipeline (either side) runs in a subshell that moves
+        NOTHING: the parent's tracked cwd stays valid — voiding it turned
+        the known /etc into unknown and hid the recognized write."""
+        for cmd in (
+            "cd /etc; true | cd /tmp; cat > passwd",
+            "cd /etc; cd /tmp | true; cat > passwd",
+        ):
+            p = payload("Bash", command=cmd)
+            p["cwd"] = str(tmp_path)
+            allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+            assert not allow, cmd
+
+    def test_set_physical_makes_flagless_cd_mode_unknowable(self, tmp_path):
+        """`set -P` flips every later flagless cd to physical `..`
+        resolution: through an in-root symlink to an outside dir,
+        `cd link && cd ..` physically lands OUTSIDE while logical stepping
+        lands back in-root — tracking the logical answer misresolved the
+        write. After a physical-option toggle the mode is unknowable:
+        relative hops fail open. P-irrelevant `set` flags must not
+        disturb tracking."""
+        outside = tmp_path.parent / (tmp_path.name + "_target")
+        outside.mkdir()
+        (tmp_path / "link").symlink_to(outside)
+        cmd = "set -P; cd link && cd .. && cat > out.txt"
+        [(_, resolved)] = hooks.resolved_bash_targets(cmd, tmp_path)
+        assert resolved is None
+        p = payload("Bash", command="set -x; cd /etc; cat > passwd")
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+
     def test_arith_scan_is_linear_in_command_size(self, tmp_path):
         """The fence runs synchronously in PreToolUse — rescanning the
         data-span list per character made the arithmetic scan quadratic

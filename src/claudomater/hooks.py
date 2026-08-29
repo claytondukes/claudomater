@@ -321,11 +321,22 @@ _CD_WORD = re.compile(r"(?<![^\s;&|(<>])(?:cd|pushd|popd)(?![^\s;&|)<>\n])")
 # A command-position word containing the quote placeholder is a command we
 # cannot name: bash concatenates quoted spans (`c""d server` runs cd, `"cd"
 # server` runs cd), so the expanded command may move the cwd invisibly —
-# void tracking (soft: later unconditional absolute cds recover).
+# void tracking (soft: later unconditional absolute cds recover). The
+# lookahead keeps ASSIGNMENT-ONLY segments out: `HOME=$HOME` runs no
+# command word at all (the cwd genuinely stays put — voiding it hid a
+# recognized /etc write), while `HOME=x $CMD` still voids ($CMD can expand
+# to `cd`, which then runs in the CURRENT shell).
 _GLUED_COMMAND = re.compile(
     r"(?:^|[\n;&|(])\s*(?:[A-Za-z_][A-Za-z0-9_]*=[^\s;|&<>()]*\s+)*"
+    r"(?![A-Za-z_][A-Za-z0-9_]*=)"
     r"[^\s;|&<>()]*(?:_quoted_data_|[\\$])[^\s;|&<>()]*"
 )
+# Words that can precede a cd token without changing WHICH shell executes
+# it: assignments, redirections, wrapper options, and the current-shell
+# wrappers themselves (`command cd` / `builtin cd` / `time cd` all move
+# the cwd; `echo cd`, `env cd`, `xargs cd` cannot).
+_TRANSPARENT_PREFIX_WORD = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=\S*|\d*[<>]\S*|&>\S*|-\S*")
+_CD_WRAPPERS = frozenset({"command", "builtin", "time"})
 def _segment_boundary(text: str, start: int) -> int:
     """Position of the control operator ending the command segment at
     `start` (or len(text)). An `&` inside redirection syntax — `>&`/`<&`
@@ -373,8 +384,12 @@ def _last_lp_flag(flags: str) -> str | None:
     return last
 
 
-def _bare_ampersands(text: str) -> list[int]:
+def _bare_ampersands(
+    text: str, arith: list[tuple[int, int]] | None = None
+) -> list[int]:
     out = []
+    arith = arith or []
+    ai = 0
     for m in re.finditer(r"&", text):
         i = m.start()
         prev = text[i - 1] if i > 0 else ""
@@ -383,11 +398,28 @@ def _bare_ampersands(text: str) -> list[int]:
             continue
         if _escape_parity(text, i) == 1:  # \& is word data, not control
             continue
+        # bitwise AND inside an arithmetic span (`$((x & 1))`) is data, not
+        # a background op — voiding the cwd there hid a recognized write.
+        # Cursor lookup: matches and spans are both ascending.
+        while ai < len(arith) and arith[ai][1] <= i:
+            ai += 1
+        if ai < len(arith) and arith[ai][0] <= i:
+            continue
         out.append(i)
     return out
 # Constructs that make the effective cwd untrackable from here on: subshells
 # and command substitution (both paren forms) and backticks.
 _CWD_OPAQUE = re.compile(r"[()`]")
+# `set -P` / `set -o physical` flips how every LATER cd resolves `..`
+# through symlinks, and cds here read only their per-command -L/-P flags.
+# Any command-position `set` that touches the physical option makes the
+# DEFAULT mode unknowable from that point on (monotone — a later `set +P`
+# could restore it, but option state is not modeled precisely): a flagless
+# relative or dot-traversing cd afterwards fails open instead of tracking
+# a logically-computed cwd the shell may not actually be in.
+_SET_PHYSICAL = re.compile(
+    r"(?:^|[\n;&|(])\s*set[ \t]+[^\n;&|()]*(?:[-+][A-Za-z]*P|[-+]o[ \t]+physical)"
+)
 # Compound control flow this scanner does not model: a cd inside
 # `if false; then cd /etc; fi`, a function body, or a zero-iteration loop
 # may never execute, so applying it would guess-deny. `eval`, `source`, and
@@ -500,9 +532,11 @@ def resolved_bash_targets(
     unresolvable relative target is not a *recognized* out-of-tree write,
     and a guess would falsely deny). Unknowable covers: cd to a variable /
     quoted value / `-` / bare, popd, any subshell or command substitution
-    seen earlier, a cd inside a pipeline segment or backgrounded with `&`
-    (both run in subshells and move nothing), and a `||`-guarded cd (runs
-    only on the failure path). One assumption is made on purpose: a tracked
+    seen earlier, and a `||`-guarded cd (runs only on the failure path).
+    A cd inside a pipeline segment or backgrounded with `&` runs in a
+    subshell that moves NOTHING — the parent's tracked cwd is KEPT, not
+    voided (voiding turned known cwds into unknown and hid recognized
+    writes behind the fail-open path). One assumption is made on purpose: a tracked
     cd is assumed to SUCCEED — `cd x && write` even guarantees it, and the
     happy path is the universal agent idiom; a cd that failed mid-`;`-chain
     can still mis-resolve a later relative target, which deny-on-recognized
@@ -558,8 +592,10 @@ def resolved_bash_targets(
         # (subshells, eval, bare &) stays recoverable because top-level
         # flow demonstrably resumes after those.
         events.append((m.start(), "hard", None))
-    for pos in _bare_ampersands(scannable):
+    for pos in _bare_ampersands(scannable, arith):
         events.append((pos, "opaque", None))
+    for m in _SET_PHYSICAL.finditer(scannable):
+        events.append((m.end(), "setmode", None))
     # A `<<` surviving _scannable is a heredoc shape the parser does not
     # support (exotic delimiters: END@MARK, <<\EOF, ...) — its BODY stayed
     # scannable, and body text is DATA: neither cds nor redirects in it
@@ -594,13 +630,34 @@ def resolved_bash_targets(
 
     chdir_matches = [m for m in _CHDIR.finditer(scannable) if _real_separator(m)]
     matched_verb_spans = [(m.start(2), m.end(2)) for m in chdir_matches]
+    def _cd_word_can_execute(pos: int) -> bool:
+        # An unmatched cd-ish token can move THIS shell's cwd only when
+        # every word between its segment start and the token leaves it in
+        # command position: assignments, redirects, options, and the
+        # current-shell wrappers (`command cd`). Anything else (`echo cd`)
+        # makes it an argument — voiding a correctly tracked cwd there hid
+        # a recognized /etc write behind the fail-open path. A placeholder
+        # prefix word (`"command" cd`) is caught by _GLUED_COMMAND instead.
+        s = pos
+        while s > 0:
+            c = scannable[s - 1]
+            if c in ";&|(\n" and _escape_parity(scannable, s - 1) == 0:
+                break
+            s -= 1
+        return all(
+            w in _CD_WRAPPERS or _TRANSPARENT_PREFIX_WORD.fullmatch(w)
+            for w in scannable[s:pos].split()
+        )
+
     for m in _CD_WORD.finditer(scannable):
         # a cd-ish token the parser did not positively match voids tracking
         # (see _CD_WORD) — never leave an unrecognized cd silently untracked.
         # Effect at the segment boundary: a redirect attached to the same
         # command (`command cd /etc > ../escape.txt`) opens against the
         # PRE-command cwd and must still resolve (and deny).
-        if not any(start <= m.start() < end for start, end in matched_verb_spans):
+        if not any(
+            start <= m.start() < end for start, end in matched_verb_spans
+        ) and _cd_word_can_execute(m.start()):
             events.append((_segment_boundary(scannable, m.end()), "opaque", None))
     for m in chdir_matches:
         # The cd takes effect at its segment's END, not at the verb: a
@@ -611,19 +668,15 @@ def resolved_bash_targets(
         # redirect.
         effect_pos = _segment_boundary(scannable, m.end())
         boundary = scannable[effect_pos : effect_pos + 2]
-        # `cd /x &` (backgrounded) and `cd /x | ...` (pipeline segment) run
-        # the cd in a subshell that moves nothing; `cd /x || ...` makes the
-        # next branch the cd's FAILURE path (cwd unchanged there) and
-        # everything after it ambiguous. A non-redirect word after the
-        # target (`cd /etc \; cat`) is an extra argument bash rejects
-        # without moving — applying the target would poison later segments
-        # with a cwd the shell never entered (false deny). All: never
-        # apply.
-        unusable = (
-            bool(_TRAILING_REDIRECT.sub("", scannable[m.end() : effect_pos]).strip())
-            or (boundary.startswith("&") and not boundary.startswith("&&"))
+        # `cd /x &` (backgrounded) and `cd /x | ...` (pipeline segment,
+        # either side — `|&` included) run the cd in a subshell that moves
+        # NOTHING: the parent's tracked cwd stays valid, so these keep it
+        # (voiding turned a known /etc into unknown and let `cd /etc;
+        # true | cd /tmp; cat > passwd` write /etc/passwd unrecognized).
+        in_pipeline = (
+            (boundary.startswith("&") and not boundary.startswith("&&"))
             or (boundary.startswith("|") and not boundary.startswith("||"))
-            or boundary.startswith("||")
+            or m.group(1) == "|"
             # `|&` pipes stderr: a cd on its right side runs in the pipeline
             # subshell, exactly like one after a plain `|`
             or (
@@ -632,14 +685,23 @@ def resolved_bash_targets(
                 and scannable[m.start(1) - 1] == "|"
             )
         )
+        # `cd /x || ...` makes the next branch the cd's FAILURE path (cwd
+        # unchanged there) and everything after it ambiguous; a non-redirect
+        # word after the target (`cd /etc \; cat`) is an extra argument bash
+        # rejects without moving — applying the target would poison later
+        # segments with a cwd the shell never entered (false deny). Both:
+        # cwd unknowable, never apply.
+        unusable = boundary.startswith("||") or bool(
+            _TRAILING_REDIRECT.sub("", scannable[m.end() : effect_pos]).strip()
+        )
         events.append(
             (
                 effect_pos,
                 "chdir",
-                (m.group(1), m.group(2), m.group(3), m.group(4), unusable),
+                (m.group(1), m.group(2), m.group(3), m.group(4), unusable, in_pipeline),
             )
         )
-        if m.group(1) == "&&" and not unusable:
+        if m.group(1) == "&&" and not unusable and not in_pipeline:
             # A &&-guarded cd is CONDITIONAL: within its own && list every
             # later member runs only if the cd succeeded, so applying it is
             # sound — but past the list's end (`;`, newline, `)`) execution
@@ -658,6 +720,7 @@ def resolved_bash_targets(
     priority = {
         "target": 0,
         "chdir": 1,
+        "setmode": 1,
         "orelse": 2,
         "listsep": 3,
         "opaque": 4,
@@ -670,6 +733,7 @@ def resolved_bash_targets(
     cd_applied_in_list = False
     dead = False  # hard opacity: no cd may recover tracking anymore
     walled = False  # unparseable remainder: even absolute targets fail open
+    physical_mode: bool | None = False  # bash default -L; None = unknowable
     out: list[tuple[str, Path | None]] = []
     for _pos, kind, value in events:
         if kind == "target":
@@ -726,7 +790,10 @@ def resolved_bash_targets(
         if kind == "listsep":
             cd_applied_in_list = False
             continue
-        sep, verb, flags, target, unusable = value
+        if kind == "setmode":
+            physical_mode = None
+            continue
+        sep, verb, flags, target, unusable, in_pipeline = value
         if dead:
             # inside (or after) an unmodeled compound body: even an
             # absolute cd may never have executed — no recovery
@@ -741,7 +808,11 @@ def resolved_bash_targets(
             "-n" in flags.split() or str(target or "") == "-n"
         ):
             continue
-        if sep == "|" or sep == "||" or unusable or verb == "popd":
+        if in_pipeline:
+            # a pipeline/background subshell cd moves nothing in the parent:
+            # the tracked cwd stays exactly as it was
+            continue
+        if sep == "||" or unusable or verb == "popd":
             current = None
             cd_applied_in_list = False
             continue
@@ -780,8 +851,20 @@ def resolved_bash_targets(
         # the link's parent, not the symlink target's parent. Track the
         # logical cwd (lexical `..` handling, no realpath per hop) and
         # canonicalize only when a WRITE target is resolved (_norm) — or
-        # when the hop's effective option ordering selects -P.
-        physical = _last_lp_flag(flags) == "P"
+        # when the hop's effective option ordering selects -P. A flagless
+        # cd inherits the shell's option state (see _SET_PHYSICAL).
+        lp = _last_lp_flag(flags)
+        physical = physical_mode if lp is None else lp == "P"
+        if physical is None and not (
+            step.is_absolute() and ".." not in step.parts
+        ):
+            # default mode unknowable after set -P/-o physical: a relative
+            # or dot-traversing hop lands somewhere mode-dependent — a
+            # logically-computed cwd here allowed an out-of-tree write as
+            # in-root through an in-root symlink. A plain absolute target
+            # lands the same either way and keeps tracking.
+            current = None
+            continue
         if step.is_absolute():
             new_cwd = str(step)
         elif cdpath_active and not (
