@@ -433,6 +433,28 @@ class TestBashFence:
             allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
             assert allow, (cmd, reason)
 
+    def test_ansi_c_quoting_allows_escaped_quotes(self, tmp_path):
+        """$'text \\' more' is ONE argument (ANSI-C quoting) — ending the
+        span at the escaped quote exposed its text as a redirect target."""
+        cmd = "printf '%s' $'text \\' > /tmp_probe/data' > out.txt"
+        p = payload("Bash", command=cmd)
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+
+    def test_unsupported_heredoc_shapes_are_hard_opacity(self, tmp_path):
+        """Delimiters beyond the supported grammar (END@MARK, <<\\EOF) leave
+        their bodies scannable — instead of applying body text as commands
+        (false deny), a surviving << kills tracking (fail open)."""
+        for cmd in (
+            "cat <<END@MARK\ncd /etc\nEND@MARK\ncat > out.txt",
+            "cat <<\\EOF\ncd /etc\nEOF\ncat > out.txt",
+        ):
+            p = payload("Bash", command=cmd)
+            p["cwd"] = str(tmp_path)
+            allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+            assert allow, (cmd, reason)
+
     def test_backtick_escaping_is_parity_based(self, tmp_path):
         """`\\\\\\`` after an even backslash run OPENS a substitution — the
         single-char check missed it, and a backtick inside a later real

@@ -96,7 +96,18 @@ def _mask_quotes(text: str) -> str:
         c = text[i]
         if c in "'\"" and escape_parity(i) == 0:
             if c == "'":
-                end = text.find("'", i + 1)
+                # ANSI-C quoting $'...' allows backslash-escaped quotes
+                # inside; a plain single-quoted span cannot contain any.
+                if i > 0 and text[i - 1] == "$" and escape_parity(i - 1) == 0:
+                    end = i + 1
+                    while end < n and not (
+                        text[end] == "'" and escape_parity(end) == 0
+                    ):
+                        end += 1
+                    if end >= n:
+                        end = -1
+                else:
+                    end = text.find("'", i + 1)
             else:
                 end = i + 1
                 while end < n and not (
@@ -326,7 +337,18 @@ def _scannable(command: str) -> str:
     # copy-target regex no longer saw the out-of-tree write. A quoted
     # redirect TARGET ('> "/x y"') reads as the placeholder, which the
     # resolver treats as non-literal and fails OPEN on (deny-on-recognized).
-    scannable = _HEREDOC.sub(lambda m: m.group(1), command)
+    def _heredoc_repl(m: re.Match) -> str:
+        # keep the intro line scannable (its redirect is real) but blank the
+        # `<<delim` marker: any << SURVIVING this pass is a heredoc shape the
+        # pattern does not support, which the resolver treats as hard opacity
+        intro = m.group(1)
+        delim_end = m.end(3) if m.group(3) is not None else m.end(4)
+        if m.group(2):
+            delim_end += 1  # closing quote
+        cut = delim_end - m.start(1)
+        return " " * cut + intro[cut:]
+
+    scannable = _HEREDOC.sub(_heredoc_repl, command)
     # No padding around the placeholder: quotes glued to other characters
     # (`echo "x"#suffix`, `cp x"a b"y t`) must keep their word intact — a
     # space-padded placeholder invented a word boundary that turned #suffix
@@ -416,6 +438,13 @@ def resolved_bash_targets(
         events.append((m.start(), "hard", None))
     for pos in _bare_ampersands(scannable):
         events.append((pos, "opaque", None))
+    # A `<<` surviving _scannable is a heredoc shape the parser does not
+    # support (exotic delimiters: END@MARK, <<\EOF, ...) — its body stayed
+    # scannable, so tracking anything after it would apply data as commands.
+    # Hard opacity, per the fail-open contract. (`<<<` here-strings excluded;
+    # supported heredocs had their marker blanked.)
+    for m in re.finditer(r"(?<!<)<<(?!<)", scannable):
+        events.append((m.start(), "hard", None))
     # A cd is APPLIED on the assumption it succeeded; a later `||` in the
     # same list runs its RHS precisely when something failed — possibly that
     # cd — so the cwd there (and after) is unknowable. `;`/newline resets
