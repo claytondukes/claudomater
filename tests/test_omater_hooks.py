@@ -553,6 +553,58 @@ class TestBashFence:
             allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
             assert allow, (cmd, reason)
 
+    def test_invalid_builtin_flags_never_apply_the_target(self, tmp_path):
+        """bash rejects `pushd -P /etc` and `cd -Z /etc` (invalid option)
+        WITHOUT moving — applying the target tracked a cwd the shell never
+        entered and falsely denied the in-root write. Valid flags still
+        track (and deny)."""
+        for cmd in (
+            "pushd -P /etc; cat > out.txt",
+            "cd -Z /etc; cat > out.txt",
+        ):
+            p = payload("Bash", command=cmd)
+            p["cwd"] = str(tmp_path)
+            allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+            assert allow, (cmd, reason)
+        p = payload("Bash", command="cd -L /etc; cat > passwd")
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+
+    def test_comment_after_line_continuation_is_a_comment(self, tmp_path):
+        """bash removes `\\<newline>` BEFORE recognizing comments:
+        `echo ok \\<nl># ignored > /tmp_probe/x` joins to a comment whose
+        redirect never runs (scanning it falsely denied), while
+        `echo x\\<nl>#y` joins into the WORD `x#y` (not a comment — its
+        real redirect must stay recognized)."""
+        p = payload("Bash", command="echo ok \\\n# ignored > /tmp_probe/x")
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+        p = payload("Bash", command="cd /etc; echo x\\\n#y > passwd")
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+
+    def test_directory_stack_tilde_write_targets_fail_open(self, tmp_path):
+        """`cd /etc && echo x > ~-/out.txt` writes under $OLDPWD (in-root
+        here) — resolving the literal `~-` against /etc falsely denied it.
+        Same rule as cd targets: a tilde surviving expanduser is runtime
+        state, fail open. A plain `~/` target still resolves (and
+        denies)."""
+        p = payload("Bash", command="cd /etc && echo x > ~-/out.txt")
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+        [(_, resolved)] = hooks.resolved_bash_targets(
+            "cd /etc && echo x > ~-/out.txt", tmp_path
+        )
+        assert resolved is None
+        p = payload("Bash", command="echo x > ~/omater-tilde-probe.txt")
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+
     def test_cd_as_an_argument_does_not_void_tracking(self, tmp_path):
         """`echo cd` is an argument, not a command — the fallback voiding
         a known /etc there hid the recognized write behind the fail-open

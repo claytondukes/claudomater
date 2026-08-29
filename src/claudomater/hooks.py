@@ -124,8 +124,21 @@ def _lex_spans(text: str) -> list[tuple[str, int, int]]:
             i += 1
             continue
         if c == "#":
-            prev = text[i - 1] if i else ""
-            if i == 0 or (prev in " \t\n;&|(<>" and not escaped(i - 1)):
+            # bash removes `\<newline>` continuations BEFORE recognizing
+            # comments, so the boundary char is whatever precedes the
+            # pair(s): `echo ok \<nl># x` joins to `echo ok # x` (comment —
+            # leaving its text scannable falsely denied a redirect bash
+            # never runs), while `echo x\<nl>#y` joins to the WORD `x#y`.
+            j = i - 1
+            while (
+                j >= 1
+                and text[j] == "\n"
+                and text[j - 1] == "\\"
+                and not escaped(j - 1)
+            ):
+                j -= 2
+            prev = text[j] if j >= 0 else ""
+            if j < 0 or (prev in " \t\n;&|(<>" and not escaped(j)):
                 # BEFORE the quote branch: a quote in the comment is text
                 end = comment_end(i)
                 spans.append(("comment", i, end))
@@ -758,6 +771,13 @@ def resolved_bash_targets(
                 # literal falsely denied both shapes. Same rule as cd
                 # targets below: fail open.
                 out.append((raw, None))
+            elif os.path.expanduser(raw).startswith("~"):
+                # a tilde surviving expanduser: directory-stack forms
+                # (`~-` = $OLDPWD, `~+`, `~N`) or an unknown user — runtime
+                # state, same rule as cd targets. Resolving the literal
+                # against the tracked cwd falsely denied `> ~-/out.txt`
+                # (an $OLDPWD write that landed in-root). Fail open.
+                out.append((raw, None))
             elif Path(os.path.expanduser(raw)).is_absolute():
                 out.append((raw, _norm(raw, cwd)))
             elif current is None:
@@ -807,6 +827,15 @@ def resolved_bash_targets(
         if verb in ("pushd", "popd") and (
             "-n" in flags.split() or str(target or "") == "-n"
         ):
+            continue
+        letters = "".join(re.findall(r"-([A-Za-z]+)", flags))
+        if any(ch not in ("LPe@" if verb == "cd" else "n") for ch in letters):
+            # a flag the builtin rejects (`cd -Z /etc`, `pushd -P /etc`)
+            # errors WITHOUT moving — applying the target tracked a cwd
+            # the shell never entered (false deny). Version drift cuts the
+            # other way too (a letter we call invalid may be accepted), so:
+            # unknown, fail open — never apply.
+            current = None
             continue
         if in_pipeline:
             # a pipeline/background subshell cd moves nothing in the parent:
