@@ -102,17 +102,26 @@ def default_providers() -> list[Any]:
 
 
 def acquire_token(providers: list[Any] | None = None) -> tuple[str, str]:
-    """Return (token, provider_name), or raise CredentialsUnavailable."""
+    """Return (token, provider_name), or raise CredentialsUnavailable.
+
+    Defensive about provider contracts: a provider without a `.name` gets a
+    derived label, and a non-string token is treated as "no token" (with an
+    error entry) rather than passed downstream where token.encode() would
+    breach the usage-refresh path's never-raises contract."""
     errors: list[str] = []
     for provider in providers if providers is not None else default_providers():
+        label = getattr(provider, "name", None) or type(provider).__name__
         try:
             token = provider.get_token()
         except Exception as exc:  # a broken provider must not mask the rest
-            errors.append(f"{provider.name}: {exc}")
+            errors.append(f"{label}: {exc}")
             continue
+        if isinstance(token, str) and token:
+            return token, label
         if token:
-            return token, provider.name
-        errors.append(f"{provider.name}: no token")
+            errors.append(f"{label}: non-string token ignored")
+        else:
+            errors.append(f"{label}: no token")
     raise CredentialsUnavailable("; ".join(errors) or "no providers configured")
 
 

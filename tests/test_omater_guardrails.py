@@ -480,6 +480,21 @@ class TestCredentialProviders:
         )
         assert (token, name) == ("second", "env")
 
+    def test_nonconforming_providers_fail_closed_not_crash(self):
+        """A provider returning a non-string token, or lacking .name, must
+        degrade to 'no token' — never hand bytes to token.encode()."""
+
+        class BytesToken:  # no .name attribute either
+            def get_token(self):
+                return b"raw-bytes"
+
+        with pytest.raises(CredentialsUnavailable, match="non-string token"):
+            acquire_token([BytesToken()])
+        token, label = acquire_token(
+            [BytesToken(), EnvTokenProvider(env={"OMATER_OAUTH_TOKEN": "ok"})]
+        )
+        assert (token, label) == ("ok", "env")
+
     def test_broken_provider_does_not_mask_the_chain(self):
         class Broken:
             name = "broken"
