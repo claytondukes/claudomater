@@ -111,6 +111,53 @@ def result_field(name: str, expected: Any = ...) -> Verifier:
     return check
 
 
+def result_file_exists(name: str) -> Verifier:
+    """The file the agent NAMED in result field `name` exists inside the
+    project root — the result-aware companion to `files_exist`. `files_exist`
+    checks a glob the spec author guessed in advance; this checks the path
+    the agent actually claimed, so a result that names a file which was never
+    written (or landed outside the project) fails on its own words.
+    Containment is part of the check: a path resolving outside the project
+    root fails even if it exists — an out-of-tree artifact is a fence
+    escape, not a deliverable."""
+
+    def check(ctx: VerifierContext) -> Verdict:
+        if name not in ctx.result:
+            return Verdict(
+                "result_file_exists", False, f"result missing field {name!r}"
+            )
+        value = ctx.result[name]
+        if not isinstance(value, str) or not value:
+            return Verdict(
+                "result_file_exists",
+                False,
+                f"result[{name!r}] is not a path string: {value!r}",
+            )
+        root = ctx.project_root.resolve()
+        try:
+            # `root / value` keeps `value` intact when it is absolute
+            path = (root / value).resolve()
+        except (OSError, RuntimeError) as exc:  # symlink loops included
+            return Verdict("result_file_exists", False, f"{value!r}: {exc}")
+        if path != root and root not in path.parents:
+            return Verdict(
+                "result_file_exists",
+                False,
+                f"result[{name!r}] = {value!r} resolves outside the project root",
+            )
+        # is_file, not exists: naming a directory (".", the project root...)
+        # would let an agent pass without producing any artifact at all
+        if not path.is_file():
+            return Verdict(
+                "result_file_exists",
+                False,
+                f"result[{name!r}] = {value!r} is not an existing file",
+            )
+        return Verdict("result_file_exists", True, f"result[{name!r}] -> {value!r} exists")
+
+    return check
+
+
 def command_ok(*argv: Any, timeout: int = 1800) -> Verifier:
     """An arbitrary reality check (test gauntlet, linter) exits 0.
 
@@ -146,6 +193,7 @@ BUILTINS: dict[str, Callable[..., Verifier]] = {
     "git_branch_exists": git_branch_exists,
     "git_worktree_clean": git_worktree_clean,
     "result_field": result_field,
+    "result_file_exists": result_file_exists,
     "command_ok": command_ok,
 }
 

@@ -17,6 +17,11 @@ from claudomater import hooks
 from claudomater.config import ConfigError, PROJECT_CONFIG_NAME, load_project_config
 
 GITIGNORE_LINE = ".omater/"
+# command_ok verifiers running pytest in the consumer repo leave a
+# .pytest_cache/ at its root; ignore it up front rather than letting a dev
+# phase commit it. Convenience, not drift: `--verify` requires only
+# GITIGNORE_LINE (run logs must never be committed; a cache dir is harmless).
+GITIGNORE_EXTRA_LINES = (".pytest_cache/",)
 
 TEMPLATE = """\
 # claudomater project config — committed, so pipeline behavior is reviewable
@@ -78,12 +83,17 @@ def run_init(root: Path | str, force: bool = False) -> list[str]:
         if gitignore.exists()
         else []
     )
-    if GITIGNORE_LINE not in lines:
+    missing = [
+        line
+        for line in (GITIGNORE_LINE, *GITIGNORE_EXTRA_LINES)
+        if line not in lines
+    ]
+    if missing:
         with open(gitignore, "a", encoding="utf-8") as fh:
             if lines and lines[-1].strip():
                 fh.write("\n")
-            fh.write(GITIGNORE_LINE + "\n")
-        actions.append(f"gitignored {GITIGNORE_LINE}")
+            fh.write("\n".join(missing) + "\n")
+        actions.append(f"gitignored {', '.join(missing)}")
     else:
         actions.append(f"{GITIGNORE_LINE} already gitignored")
 

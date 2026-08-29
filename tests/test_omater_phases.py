@@ -74,6 +74,11 @@ def make_runner(tmp_path, outputs, **kw):
     return runner, log, executor, notifier
 
 
+def transcripts(log, pattern="*"):
+    """Transcript files, newest naming scheme: story-phase-attempt-N-ts.ext."""
+    return sorted((log.run_dir / "transcripts").glob(pattern))
+
+
 def git(root, *args):
     return subprocess.run(
         ["git", "-C", str(root), *args], capture_output=True, text=True, check=True
@@ -252,15 +257,16 @@ class TestRunPhase:
         runner, log, *_ = make_runner(tmp_path, ["", GOOD])
         outcome = runner.run_phase(PhaseSpec("dev", "m", "p"))
         assert outcome.status == "verified"
-        assert log.transcript_path("dev", 1).exists()
-        assert log.transcript_path("dev", 1).read_text() == ""
+        first_attempt = transcripts(log, "dev-attempt-1-*")
+        assert len(first_attempt) == 1
+        assert first_attempt[0].read_text() == ""
 
     def test_transcripts_written_and_scrubbed(self, tmp_path, monkeypatch):
         monkeypatch.setenv("MY_SECRET", "hunter2secret")
         leaky = 'MY_SECRET=hunter2secret\n```json\n{"status": "done"}\n```'
         runner, log, *_ = make_runner(tmp_path, [leaky], secrets_deny=("MY_SECRET",))
         runner.run_phase(PhaseSpec("dev", "m", "p"))
-        transcript = log.transcript_path("dev", 1).read_text()
+        transcript = transcripts(log, "dev-attempt-1-*")[0].read_text()
         assert "hunter2secret" not in transcript
         assert "[REDACTED:MY_SECRET]" in transcript
 
@@ -279,7 +285,7 @@ class TestRunPhase:
         runner, log, *_ = make_runner(tmp_path, [timeout, GOOD], secrets_deny=("MY_SECRET",))
         outcome = runner.run_phase(PhaseSpec("dev", "m", "p"))
         assert outcome.status == "verified"
-        partial = log.transcript_path("dev", 1).read_text()
+        partial = transcripts(log, "dev-attempt-1-*")[0].read_text()
         assert "mid-work" in partial
         assert "hunter2secret" not in partial
 
@@ -599,3 +605,426 @@ class TestScrub:
         # a 1-char secret value must not cause every 'a' to be redacted
         out = scrub_text("a normal sentence", ["X"], env={"X": "a"})
         assert out == "a normal sentence"
+
+
+# ---- Phase 0 sandbox-proof rough edges (PHASE0-REPORT.md) ------------------
+
+
+import shlex
+
+from claudomater.phases import (
+    RETRY_FEEDBACK_HEADER,
+    ClaudeCliExecutor,
+    escalation_spec,
+    orphaned_agent_pids,
+    reap_orphaned_agents,
+)
+from claudomater.verifiers import result_file_exists
+
+
+def stream_stub(tmp_path, lines, sleep_after_s=None):
+    """A fake `claude` binary that prints the given stream-json lines.
+    printf, not echo: sh echo interprets \\n escapes inside JSON strings."""
+    body = "#!/bin/sh\n" + "\n".join(
+        f"printf '%s\\n' {shlex.quote(line)}" for line in lines
+    )
+    if sleep_after_s:
+        body += f"\nsleep {sleep_after_s}"
+    stub = tmp_path / "claude-stub"
+    stub.write_text(body + "\n", encoding="utf-8")
+    stub.chmod(0o755)
+    return stub
+
+
+RESULT_EVENT = json.dumps(
+    {
+        "type": "result",
+        "subtype": "success",
+        "result": 'done\n```json\n{"status": "ok"}\n```',
+        "usage": {"output_tokens": 7},
+        "total_cost_usd": 0.1234,
+        "modelUsage": {"claude-sonnet-5": {"outputTokens": 7}},
+        "permission_denials": [{"tool_name": "Bash", "tool_input": {}}],
+    }
+)
+TOOL_EVENT = json.dumps(
+    {
+        "type": "assistant",
+        "message": {
+            "content": [
+                {"type": "tool_use", "name": "Write", "input": {"file_path": "x.txt"}}
+            ]
+        },
+    }
+)
+
+
+class TestTranscriptCollision:
+    """Rough edge #1: after a 5-story run exactly ONE dev transcript survived
+    — every story's dev-attempt-1.md overwrote the previous story's."""
+
+    def test_two_stories_same_phase_keep_both_transcripts(self, tmp_path):
+        runner, log, *_ = make_runner(tmp_path, [GOOD, GOOD])
+        runner.run_phase(PhaseSpec("dev", "m", "p", story_key="OM-1"))
+        runner.run_phase(PhaseSpec("dev", "m", "p", story_key="OM-2"))
+        files = transcripts(log)
+        assert len(files) == 2, [f.name for f in files]
+        assert any("OM-1" in f.name for f in files)
+        assert any("OM-2" in f.name for f in files)
+
+
+class TestFullSessionCapture:
+    """Rough edges #2/#3: `--output-format json` kept only the final message
+    (706 bytes for a whole story) and dropped total_cost_usd / modelUsage /
+    permission_denials from the CLI envelope."""
+
+    def test_argv_asks_for_the_session_stream(self):
+        argv = ClaudeCliExecutor().build_argv(PhaseSpec("dev", "m", "p"), "m")
+        assert argv[argv.index("--output-format") + 1] == "stream-json"
+        assert "--verbose" in argv  # the CLI requires it with -p stream-json
+
+    def test_stream_yields_result_text_and_full_transcript(self, tmp_path):
+        stub = stream_stub(
+            tmp_path, ['{"type":"system","subtype":"init"}', TOOL_EVENT, RESULT_EVENT]
+        )
+        result = ClaudeCliExecutor(claude_bin=str(stub)).run(
+            PhaseSpec("dev", "m", "p"), "m"
+        )
+        assert result.text.startswith("done")
+        # the transcript is the whole session: the tool call is recoverable
+        assert '"tool_use"' in result.transcript
+        assert result.token_usage == {"output_tokens": 7}
+        assert result.cost_usd == 0.1234
+        assert result.model_usage == {"claude-sonnet-5": {"outputTokens": 7}}
+        assert result.permission_denials == [{"tool_name": "Bash", "tool_input": {}}]
+
+    def test_stream_without_result_event_is_not_a_result(self, tmp_path):
+        """An agent that dies mid-stream leaves event objects but no result
+        — those objects must not reach extract_json_result as a bogus phase
+        result. The stream is still retained as the transcript."""
+        stub = stream_stub(tmp_path, ['{"type":"system","subtype":"init"}', TOOL_EVENT])
+        result = ClaudeCliExecutor(claude_bin=str(stub)).run(
+            PhaseSpec("dev", "m", "p"), "m"
+        )
+        assert result.text == ""
+        assert '"tool_use"' in result.transcript
+
+    def test_a_lone_non_result_event_is_not_a_result_either(self, tmp_path):
+        """Even a single stream object without a terminal result event (an
+        init event from an agent that died instantly) must not reach
+        extract_json_result as a parseable dict."""
+        stub = stream_stub(tmp_path, ['{"type":"system","subtype":"init"}'])
+        result = ClaudeCliExecutor(claude_bin=str(stub)).run(
+            PhaseSpec("dev", "m", "p"), "m"
+        )
+        assert result.text == ""
+        assert '"init"' in result.transcript
+
+    def test_timeout_kills_the_agent_and_keeps_partial_stream(self, tmp_path):
+        stub = stream_stub(tmp_path, [TOOL_EVENT], sleep_after_s=30)
+        with pytest.raises(PhaseTimeout) as exc:
+            ClaudeCliExecutor(claude_bin=str(stub)).run(
+                PhaseSpec("dev", "m", "p", timeout_s=1), "m"
+            )
+        assert '"tool_use"' in (exc.value.partial_text or "")
+
+    def test_stderr_is_retained_not_discarded(self, tmp_path):
+        """CLI warnings/errors land on stderr; discarding them strips exactly
+        the context a post-mortem needs. In a stream transcript it rides
+        along as a synthetic JSONL event so the artifact stays parseable."""
+        stub = stream_stub(tmp_path, [TOOL_EVENT, RESULT_EVENT])
+        with open(stub, "a", encoding="utf-8") as fh:
+            fh.write("echo 'warning: model fallback engaged' >&2\n")
+        result = ClaudeCliExecutor(claude_bin=str(stub)).run(
+            PhaseSpec("dev", "m", "p"), "m"
+        )
+        assert "model fallback engaged" in result.stderr
+        last_line = result.transcript.strip().splitlines()[-1]
+        assert json.loads(last_line) == {
+            "type": "stderr",
+            "text": "warning: model fallback engaged\n",
+        }
+
+    def test_executor_failure_reason_carries_stderr_tail(self, tmp_path):
+        """`executor-failed: exit 1` alone says nothing — the CLI's actual
+        error message (stderr) must reach the run log and retry feedback."""
+
+        class FailingExecutor:
+            def __init__(self):
+                self.n = 0
+
+            def run(self, spec, model):
+                self.n += 1
+                if self.n == 1:
+                    return ExecutionResult(
+                        text="", returncode=1, stderr="Error: invalid API key\n"
+                    )
+                return ExecutionResult(text=GOOD)
+
+        log = RunLog.create(tmp_path)
+        outcome = PhaseRunner(tmp_path, log, FailingExecutor()).run_phase(
+            PhaseSpec("dev", "m", "p")
+        )
+        assert outcome.status == "verified"
+        assert "invalid API key" in outcome.failure_reasons[0]
+
+    def test_runner_retains_stream_transcript_as_jsonl(self, tmp_path):
+        class StreamExecutor:
+            def run(self, spec, model):
+                return ExecutionResult(
+                    text=GOOD, transcript=TOOL_EVENT + "\n" + RESULT_EVENT + "\n"
+                )
+
+        log = RunLog.create(tmp_path)
+        PhaseRunner(tmp_path, log, StreamExecutor()).run_phase(
+            PhaseSpec("dev", "m", "p", story_key="OM-1")
+        )
+        files = transcripts(log, "*.jsonl")
+        assert len(files) == 1
+        assert '"tool_use"' in files[0].read_text()
+
+    def test_accounting_lands_in_run_event_detail(self, tmp_path):
+        """The report had to re-derive dollar cost from pricing tables; the
+        envelope already carries it — and permission_denials is the §3
+        zero-stall metric, so an empty list must be recorded, not dropped."""
+
+        class AccountingExecutor:
+            def run(self, spec, model):
+                return ExecutionResult(
+                    text=GOOD,
+                    token_usage={"output_tokens": 5},
+                    cost_usd=0.42,
+                    model_usage={"claude-sonnet-5": {"outputTokens": 5}},
+                    permission_denials=[],
+                )
+
+        log = RunLog.create(tmp_path)
+        PhaseRunner(tmp_path, log, AccountingExecutor()).run_phase(
+            PhaseSpec("dev", "m", "p")
+        )
+        detail = [e for e in log.events() if e["event"] == "phase-verified"][0]["detail"]
+        assert detail["cost_usd"] == 0.42
+        assert detail["model_usage"] == {"claude-sonnet-5": {"outputTokens": 5}}
+        assert detail["permission_denials"] == []
+
+
+class TestRetryFeedback:
+    """Rough edge #4: attempt 2 respawned with a prompt byte-identical to
+    attempt 1's — OM-5 failed twice identically; the verifier reason lived
+    only in the run log where the retry agent could not see it."""
+
+    def test_retry_prompt_carries_prior_failure_reasons(self, tmp_path):
+        prompts = []
+
+        class PromptRecorder:
+            def __init__(self):
+                self.outputs = [NO_JSON, GOOD]
+
+            def run(self, spec, model):
+                prompts.append(spec.prompt)
+                return ExecutionResult(text=self.outputs.pop(0))
+
+        log = RunLog.create(tmp_path)
+        spec = PhaseSpec("dev", "m", "build it")
+        outcome = PhaseRunner(tmp_path, log, PromptRecorder()).run_phase(spec)
+        assert outcome.status == "verified"
+        assert prompts[0] == "build it"
+        assert RETRY_FEEDBACK_HEADER in prompts[1]
+        assert "no-structured-result" in prompts[1]
+        # the caller's spec is never mutated
+        assert spec.prompt == "build it"
+        # and the amendment is visible in the spawn event
+        spawns = [e for e in log.events() if e["event"] == "phase-spawn"]
+        assert "retry_feedback" not in spawns[0]["detail"]
+        assert spawns[1]["detail"]["retry_feedback"] == 1
+
+
+class TestOrphanReaping:
+    """Rough edge #5: killing the orchestrator did not kill the in-flight
+    agent (no process group, no PID recorded) — the crash drill measured an
+    orphan finishing and committing AFTER its orchestrator died, free to race
+    the adopting orchestrator's respawn in the same worktree."""
+
+    def _orphan_events(self, log, pid):
+        log.event("dev", "phase-spawn", {"model": "m", "attempt": 1}, story_key="OM-3")
+        log.event("dev", "phase-agent-pid", {"pid": pid, "attempt": 1}, story_key="OM-3")
+
+    def test_live_orphan_is_reaped(self, tmp_path):
+        log = RunLog.create(tmp_path)
+        proc = subprocess.Popen(["sleep", "300"], start_new_session=True)
+        try:
+            self._orphan_events(log, proc.pid)
+            out = reap_orphaned_agents(log, expect_command="sleep")
+            assert out == [{"pid": proc.pid, "disposition": "killed"}]
+            proc.wait(timeout=10)  # actually dead, not just flagged
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+        events = [e["event"] for e in log.events()]
+        # write-ahead: the kill intent precedes the disposition
+        assert events.index("phase-agent-reap") < events.index("phase-agent-reaped")
+
+    def test_pid_reuse_guard_never_kills_a_foreign_process(self, tmp_path):
+        """A recorded PID that now belongs to someone else's process must be
+        left alone — misdirected SIGKILL is worse than a stale orphan."""
+        log = RunLog.create(tmp_path)
+        proc = subprocess.Popen(["sleep", "300"], start_new_session=True)
+        try:
+            self._orphan_events(log, proc.pid)
+            out = reap_orphaned_agents(log, expect_command="claude")
+            assert out == [{"pid": proc.pid, "disposition": "pid-reused"}]
+            assert proc.poll() is None  # untouched
+        finally:
+            proc.kill()
+
+    def test_answered_spawns_are_not_orphans(self, tmp_path):
+        log = RunLog.create(tmp_path)
+        self._orphan_events(log, 12345)
+        log.event("dev", "phase-verified", {"attempt": 1}, story_key="OM-3")
+        assert orphaned_agent_pids(log.events()) == []
+
+    def test_dead_pid_is_recorded_idempotently(self, tmp_path):
+        log = RunLog.create(tmp_path)
+        proc = subprocess.Popen(["sleep", "0.01"])
+        proc.wait(timeout=10)
+        self._orphan_events(log, proc.pid)
+        out = reap_orphaned_agents(log, expect_command="sleep")
+        assert out[0]["disposition"] in ("already-dead", "pid-reused")
+
+    def test_runner_records_agent_pid_write_ahead(self, tmp_path):
+        """A pid-reporting executor gets the run log's recorder: the pid is
+        in events.jsonl while the agent is still running."""
+        log = RunLog.create(tmp_path)
+
+        class PidReportingExecutor:
+            def run(self, spec, model, on_spawn=None):
+                if on_spawn:
+                    on_spawn(4242)
+                # pid must be logged BEFORE the executor returns
+                pids = [
+                    e["detail"]["pid"]
+                    for e in log.events()
+                    if e["event"] == "phase-agent-pid"
+                ]
+                assert pids == [4242]
+                return ExecutionResult(text=GOOD)
+
+        PhaseRunner(tmp_path, log, PidReportingExecutor()).run_phase(
+            PhaseSpec("dev", "m", "p", story_key="OM-1")
+        )
+        ev = [e for e in log.events() if e["event"] == "phase-agent-pid"][0]
+        assert ev["detail"] == {"pid": 4242, "attempt": 1}
+        assert ev["story_key"] == "OM-1"
+
+    def test_real_executor_reports_a_live_pid(self, tmp_path):
+        stub = stream_stub(tmp_path, [RESULT_EVENT])
+        seen = []
+        ClaudeCliExecutor(claude_bin=str(stub)).run(
+            PhaseSpec("dev", "m", "p"), "m", on_spawn=seen.append
+        )
+        assert len(seen) == 1 and seen[0] > 0
+
+
+class TestEscalationSeam:
+    """Rough edge #6: DEPLOYMENT_POLICY defines `escalation` but nothing in
+    core read it — the consumer had to hand-roll model swap + escalated flag
+    + prompt amendment. The seam makes the re-drive one recorded call."""
+
+    def test_escalation_spec_is_a_marked_amended_copy(self):
+        spec = PhaseSpec("dev", "claude-sonnet-5", "build it", story_key="OM-5")
+        new = escalation_spec(spec, "claude-fable-5", ["verifier-failed: files_exist"])
+        assert new.model == "claude-fable-5"
+        assert new.escalated is True
+        assert "verifier-failed: files_exist" in new.prompt
+        # the original is untouched (a re-drive must not rewrite history)
+        assert spec.model == "claude-sonnet-5" and spec.escalated is False
+
+    def test_run_escalated_scrubs_reasons_in_prompt_too(self, tmp_path, monkeypatch):
+        """The prompt is a leak surface (it appears in the CLI's argv):
+        scrubbing the log entry but amending RAW reasons into the prompt
+        would ship the secret to `ps` and the next agent."""
+        monkeypatch.setenv("MY_SECRET", "hunter2secret")
+        prompts = []
+
+        class PromptRecorder:
+            def run(self, spec, model):
+                prompts.append(spec.prompt)
+                return ExecutionResult(text=GOOD)
+
+        log = RunLog.create(tmp_path)
+        runner = PhaseRunner(
+            tmp_path, log, PromptRecorder(), secrets_deny=("MY_SECRET",)
+        )
+        runner.run_escalated(
+            PhaseSpec("dev", "m", "p"),
+            "claude-fable-5",
+            ["stderr said: MY_SECRET=hunter2secret"],
+        )
+        assert "hunter2secret" not in prompts[0]
+        assert "[REDACTED:MY_SECRET]" in prompts[0]
+
+    def test_run_escalated_logs_the_redrive_before_spawning(self, tmp_path):
+        runner, log, executor, _ = make_runner(tmp_path, [GOOD])
+        spec = PhaseSpec("dev", "claude-sonnet-5", "build it", story_key="OM-5")
+        outcome = runner.run_escalated(
+            spec, "claude-fable-5", ["attempt 1: files_exist missing"]
+        )
+        assert outcome.status == "verified"
+        assert executor.calls == ["claude-fable-5"]
+        events = [e["event"] for e in log.events()]
+        assert events.index("phase-escalation-redrive") < events.index("phase-spawn")
+        redrive = [e for e in log.events() if e["event"] == "phase-escalation-redrive"][0]
+        assert redrive["detail"]["model"] == "claude-fable-5"
+        assert redrive["story_key"] == "OM-5"
+
+
+class TestResultFileExists:
+    """Rough edge #8: `result_field` checks equality only — OM-5 had to be
+    verified by glob instead of by the scratch_path its result claimed."""
+
+    def test_claimed_file_exists(self, tmp_path):
+        (tmp_path / "out.txt").write_text("x", encoding="utf-8")
+        verdict = result_file_exists("artifact")(
+            VerifierContext(project_root=tmp_path, result={"artifact": "out.txt"})
+        )
+        assert verdict.ok
+
+    def test_claimed_file_missing_fails_on_the_agents_own_words(self, tmp_path):
+        verdict = result_file_exists("artifact")(
+            VerifierContext(project_root=tmp_path, result={"artifact": "ghost.txt"})
+        )
+        assert not verdict.ok and "not an existing file" in verdict.detail
+
+    def test_existing_file_outside_the_project_root_fails(self, tmp_path):
+        verdict = result_file_exists("artifact")(
+            VerifierContext(project_root=tmp_path, result={"artifact": "/etc/hosts"})
+        )
+        assert not verdict.ok and "outside the project root" in verdict.detail
+
+    def test_missing_field_and_non_string_fail(self, tmp_path):
+        v = result_file_exists("artifact")
+        assert not v(VerifierContext(project_root=tmp_path, result={})).ok
+        assert not v(
+            VerifierContext(project_root=tmp_path, result={"artifact": 3})
+        ).ok
+
+    def test_directories_do_not_count_as_artifacts(self, tmp_path):
+        """Naming a directory — including '.' (the project root itself) —
+        must fail: an agent could otherwise satisfy the verifier without
+        producing any artifact at all."""
+        (tmp_path / "outdir").mkdir()
+        v = result_file_exists("artifact")
+        for claimed in (".", "outdir"):
+            verdict = v(
+                VerifierContext(project_root=tmp_path, result={"artifact": claimed})
+            )
+            assert not verdict.ok, claimed
+            assert "not an existing file" in verdict.detail
+
+    def test_declarative_form_builds(self, tmp_path):
+        (tmp_path / "out.txt").write_text("x", encoding="utf-8")
+        verifier = build({"result_file_exists": ["artifact"]})
+        ok, verdicts = run_verifiers(
+            [verifier], VerifierContext(project_root=tmp_path, result={"artifact": "out.txt"})
+        )
+        assert ok

@@ -3,11 +3,15 @@
 The fence denies Write/Edit outside the project root outright, and scans
 Bash commands for write shapes it can positively recognize (redirects, tee,
 copy targets, ...), pointing the agent at the declared scratch dir instead.
-It is best-effort by construction — shell is expressive enough to hide a
-write from any static scan — so the success measure is the run report's
-permission-stall count, not a claim of completeness. A false DENY is as
-costly as a miss (it stalls legitimate work), so unrecognized input always
-passes.
+The fence is a REDIRECTOR for tool-shaped writes, not a jail. Measured in
+the Phase 0 sandbox proof: writes constructed inside quoted interpreter code
+(`python -c` + tempfile) pass the Bash scan with zero denies, while the
+Write/Edit fence behaved perfectly. That porosity is by construction — shell
+is expressive enough to hide a write from any static scan — so the success
+measure is the run report's permission-stall count and the CLI's
+`permission_denials` capture (per-phase in `run_event.detail`) plus verifier
+discipline, not a claim of completeness. A false DENY is as costly as a miss
+(it stalls legitimate work), so unrecognized input always passes.
 
 `omater init` provisions the hook into the consumer repo's
 `.claude/settings.json`; `omater init --verify` is the drift check run at

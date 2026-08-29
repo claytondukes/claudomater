@@ -239,6 +239,24 @@ class TestBashFence:
             )
             assert allow, cmd
 
+    def test_writes_inside_quoted_interpreter_code_pass_by_design(self, tmp_path):
+        """CHARACTERIZATION, not a bug (report rough edge #7, measured in the
+        sandbox proof): the fence is a redirector for tool-shaped writes, not
+        a jail. A write constructed inside quoted interpreter code is data to
+        the bash scan — quoted strings must stay data or every commit message
+        mentioning a path would stall a phase. The measured backstop is the
+        CLI's permission_denials capture plus verifier discipline. If this
+        test ever FAILS, the fence has started parsing quoted code: check the
+        false-DENY cost before celebrating."""
+        for cmd in (
+            "python3 -c \"open('/private/tmp/omlog-poke.txt', 'w').write('x')\"",
+            'python3 -c "import tempfile; tempfile.NamedTemporaryFile(delete=False)"',
+        ):
+            allow, reason = hooks.evaluate_pre_tool_use(
+                payload("Bash", command=cmd), tmp_path
+            )
+            assert allow, (cmd, reason)
+
 
 class TestPayloadTypeRobustness:
     def test_unrecognized_payload_shapes_allow_without_raising(self, tmp_path):
@@ -357,6 +375,22 @@ class TestInit:
         assert any("kept existing" in a for a in actions)
         gitignore_lines = (tmp_path / ".gitignore").read_text().splitlines()
         assert gitignore_lines.count(GITIGNORE_LINE) == 1
+
+    def test_init_gitignores_pytest_cache_too(self, tmp_path):
+        """Report rough edge #9: command_ok pytest gauntlets leave a
+        .pytest_cache/ at the consumer repo's root — ignore it up front. It
+        is a convenience, not drift: verify must not fail on its absence in
+        repos initialized before this line existed."""
+        run_init(tmp_path)
+        lines = (tmp_path / ".gitignore").read_text().splitlines()
+        assert ".pytest_cache/" in lines
+        # idempotent alongside the required line
+        run_init(tmp_path)
+        lines = (tmp_path / ".gitignore").read_text().splitlines()
+        assert lines.count(".pytest_cache/") == 1
+        # pre-existing repos without it stay verify-clean
+        (tmp_path / ".gitignore").write_text(GITIGNORE_LINE + "\n", encoding="utf-8")
+        assert not any(".pytest_cache" in p for p in run_verify(tmp_path))
 
     def test_init_force_overwrites_config(self, tmp_path):
         run_init(tmp_path)

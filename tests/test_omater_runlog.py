@@ -292,3 +292,65 @@ class TestControl:
         log.write_control("resume")
         with pytest.raises(RunError, match="corrupt"):
             log.read_controls()
+
+
+class TestTranscriptPaths:
+    """Report rough edge #1: transcript_path(phase, attempt) had no story key,
+    so every story's dev-attempt-1.md overwrote the previous story's — a
+    5-story sandbox run kept exactly ONE dev transcript."""
+
+    def test_distinct_stories_get_distinct_paths(self, tmp_path):
+        log = RunLog.create(tmp_path)
+        a = log.transcript_path("dev", 1, story_key="OM-1")
+        b = log.transcript_path("dev", 1, story_key="OM-2")
+        assert a != b
+        assert "OM-1" in a.name and "OM-2" in b.name
+
+    def test_redrives_of_the_same_attempt_get_distinct_paths(self, tmp_path):
+        """A crash-recovery (or escalation) re-drive re-runs the same
+        story/phase/attempt — the spawn timestamp keeps both transcripts."""
+        log = RunLog.create(tmp_path)
+        a = log.transcript_path("dev", 1, story_key="OM-3", ts="2026-08-28T22:21:30Z")
+        b = log.transcript_path("dev", 1, story_key="OM-3", ts="2026-08-28T22:24:05Z")
+        assert a != b
+
+    def test_story_key_cannot_escape_the_transcripts_dir(self, tmp_path):
+        log = RunLog.create(tmp_path)
+        p = log.transcript_path("dev", 1, story_key="../../evil")
+        assert p.parent == log.run_dir / "transcripts"
+        assert not p.name.startswith(".")
+
+    def test_suffix_is_a_knob(self, tmp_path):
+        """Full-session stream captures are jsonl, final-message ones are md."""
+        log = RunLog.create(tmp_path)
+        assert log.transcript_path("dev", 1, suffix=".jsonl").suffix == ".jsonl"
+        assert log.transcript_path("dev", 1).suffix == ".md"
+
+    def test_ts_and_suffix_cannot_escape_either(self, tmp_path):
+        """Public API: EVERY caller-supplied filename component is contained,
+        not just story_key."""
+        log = RunLog.create(tmp_path)
+        p = log.transcript_path("dev", 1, ts="../../etc/evil")
+        assert p.parent == log.run_dir / "transcripts"
+        for bad_suffix in ("/../../evil", ".md/x", "md", ""):
+            with pytest.raises(RunError, match="invalid transcript suffix"):
+                log.transcript_path("dev", 1, suffix=bad_suffix)
+
+
+class TestAttachVsAdopt:
+    """Report rough edge #9: `omater start` + a separate orchestrator process
+    made the very FIRST attach log `run-adopted` — attach and crash-recovery
+    shared one verb, so every healthy run started with a recovery event."""
+
+    def test_first_attach_of_a_fresh_run_logs_run_attached(self, tmp_path):
+        log = RunLog.create(tmp_path)
+        log.event("run", "policy", {"deployment_type": "sandbox"})
+        attached = RunLog.adopt(tmp_path)
+        assert [e["event"] for e in attached.events()][-1] == "run-attached"
+
+    def test_adoption_with_phase_activity_logs_run_adopted(self, tmp_path):
+        log = RunLog.create(tmp_path)
+        log.event("dev", "phase-spawn", {"model": "m", "attempt": 1})
+        # orchestrator dies here; the unanswered spawn is the orphan shape
+        adopted = RunLog.adopt(tmp_path)
+        assert [e["event"] for e in adopted.events()][-1] == "run-adopted"
