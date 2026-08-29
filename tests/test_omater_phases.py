@@ -711,6 +711,17 @@ class TestFullSessionCapture:
         assert result.text == ""
         assert '"tool_use"' in result.transcript
 
+    def test_a_lone_non_result_event_is_not_a_result_either(self, tmp_path):
+        """Even a single stream object without a terminal result event (an
+        init event from an agent that died instantly) must not reach
+        extract_json_result as a parseable dict."""
+        stub = stream_stub(tmp_path, ['{"type":"system","subtype":"init"}'])
+        result = ClaudeCliExecutor(claude_bin=str(stub)).run(
+            PhaseSpec("dev", "m", "p"), "m"
+        )
+        assert result.text == ""
+        assert '"init"' in result.transcript
+
     def test_timeout_kills_the_agent_and_keeps_partial_stream(self, tmp_path):
         stub = stream_stub(tmp_path, [TOOL_EVENT], sleep_after_s=30)
         with pytest.raises(PhaseTimeout) as exc:
@@ -929,6 +940,30 @@ class TestEscalationSeam:
         assert "verifier-failed: files_exist" in new.prompt
         # the original is untouched (a re-drive must not rewrite history)
         assert spec.model == "claude-sonnet-5" and spec.escalated is False
+
+    def test_run_escalated_scrubs_reasons_in_prompt_too(self, tmp_path, monkeypatch):
+        """The prompt is a leak surface (it appears in the CLI's argv):
+        scrubbing the log entry but amending RAW reasons into the prompt
+        would ship the secret to `ps` and the next agent."""
+        monkeypatch.setenv("MY_SECRET", "hunter2secret")
+        prompts = []
+
+        class PromptRecorder:
+            def run(self, spec, model):
+                prompts.append(spec.prompt)
+                return ExecutionResult(text=GOOD)
+
+        log = RunLog.create(tmp_path)
+        runner = PhaseRunner(
+            tmp_path, log, PromptRecorder(), secrets_deny=("MY_SECRET",)
+        )
+        runner.run_escalated(
+            PhaseSpec("dev", "m", "p"),
+            "claude-fable-5",
+            ["stderr said: MY_SECRET=hunter2secret"],
+        )
+        assert "hunter2secret" not in prompts[0]
+        assert "[REDACTED:MY_SECRET]" in prompts[0]
 
     def test_run_escalated_logs_the_redrive_before_spawning(self, tmp_path):
         runner, log, executor, _ = make_runner(tmp_path, [GOOD])

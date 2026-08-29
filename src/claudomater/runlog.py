@@ -359,6 +359,11 @@ class RunLog:
         `dev-attempt-1` overwrites the previous story's (a 5-story sandbox run
         kept exactly one dev transcript), and a crash-recovery re-drive of the
         same story overwrites its own attempt 1."""
+        # Every caller-supplied component is sanitized — this is public API,
+        # and an unsanitized ts/suffix would be a path escape the story_key
+        # handling already closes.
+        if not re.fullmatch(r"\.[A-Za-z0-9]+", suffix):
+            raise RunError(f"invalid transcript suffix {suffix!r}")
         parts = []
         if story_key:
             parts.append(_path_component(story_key))
@@ -366,8 +371,8 @@ class RunLog:
         parts.append(f"attempt-{attempt}")
         if ts:
             # event timestamps are %Y-%m-%dT%H:%M:%SZ; strip the separators
-            # that are hostile in filenames
-            parts.append(re.sub(r"[:-]", "", ts))
+            # that are hostile in filenames, then sanitize like any component
+            parts.append(_path_component(re.sub(r"[:-]", "", ts)))
         return self.run_dir / TRANSCRIPTS_DIR / ("-".join(parts) + suffix)
 
     # ---- inbound control (omater resume | abort | approve) ---------------

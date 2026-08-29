@@ -190,6 +190,7 @@ class ClaudeCliExecutor:
         payload (the old `json` format, reachable via extra_args) still
         parses. Anything else is passed through raw."""
         final: dict[str, Any] | None = None
+        only_object: dict[str, Any] | None = None
         object_lines = 0
         for line in stdout.splitlines():
             line = line.strip()
@@ -201,15 +202,19 @@ class ClaudeCliExecutor:
                 continue
             if isinstance(payload, dict):
                 object_lines += 1
-                if payload.get("type") == "result" or "result" in payload:
+                only_object = payload if object_lines == 1 else None
+                if payload.get("type") == "result":
                     final = payload
+        if final is None and only_object is not None and "result" in only_object:
+            # the old single-envelope `json` format (reachable via extra_args)
+            final = only_object
         if final is None:
-            if object_lines > 1:
-                # A session stream that never reached its result event — the
-                # agent died mid-run. The stream is still the transcript, but
-                # there is NO result: letting raw event objects reach
-                # extract_json_result would hand the runner a stream event as
-                # a bogus phase result.
+            if object_lines >= 1:
+                # JSON-object output that never reached a terminal result
+                # event — the agent died mid-run (even a lone init event
+                # counts). The objects are still the transcript, but there is
+                # NO result: letting them reach extract_json_result would
+                # hand the runner a stream event as a bogus phase result.
                 return ExecutionResult(text="", transcript=stdout)
             return ExecutionResult(text=stdout)
         result_text = final.get("result")
@@ -571,16 +576,16 @@ class PhaseRunner:
                     spec, cfg.model_for("escalation"), outcome.failure_reasons
                 )
         """
+        # Scrub once, use everywhere: the prompt is as much a leak surface as
+        # the log (it appears in the spawned CLI's argv, visible to `ps`).
+        reasons = [self._scrub(r) for r in failure_reasons]
         self.runlog.event(
             spec.name,
             "phase-escalation-redrive",
-            {
-                "model": escalation_model,
-                "reasons": [self._scrub(r) for r in failure_reasons],
-            },
+            {"model": escalation_model, "reasons": reasons},
             story_key=spec.story_key,
         )
-        return self.run_phase(escalation_spec(spec, escalation_model, failure_reasons))
+        return self.run_phase(escalation_spec(spec, escalation_model, reasons))
 
     def run_phase(self, spec: PhaseSpec) -> PhaseOutcome:
         if spec.model == "skip":

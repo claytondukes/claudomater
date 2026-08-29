@@ -326,6 +326,16 @@ class TestTranscriptPaths:
         assert log.transcript_path("dev", 1, suffix=".jsonl").suffix == ".jsonl"
         assert log.transcript_path("dev", 1).suffix == ".md"
 
+    def test_ts_and_suffix_cannot_escape_either(self, tmp_path):
+        """Public API: EVERY caller-supplied filename component is contained,
+        not just story_key."""
+        log = RunLog.create(tmp_path)
+        p = log.transcript_path("dev", 1, ts="../../etc/evil")
+        assert p.parent == log.run_dir / "transcripts"
+        for bad_suffix in ("/../../evil", ".md/x", "md", ""):
+            with pytest.raises(RunError, match="invalid transcript suffix"):
+                log.transcript_path("dev", 1, suffix=bad_suffix)
+
 
 class TestAttachVsAdopt:
     """Report rough edge #9: `omater start` + a separate orchestrator process
