@@ -107,7 +107,10 @@ class RunLog:
             lock.mkdir()
         except FileExistsError:
             try:
-                age = time.time() - lock.stat().st_mtime
+                # lstat, not stat: a symlink-shaped lock must be aged by the
+                # link itself, not whatever it points at (which may be fresh,
+                # missing, or outside the repo entirely)
+                age = time.time() - lock.lstat().st_mtime
             except OSError:
                 age = 0.0
             if age <= CREATE_LOCK_STALE_S:

@@ -67,6 +67,25 @@ class TestRunLifecycle:
         assert log.is_live()
         assert not lock.exists()
 
+    def test_symlink_lock_is_aged_by_the_link_not_the_target(self, tmp_path):
+        """A symlink-shaped lock pointing at a FRESH file elsewhere must
+        still break as stale when the link itself is old (lstat, not stat)."""
+        import os
+        import time as _time
+
+        from claudomater.runlog import CREATE_LOCK, runs_root as rr
+
+        rr(tmp_path).mkdir(parents=True)
+        fresh_target = tmp_path / "fresh-file"
+        fresh_target.write_text("x", encoding="utf-8")
+        lock = rr(tmp_path) / CREATE_LOCK
+        lock.symlink_to(fresh_target)
+        old = _time.time() - 300
+        os.utime(lock, (old, old), follow_symlinks=False)
+        log = RunLog.create(tmp_path)  # stale link broken, create proceeds
+        assert log.is_live()
+        assert not lock.is_symlink()
+
     def test_failed_create_leaves_no_orphans(self, tmp_path, monkeypatch):
         """An IO failure after mkdir must not strand an orphan run dir or a
         dangling current link — repeated attempts would accumulate them."""
