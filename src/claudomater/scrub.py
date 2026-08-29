@@ -34,8 +34,12 @@ def scrub_text(
             out = out.replace(value, f"[REDACTED:{name}]")
         # Redact NAME=value / NAME: value assignments, including quoted
         # multi-word values ('NAME="two words"' redacts the whole value).
+        # The lookbehind anchors the name's left edge so `API_KEY` does not
+        # match inside `MY_API_KEY=...` and redact an unrelated variable
+        # under the wrong label. (The right edge is already anchored by the
+        # required `=`/`:` — `API_KEYS: x` never matched.)
         pattern = re.compile(
-            rf"({re.escape(name)})(\s*[=:]\s*)(\"[^\"]*\"|'[^']*'|[^\s\"']+)"
+            rf"(?<![A-Za-z0-9_])({re.escape(name)})(\s*[=:]\s*)(\"[^\"]*\"|'[^']*'|[^\s\"']+)"
         )
         out = pattern.sub(rf"\1\2[REDACTED:{name}]", out)
 

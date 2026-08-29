@@ -559,6 +559,13 @@ class TestScrub:
         assert "topsecretvalue" not in out
         assert "othervalue" not in out
 
+    def test_name_does_not_match_inside_longer_identifiers(self):
+        out = scrub_text(
+            "MY_API_KEY=unrelatedvalue but API_KEY=realsecret", ["API_KEY"], env={}
+        )
+        assert "MY_API_KEY=unrelatedvalue" in out  # different variable, untouched
+        assert "realsecret" not in out
+
     def test_quoted_multiword_value_fully_redacted(self):
         out = scrub_text('API_KEY="two words secret"', ["API_KEY"], env={})
         assert "two words" not in out
