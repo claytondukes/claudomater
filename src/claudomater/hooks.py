@@ -181,7 +181,9 @@ def _data_spans(text: str) -> list[tuple[int, int]]:
     return [(start, end) for _, start, end in _lex_spans(text)]
 
 
-def _arith_spans(text: str) -> list[tuple[int, int]]:
+def _arith_spans(
+    text: str, data: list[tuple[int, int]] | None = None
+) -> list[tuple[int, int]]:
     """Spans of arithmetic context — `$((...))` anywhere, `((...))` at a
     command position — where `<<` is a SHIFT operator, not a heredoc
     introducer: `$((1 << EOF))` must neither eat the following lines as a
@@ -192,16 +194,35 @@ def _arith_spans(text: str) -> list[tuple[int, int]]:
     way. A `<<` inside a command substitution NESTED in the arithmetic is
     also treated as a shift (its heredoc body stays scannable) — the
     parens have already voided the tracked cwd, and best-effort deny
-    accepts that pathological shape."""
-    data = _data_spans(text)
+    accepts that pathological shape.
 
-    def in_data(idx: int) -> bool:
-        return any(start <= idx < end for start, end in data)
-
+    This runs synchronously in the PreToolUse hook on the RAW command,
+    heredoc bodies included, so everything here is O(text): a per-index
+    rescan of the data-span list made a generated heredoc full of quoted
+    lines quadratic and stalled the phase."""
+    if data is None:
+        data = _data_spans(text)
+    n = len(text)
+    is_data = bytearray(n)
+    for start, end in data:
+        for k in range(start, min(end, n)):
+            is_data[k] = 1
+    # one stack pass pairs every live `(` with its `)` — the old
+    # per-candidate depth walk was quadratic on runs of `((`
+    match: dict[int, int] = {}
+    stack: list[int] = []
+    for k in range(n):
+        if is_data[k]:
+            continue
+        if text[k] == "(" and not _escape_parity(text, k):
+            stack.append(k)
+        elif text[k] == ")" and not _escape_parity(text, k):
+            if stack:
+                match[stack.pop()] = k
     spans: list[tuple[int, int]] = []
-    i, n = 0, len(text)
-    while i < n:
-        if in_data(i) or not text.startswith("((", i) or _escape_parity(text, i):
+    i = 0
+    while i < n - 1:
+        if is_data[i] or not text.startswith("((", i) or _escape_parity(text, i):
             i += 1
             continue
         dollar = i > 0 and text[i - 1] == "$" and not _escape_parity(text, i - 1)
@@ -215,19 +236,13 @@ def _arith_spans(text: str) -> list[tuple[int, int]]:
             if not (j < 0 or (text[j] in ";&|\n(" and not _escape_parity(text, j))):
                 i += 1
                 continue
-        depth, k = 2, i + 2
-        while k < n and depth:
-            if not in_data(k):
-                if text[k] == "(" and not _escape_parity(text, k):
-                    depth += 1
-                elif text[k] == ")" and not _escape_parity(text, k):
-                    depth -= 1
-            k += 1
-        if depth == 0:
-            spans.append((i - 1 if dollar else i, k))
-            i = k
-        else:
+        # depth from i returns to zero exactly where the OUTER ( pairs
+        close = match.get(i)
+        if close is None:
             i += 1
+            continue
+        spans.append((i - 1 if dollar else i, close + 1))
+        i = close + 1
     return spans
 
 
@@ -288,6 +303,12 @@ _CHDIR = re.compile(
     r"(cd|pushd|popd)(?![^\s;&|)\n])[ \t]*"
     r"((?:--[ \t]+|-[A-Za-z]+[ \t]+)*)([^\s;|&<>()]*)"
 )
+# Redirection tokens legally follow a cd's target inside its own segment
+# (`cd /etc > log 2>&1`); anything ELSE there is an extra argument bash
+# rejects ("too many arguments") without moving, so the cd never happens.
+_TRAILING_REDIRECT = re.compile(
+    r"(?:\d*>{1,2}|&>{1,2}|\d*<{1,3})(?:[ \t]*&\d*-?)?[ \t]*[^\s;|&<>()]*"
+)
 # Any cd-ish token the pattern above did NOT positively match (quoted
 # assignment values, `command cd`, unmodeled prefixes, prose...) voids the
 # tracked cwd instead of being silently ignored — an unrecognized cd left
@@ -313,6 +334,13 @@ def _segment_boundary(text: str, start: int) -> int:
     i, n = start, len(text)
     while i < n:
         c = text[i]
+        if c in ";)|&" and _escape_parity(text, i) == 1:
+            # \; \) \| \& are word data, same parity rule as the lexer —
+            # `cd /etc \; cat > out.txt` is ONE command whose redirect
+            # opens against the PRE-cd cwd; boundary at the escaped `;`
+            # falsely denied ./out.txt as /etc/out.txt
+            i += 1
+            continue
         if c in ";\n)|":
             return i
         if c == "&":
@@ -409,7 +437,8 @@ def _scannable(command: str) -> str:
         cut = delim_end - m.start(1)
         return " " * cut + intro[cut:]
 
-    data = _data_spans(command) + _arith_spans(command)
+    data = _data_spans(command)
+    data = data + _arith_spans(command, data)
 
     def _outside_data(m: re.Match) -> str:
         # a << inside a comment, quoted span, or arithmetic expansion is
@@ -490,24 +519,25 @@ def resolved_bash_targets(
         (pos, "target", raw) for pos, raw in _positioned_write_targets(scannable)
     ]
     arith = _arith_spans(scannable)
-
-    def _pure_arith(idx: int) -> bool:
-        # A paren inside PURE arithmetic — no nested command substitution
-        # ($( or backtick) in the span — is the arithmetic's own delimiter
-        # or grouping: evaluation cannot move the shell's cwd, and voiding
-        # tracking over `((x++))` let `cd /etc; ((x++)); cat > passwd`
-        # slip through against a "lost" cwd. Any nested substitution keeps
-        # the span's full opacity (its parens included).
-        for start, end in arith:
-            if start <= idx < end:
-                body = scannable[start:end].lstrip("$")[2:-2]
-                return "$(" not in body and "`" not in body
-        return False
-
+    # A paren inside PURE arithmetic — no nested command substitution
+    # ($( or backtick) in the span — is the arithmetic's own delimiter
+    # or grouping: evaluation cannot move the shell's cwd, and voiding
+    # tracking over `((x++))` let `cd /etc; ((x++)); cat > passwd`
+    # slip through against a "lost" cwd. Any nested substitution keeps
+    # the span's full opacity (its parens included). Cursor lookup:
+    # finditer and the spans are both ascending, and a per-paren rescan
+    # of the span list would be the same quadratic _arith_spans shed.
+    arith_pure = []
+    for start, end in arith:
+        body = scannable[start:end].lstrip("$")[2:-2]
+        arith_pure.append("$(" not in body and "`" not in body)
+    ai = 0
     for m in _CWD_OPAQUE.finditer(scannable):
         if _escape_parity(scannable, m.start()) == 1:
             continue  # \( \) \` are literal word chars, not delimiters
-        if _pure_arith(m.start()):
+        while ai < len(arith) and arith[ai][1] <= m.start():
+            ai += 1
+        if ai < len(arith) and arith[ai][0] <= m.start() and arith_pure[ai]:
             continue
         events.append((m.start(), "opaque", None))
     # Command-induced opacity (an unnameable/current-shell command) takes
@@ -584,9 +614,14 @@ def resolved_bash_targets(
         # `cd /x &` (backgrounded) and `cd /x | ...` (pipeline segment) run
         # the cd in a subshell that moves nothing; `cd /x || ...` makes the
         # next branch the cd's FAILURE path (cwd unchanged there) and
-        # everything after it ambiguous. All three: never apply.
+        # everything after it ambiguous. A non-redirect word after the
+        # target (`cd /etc \; cat`) is an extra argument bash rejects
+        # without moving — applying the target would poison later segments
+        # with a cwd the shell never entered (false deny). All: never
+        # apply.
         unusable = (
-            (boundary.startswith("&") and not boundary.startswith("&&"))
+            bool(_TRAILING_REDIRECT.sub("", scannable[m.end() : effect_pos]).strip())
+            or (boundary.startswith("&") and not boundary.startswith("&&"))
             or (boundary.startswith("|") and not boundary.startswith("||"))
             or boundary.startswith("||")
             # `|&` pipes stderr: a cd on its right side runs in the pipeline

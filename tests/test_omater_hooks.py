@@ -553,6 +553,38 @@ class TestBashFence:
             allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
             assert allow, (cmd, reason)
 
+    def test_arith_scan_is_linear_in_command_size(self, tmp_path):
+        """The fence runs synchronously in PreToolUse — rescanning the
+        data-span list per character made the arithmetic scan quadratic
+        (spans x chars), so a generated heredoc full of quoted lines
+        stalled the hook for tens of seconds."""
+        import time
+
+        body = "\n".join(f'echo "line {i}" >> /tmp_probe/x' for i in range(2000))
+        cmd = f"cat <<EOF > out.txt\n{body}\nEOF"
+        p = payload("Bash", command=cmd)
+        p["cwd"] = str(tmp_path)
+        started = time.monotonic()
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert time.monotonic() - started < 2.0
+        assert allow, reason  # the body is heredoc DATA, never executed
+
+    def test_escaped_separator_in_cd_segment_never_falsely_denies(self, tmp_path):
+        """`cd /etc \\; cat > out.txt` is ONE command: bash opens the
+        redirect against the PRE-cd cwd (in-root) and then rejects the
+        multi-arg cd ("too many arguments") without moving. A boundary at
+        the escaped `;` applied /etc and denied ./out.txt as /etc/out.txt
+        — and the never-run cd must not poison later segments either."""
+        p = payload("Bash", command="cd /etc \\; cat > out.txt; cat > two.txt")
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+        # a REAL separator there still tracks the cd and denies
+        p = payload("Bash", command="cd /etc ; cat > out.txt")
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+
     def test_ansi_c_quoting_allows_escaped_quotes(self, tmp_path):
         """$'text \\' more' is ONE argument (ANSI-C quoting) — ending the
         span at the escaped quote exposed its text as a redirect target."""
