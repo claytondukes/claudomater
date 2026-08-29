@@ -433,6 +433,52 @@ class TestBashFence:
             allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
             assert allow, (cmd, reason)
 
+    def test_pipe_ampersand_is_a_pipeline_not_background(self, tmp_path):
+        """`|&` pipes stderr. Its `&` must not read as backgrounding (that
+        spuriously cleared a tracked /etc and missed the later write), and a
+        cd on its right side runs in the pipeline subshell (applying it
+        falsely denied an in-root write)."""
+        p = payload("Bash", command="cd /etc; echo x |& cat; cat > passwd")
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+        p = payload("Bash", command="true |& cd /etc; cat > out.txt")
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+
+    def test_backslash_and_expansion_command_words_void_tracking(self, tmp_path):
+        """Bash removes backslashes and expands parameters in command words:
+        `c\\d server` RUNS cd — missing it kept a stale cwd that falsely
+        denied the in-root scratch write. `$CMD ...` is equally unnameable."""
+        (tmp_path / "server").mkdir()
+        for cmd in (
+            f"c\\d {tmp_path}/server && cat > ../.omater/scratch/x",
+            f"$GOTO {tmp_path}/server && cat > ../.omater/scratch/x",
+        ):
+            p = payload("Bash", command=cmd)
+            p["cwd"] = str(tmp_path)
+            allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+            assert allow, (cmd, reason)
+
+    def test_glob_cd_targets_are_untrackable(self, tmp_path):
+        """`cd ../proj*` expands at runtime and can land right back in-root
+        — tracking the literal nonexistent `../proj*` falsely denied the
+        write."""
+        p = payload("Bash", command="cd ../proj* && cat > out.txt")
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+
+    def test_escaped_double_quote_does_not_end_the_quoted_span(self, tmp_path):
+        """`echo "x\\" # still quoted" > /tmp_probe/out`: the \\" stays
+        inside the argument, so the absolute redirect EXECUTES — ending the
+        mask at the escape turned the rest into a comment and hid it."""
+        p = payload("Bash", command='echo "x\\" # still quoted" > /tmp_probe/out')
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+
     def test_escaped_space_before_hash_is_not_a_comment_boundary(self, tmp_path):
         """`echo foo\\ #bar > /tmp_probe/out`: the escaped space keeps #bar
         inside the word, so the absolute redirect EXECUTES — blanking from

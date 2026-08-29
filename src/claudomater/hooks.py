@@ -71,7 +71,11 @@ def _allowed(path: Path, root: Path, scratch_dirs: list[Path]) -> bool:
 _HEREDOC = re.compile(
     r"(<<-?\s*(['\"]?)(\w+)\2[^\n]*\n).*?^\s*\3\s*$", re.DOTALL | re.MULTILINE
 )
-_QUOTED = re.compile(r"'[^']*'|\"[^\"]*\"")
+# Escape-aware: an escaped \" inside double quotes does NOT end the span
+# (`echo "x\\" # still quoted"` is one argument), and a backslash-escaped
+# opening quote is a literal char, not a quote start. Single-quoted spans
+# cannot contain escapes in bash.
+_QUOTED = re.compile(r"(?<!\\)'[^']*'|(?<!\\)\"(?:[^\"\\]|\\.)*\"", re.DOTALL)
 def _strip_comments(text: str) -> str:
     """Blank bash comments (space-preserving, offsets intact). A comment
     starts at `#` at the start of a WORD: after whitespace, a shell
@@ -187,7 +191,7 @@ _CD_WORD = re.compile(r"(?<![^\s;&|(<>])(?:cd|pushd|popd)(?![^\s;&|)<>\n])")
 # void tracking (soft: later unconditional absolute cds recover).
 _GLUED_COMMAND = re.compile(
     r"(?:^|[\n;&|(])\s*(?:[A-Za-z_][A-Za-z0-9_]*=[^\s;|&<>()]*\s+)*"
-    r"[^\s;|&<>()]*_quoted_data_[^\s;|&<>()]*"
+    r"[^\s;|&<>()]*(?:_quoted_data_|[\\$])[^\s;|&<>()]*"
 )
 def _segment_boundary(text: str, start: int) -> int:
     """Position of the control operator ending the command segment at
@@ -235,7 +239,7 @@ def _bare_ampersands(text: str) -> list[int]:
         i = m.start()
         prev = text[i - 1] if i > 0 else ""
         nxt = text[i + 1] if i + 1 < len(text) else ""
-        if prev in (">", "<", "&") or nxt in ("&", ">"):
+        if prev in (">", "<", "&", "|") or nxt in ("&", ">"):
             continue
         out.append(i)
     return out
@@ -406,6 +410,13 @@ def resolved_bash_targets(
             (boundary.startswith("&") and not boundary.startswith("&&"))
             or (boundary.startswith("|") and not boundary.startswith("||"))
             or boundary.startswith("||")
+            # `|&` pipes stderr: a cd on its right side runs in the pipeline
+            # subshell, exactly like one after a plain `|`
+            or (
+                m.group(1) == "&"
+                and m.start(1) > 0
+                and scannable[m.start(1) - 1] == "|"
+            )
         )
         events.append(
             (
@@ -511,11 +522,16 @@ def resolved_bash_targets(
         ):
             current = None
             continue
-        if "\\" in target or (verb == "pushd" and re.fullmatch(r"[+-]\d+", target)):
+        if (
+            "\\" in target
+            or any(ch in target for ch in "*?[")
+            or (verb == "pushd" and re.fullmatch(r"[+-]\d+", target))
+        ):
             # Not a literal path: a backslash means the token was truncated
-            # at an escaped character (`cd a\ b/c` scans as `a\`), and
-            # pushd +N/-N rotates the directory stack to an entry this scan
-            # cannot know. Both -> unknown, fail open.
+            # at an escaped character (`cd a\ b/c` scans as `a\`); glob
+            # chars expand at runtime (`cd ../proj*` can land right back
+            # in-root); pushd +N/-N rotates the directory stack to an entry
+            # this scan cannot know. All -> unknown, fail open.
             current = None
             continue
         step = Path(os.path.expanduser(target))
