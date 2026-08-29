@@ -148,6 +148,14 @@ _CHDIR = re.compile(
 # untracked would resolve later relative targets against a STALE cwd, which
 # is exactly the false-deny shape this resolver exists to close.
 _CD_WORD = re.compile(r"\b(?:cd|pushd|popd)\b")
+# A command-position word containing the quote placeholder is a command we
+# cannot name: bash concatenates quoted spans (`c""d server` runs cd, `"cd"
+# server` runs cd), so the expanded command may move the cwd invisibly —
+# void tracking (soft: later unconditional absolute cds recover).
+_GLUED_COMMAND = re.compile(
+    r"(?:^|[\n;&|(])\s*(?:[A-Za-z_][A-Za-z0-9_]*=[^\s;|&<>()]*\s+)*"
+    r"[^\s;|&<>()]*_quoted_data_[^\s;|&<>()]*"
+)
 def _segment_boundary(text: str, start: int) -> int:
     """Position of the control operator ending the command segment at
     `start` (or len(text)). An `&` inside redirection syntax — `>&`/`<&`
@@ -211,10 +219,15 @@ _CWD_OPAQUE = re.compile(r"[()`]")
 # absolute cd afterwards recovers tracking.
 _COMPOUND = re.compile(
     r"(?:^|[\n;&|(])\s*"
-    r"(?:(?:if|then|elif|else|fi|for|while|until|do|done|case|esac|function"
-    r"|eval|source)\b"
-    r"|\.(?![^\s;&|)\n]))"
+    r"(?:if|then|elif|else|fi|for|while|until|do|done|case|esac|function)\b"
     r"|[{}]"
+)
+# eval/source/. run current-shell code the scanner cannot see, but they
+# EXECUTE AND RETURN: top-level flow demonstrably resumes after them, so
+# their opacity is soft (an unconditional absolute cd afterwards recovers) —
+# unlike a compound body, whose extent is unparseable (hard, above).
+_SHELL_EXEC = re.compile(
+    r"(?:^|[\n;&|(])\s*(?:(?:eval|source)\b|\.(?![^\s;&|)\n]))"
 )
 
 
@@ -292,8 +305,19 @@ def resolved_bash_targets(
     ]
     for m in _CWD_OPAQUE.finditer(scannable):
         events.append((m.start(), "opaque", None))
-    for m in _COMPOUND.finditer(scannable):
+    for m in _GLUED_COMMAND.finditer(scannable):
         events.append((m.start(), "opaque", None))
+    for m in _SHELL_EXEC.finditer(scannable):
+        events.append((m.start(), "opaque", None))
+    for m in _COMPOUND.finditer(scannable):
+        # HARD opacity: a compound body's extent is unparseable here, so a
+        # cd inside it must never recover tracking — `if false; then cd
+        # /etc; cat > shadow; fi` runs neither the cd nor the write, and an
+        # "absolute cd recovers" rule falsely denied the never-executed
+        # redirect. Sticky for the rest of the command; soft opacity
+        # (subshells, eval, bare &) stays recoverable because top-level
+        # flow demonstrably resumes after those.
+        events.append((m.start(), "hard", None))
     for pos in _bare_ampersands(scannable):
         events.append((pos, "opaque", None))
     # A cd is APPLIED on the assumption it succeeded; a later `||` in the
@@ -353,11 +377,19 @@ def resolved_bash_targets(
     # then the ||/list bookkeeping, and let an opacity marker (e.g. the `)`
     # closing a subshell that both ends the cd's segment and discards its
     # effect) win last.
-    priority = {"target": 0, "chdir": 1, "orelse": 2, "listsep": 3, "opaque": 4}
+    priority = {
+        "target": 0,
+        "chdir": 1,
+        "orelse": 2,
+        "listsep": 3,
+        "opaque": 4,
+        "hard": 5,
+    }
     events.sort(key=lambda e: (e[0], priority[e[1]]))
 
     current: Path | None = cwd
     cd_applied_in_list = False
+    dead = False  # hard opacity: no cd may recover tracking anymore
     out: list[tuple[str, Path | None]] = []
     for _pos, kind, value in events:
         if kind == "target":
@@ -368,6 +400,11 @@ def resolved_bash_targets(
                 out.append((raw, None))
             else:
                 out.append((raw, _norm(raw, current)))
+            continue
+        if kind == "hard":
+            current = None
+            cd_applied_in_list = False
+            dead = True
             continue
         if kind == "opaque":
             current = None
@@ -384,6 +421,10 @@ def resolved_bash_targets(
             cd_applied_in_list = False
             continue
         sep, verb, flags, target, unusable = value
+        if dead:
+            # inside (or after) an unmodeled compound body: even an
+            # absolute cd may never have executed — no recovery
+            continue
         if sep == "|" or sep == "||" or unusable or verb == "popd":
             current = None
             cd_applied_in_list = False

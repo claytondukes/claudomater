@@ -433,6 +433,30 @@ class TestBashFence:
             allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
             assert allow, (cmd, reason)
 
+    def test_quote_spliced_cd_voids_tracking(self, tmp_path):
+        """Bash concatenates quoted spans: `c""d server` and `"cd" server`
+        both RUN cd, invisibly to the scanner — a stale cwd then falsely
+        denied the in-root scratch write. An unnameable command-position
+        word voids tracking instead."""
+        (tmp_path / "server").mkdir()
+        for cmd in (
+            'c""d server && cat > ../.omater/scratch/x',
+            '"cd" server && cat > out.txt',
+        ):
+            p = payload("Bash", command=cmd)
+            p["cwd"] = str(tmp_path)
+            allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+            assert allow, (cmd, reason)
+
+    def test_no_cd_recovery_inside_compound_bodies(self, tmp_path):
+        """`if false; then cd /etc; cat > shadow; fi` executes neither the
+        cd nor the write — an absolute cd inside an unmodeled compound body
+        must not recover tracking and falsely deny the redirect."""
+        p = payload("Bash", command="if false; then cd /etc; cat > shadow; fi")
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+
     def test_quote_placeholder_keeps_word_adjacency(self, tmp_path):
         """`echo "x"#suffix > /tmp_probe/out`: bash executes the redirect —
         the space-padded placeholder invented a word boundary that turned
