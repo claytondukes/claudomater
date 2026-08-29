@@ -71,9 +71,10 @@ _HEREDOC = re.compile(
     r"(<<-?\s*(['\"]?)(\w+)\2[^\n]*\n).*?^\s*\3\s*$", re.DOTALL | re.MULTILINE
 )
 _QUOTED = re.compile(r"'[^']*'|\"[^\"]*\"")
-# A bash comment starts at `#` only at the start of a word (start of the
-# string or after whitespace) — `file#1` and `${#var}` are not comments.
-_COMMENT = re.compile(r"(?:(?<=\s)|^)#[^\n]*")
+# A bash comment starts at `#` at the start of a WORD: after whitespace or a
+# shell metacharacter (`echo ok;# ignored` is a comment too) or the string
+# start — while `file#1` and `${#var}` are not comments.
+_COMMENT = re.compile(r"(?:(?<=[\s;&|()<>`])|^)#[^\n]*")
 _REDIRECT = re.compile(r"(?<![<>&\d])\d?>{1,2}\s*([^\s;|&<>()]+)")
 _TEE = re.compile(r"\btee\s+(?:-[a-zA-Z]+\s+)*([^\s;|&<>()]+)")
 _CREATE = re.compile(r"\b(?:mkdir|touch)\s+(?:-[a-zA-Z=]+\s+)*([^\s;|&<>()]+)")
@@ -187,7 +188,9 @@ def bash_write_targets(command: str) -> list[str]:
     return [raw for _, raw in _positioned_write_targets(_scannable(command))]
 
 
-def resolved_bash_targets(command: str, cwd: Path) -> list[tuple[str, Path | None]]:
+def resolved_bash_targets(
+    command: str, cwd: Path, env: dict[str, str] | None = None
+) -> list[tuple[str, Path | None]]:
     """Each recognized write target paired with the path it resolves to,
     honoring in-command `cd`/`pushd` when resolving RELATIVE targets.
 
@@ -209,6 +212,13 @@ def resolved_bash_targets(command: str, cwd: Path) -> list[tuple[str, Path | Non
     can still mis-resolve a later relative target, which deny-on-recognized
     accepts. Absolute targets never depend on the cwd and always resolve."""
     scannable = _scannable(command)
+    # CDPATH rewires where a bare relative cd target lands (`CDPATH=/x cd t`
+    # goes to /x/t; an inherited CDPATH does the same to every relative cd).
+    # When one is plausibly in effect, CDPATH-eligible targets (relative,
+    # not ./ or ../ anchored) become untrackable. Absolute and dot-anchored
+    # targets bypass CDPATH per bash and keep tracking.
+    env = env if env is not None else dict(os.environ)
+    cdpath_active = bool(env.get("CDPATH")) or "CDPATH" in scannable
     events: list[tuple[int, str, Any]] = [
         (pos, "target", raw) for pos, raw in _positioned_write_targets(scannable)
     ]
@@ -305,6 +315,10 @@ def resolved_bash_targets(command: str, cwd: Path) -> list[tuple[str, Path | Non
         step = Path(os.path.expanduser(target))
         if step.is_absolute():
             current = Path(os.path.realpath(step))
+        elif cdpath_active and not target.startswith("."):
+            # a bare relative target under an effective CDPATH may land
+            # ANYWHERE on that search path — untrackable
+            current = None
         elif current is not None:
             current = Path(os.path.realpath(current / step))
         # relative cd from an unknown cwd stays unknown
@@ -379,7 +393,7 @@ def evaluate_pre_tool_use(
         command = tool_input.get("command")
         if not isinstance(command, str):
             return True, None
-        for raw, path in resolved_bash_targets(command, cwd):
+        for raw, path in resolved_bash_targets(command, cwd, env=env):
             if path is None:
                 # Relative target, untrackable effective cwd: not a
                 # RECOGNIZED out-of-tree write — fail open, never guess-deny

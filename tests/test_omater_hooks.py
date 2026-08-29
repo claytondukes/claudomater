@@ -357,6 +357,44 @@ class TestBashFence:
         allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
         assert not allow
 
+    def test_comment_after_a_metacharacter_is_a_comment_too(self, tmp_path):
+        """`echo ok;# ignored > /etc/x` — the # after `;` starts a comment;
+        scanning its text falsely denied a redirect bash never executes."""
+        p = payload("Bash", command="echo ok;# ignored > /etc/x\ncat > out.txt")
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+
+    def test_cdpath_makes_bare_relative_cd_targets_untrackable(self, tmp_path):
+        """CDPATH rewires where `cd target` lands (search path, not cwd) —
+        one-shot prefix or inherited env. Bare relative cd targets go
+        unknown (fail open); ./-anchored and absolute targets bypass CDPATH
+        per bash and keep tracking (and denying)."""
+        (tmp_path / "server").mkdir()
+        # one-shot prefix: tracker must NOT assume <root>/target
+        p = payload("Bash", command="CDPATH=/tmp_probe cd target && cat > out.txt")
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+        # inherited CDPATH: same rule via env
+        env = {"CDPATH": "/tmp_probe"}
+        p = payload("Bash", command="cd server && cat > out.txt")
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path, env=env)
+        assert allow, reason
+        # absolute cd is CDPATH-immune: still tracked, still denies
+        p = payload("Bash", command="cd /etc && cat > passwd")
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path, env=env)
+        assert not allow
+        # ./-anchored target bypasses CDPATH: tracked, in-root scratch allows
+        p = payload(
+            "Bash", command="cd ./server && cat > ../.omater/scratch/x"
+        )
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path, env=env)
+        assert allow, reason
+
     def test_cd_needs_a_token_boundary(self, tmp_path):
         """`cd/etc; cat > out.txt` runs a command NAMED cd/etc — bash stays
         in the project root and out.txt is in-tree; parsing it as `cd /etc`
