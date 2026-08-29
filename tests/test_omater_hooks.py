@@ -433,6 +433,50 @@ class TestBashFence:
             allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
             assert allow, (cmd, reason)
 
+    def test_eval_source_and_dot_void_tracking(self, tmp_path):
+        """eval/source/. execute current-shell code the scanner cannot see
+        (`eval 'cd <root>/server'` really moves the cwd) — after them the
+        cwd is unknowable, so relative targets fail open. An absolute cd
+        afterwards recovers tracking (and denying)."""
+        (tmp_path / "server").mkdir()
+        for cmd in (
+            f"eval 'cd {tmp_path}/server' && cat > ../.omater/scratch/x",
+            "source env.sh && cat > out.txt",
+            ". ./env.sh && cat > out.txt",
+        ):
+            p = payload("Bash", command=cmd)
+            p["cwd"] = str(tmp_path)
+            allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+            assert allow, (cmd, reason)
+        p = payload("Bash", command="eval 'x'; cd /etc && cat > passwd")
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+
+    def test_cd_is_logical_by_default(self, tmp_path):
+        """Bash cds logically (-L): `cd link && cd ..` returns to the LINK's
+        parent, not the symlink target's parent. Realpathing every hop
+        falsely denied the in-root write; -P opts into physical semantics."""
+        outside = tmp_path / "outside-tree"
+        (outside / "child").mkdir(parents=True)
+        root = tmp_path / "project"
+        root.mkdir()
+        (root / "link").symlink_to(outside / "child")
+        p = payload("Bash", command="cd link && cd .. && cat > out.txt")
+        p["cwd"] = str(root)
+        allow, reason = hooks.evaluate_pre_tool_use(p, root)
+        assert allow, reason  # logical: back in <root>, write is in-tree
+        # writes THROUGH the link still canonicalize at resolution: denied
+        p = payload("Bash", command="cd link && cat > x")
+        p["cwd"] = str(root)
+        allow, _ = hooks.evaluate_pre_tool_use(p, root)
+        assert not allow
+        # -P selects physical semantics: `cd ..` lands in the OUTSIDE parent
+        p = payload("Bash", command="cd -P link && cd .. && cat > out.txt")
+        p["cwd"] = str(root)
+        allow, _ = hooks.evaluate_pre_tool_use(p, root)
+        assert not allow
+
     def test_cd_inside_compound_control_flow_fails_open(self, tmp_path):
         """A cd inside `if false; then … fi`, a function body, or a
         zero-iteration loop may never execute — applying it guess-denied a

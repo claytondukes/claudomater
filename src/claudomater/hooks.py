@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import os
+import posixpath
 import re
 from pathlib import Path
 from typing import Any
@@ -130,6 +131,17 @@ def _segment_boundary(text: str, start: int) -> int:
 # never reaches the foreground shell — after a bare `&` the tracked cwd is
 # unknowable. Skips the same redirect forms as _segment_boundary and both
 # halves of `&&`.
+def _last_lp_flag(flags: str) -> str | None:
+    """The effective -L/-P choice: bash honors the LAST one given
+    (bundled letters included)."""
+    last = None
+    for token in re.findall(r"-([A-Za-z]+)", flags):
+        for ch in token:
+            if ch in "LP":
+                last = ch
+    return last
+
+
 def _bare_ampersands(text: str) -> list[int]:
     out = []
     for m in re.finditer(r"&", text):
@@ -145,11 +157,17 @@ def _bare_ampersands(text: str) -> list[int]:
 _CWD_OPAQUE = re.compile(r"[()`]")
 # Compound control flow this scanner does not model: a cd inside
 # `if false; then cd /etc; fi`, a function body, or a zero-iteration loop
-# may never execute, so applying it would guess-deny. Any of these reserved
-# words at a command position (or a brace group) makes the cwd untrackable
-# from that point on — same monotone fail-open rule as subshells.
+# may never execute, so applying it would guess-deny. `eval`, `source`, and
+# `.` run current-shell code the scanner cannot see (a quoted `eval 'cd x'`
+# is placeholdered as data), so the cwd after them is unknowable too. Any of
+# these at a command position (or a brace group) makes the cwd untrackable
+# from that point on — same monotone fail-open rule as subshells; an
+# absolute cd afterwards recovers tracking.
 _COMPOUND = re.compile(
-    r"(?:^|[\n;&|(])\s*(?:if|then|elif|else|fi|for|while|until|do|done|case|esac|function)\b"
+    r"(?:^|[\n;&|(])\s*"
+    r"(?:(?:if|then|elif|else|fi|for|while|until|do|done|case|esac|function"
+    r"|eval|source)\b"
+    r"|\.(?![^\s;&|)\n]))"
     r"|[{}]"
 )
 
@@ -297,7 +315,8 @@ def resolved_bash_targets(
         if sep == "|" or sep == "||" or unusable or verb == "popd":
             current = None
             continue
-        if verb == "pushd" and "-n" in str(flags or "").split():
+        flags = str(flags or "")
+        if verb == "pushd" and "-n" in flags.split():
             # pushd -n updates the directory STACK without changing the
             # working directory — the cwd genuinely stays where it is
             continue
@@ -313,15 +332,25 @@ def resolved_bash_targets(
             current = None
             continue
         step = Path(os.path.expanduser(target))
+        # Bash cds LOGICALLY by default (-L): `cd link && cd ..` returns to
+        # the link's parent, not the symlink target's parent. Track the
+        # logical cwd (lexical `..` handling, no realpath per hop) and
+        # canonicalize only when a WRITE target is resolved (_norm) — or
+        # when the hop's effective option ordering selects -P.
+        physical = _last_lp_flag(flags) == "P"
         if step.is_absolute():
-            current = Path(os.path.realpath(step))
+            new_cwd = str(step)
         elif cdpath_active and not target.startswith("."):
             # a bare relative target under an effective CDPATH may land
             # ANYWHERE on that search path — untrackable
             current = None
+            continue
         elif current is not None:
-            current = Path(os.path.realpath(current / step))
-        # relative cd from an unknown cwd stays unknown
+            new_cwd = posixpath.join(str(current), str(step))
+        else:
+            continue  # relative cd from an unknown cwd stays unknown
+        new_cwd = posixpath.normpath(new_cwd)
+        current = Path(os.path.realpath(new_cwd)) if physical else Path(new_cwd)
     return out
 
 
