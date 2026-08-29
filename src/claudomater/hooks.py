@@ -74,8 +74,11 @@ _HEREDOC = re.compile(
 _QUOTED = re.compile(r"'[^']*'|\"[^\"]*\"")
 # A bash comment starts at `#` at the start of a WORD: after whitespace or a
 # shell metacharacter (`echo ok;# ignored` is a comment too) or the string
-# start — while `file#1` and `${#var}` are not comments.
-_COMMENT = re.compile(r"(?:(?<=[\s;&|()<>`])|^)#[^\n]*")
+# start — while `file#1` and `${#var}` are not comments. `)` and backtick
+# are deliberately NOT in the class: they end command substitutions whose
+# results can be word-glued (`$(printf x)#suffix` continues the word), and
+# erasing from there would hide a recognizable absolute write.
+_COMMENT = re.compile(r"(?:(?<=[\s;&|(<>])|^)#[^\n]*")
 _REDIRECT = re.compile(r"(?<![<>&\d])\d?>{1,2}\s*([^\s;|&<>()]+)")
 _TEE = re.compile(r"\btee\s+(?:-[a-zA-Z]+\s+)*([^\s;|&<>()]+)")
 _CREATE = re.compile(r"\b(?:mkdir|touch)\s+(?:-[a-zA-Z=]+\s+)*([^\s;|&<>()]+)")
@@ -183,7 +186,11 @@ def _scannable(command: str) -> str:
     # (relative, in-tree) placeholder, which the deny-on-recognized
     # contract accepts.
     scannable = _HEREDOC.sub(lambda m: m.group(1), command)
-    scannable = _QUOTED.sub(" _quoted_data_ ", scannable)
+    # No padding around the placeholder: quotes glued to other characters
+    # (`echo "x"#suffix`, `cp x"a b"y t`) must keep their word intact — a
+    # space-padded placeholder invented a word boundary that turned #suffix
+    # into a comment and erased the recognizable write after it.
+    scannable = _QUOTED.sub("_quoted_data_", scannable)
     # Unquoted comments are data too: `cd x  # note; cd /etc` must not have
     # its comment text scanned as commands. Same-length spaces keep every
     # event offset in this string consistent.
@@ -246,6 +253,15 @@ def resolved_bash_targets(
         events.append((m.start(), "opaque", None))
     for pos in _bare_ampersands(scannable):
         events.append((pos, "opaque", None))
+    # A cd is APPLIED on the assumption it succeeded; a later `||` in the
+    # same list runs its RHS precisely when something failed — possibly that
+    # cd — so the cwd there (and after) is unknowable. `;`/newline resets
+    # the "a cd was applied in this list" state: a || in a LATER list says
+    # nothing about an earlier list's cd.
+    for m in re.finditer(r"\|\|", scannable):
+        events.append((m.start(), "orelse", None))
+    for m in re.finditer(r"[;\n]", scannable):
+        events.append((m.start(), "listsep", None))
     chdir_matches = list(_CHDIR.finditer(scannable))
     matched_verb_spans = [(m.start(2), m.end(2)) for m in chdir_matches]
     for m in _CD_WORD.finditer(scannable):
@@ -291,12 +307,14 @@ def resolved_bash_targets(
             if list_end < len(scannable):
                 events.append((list_end, "opaque", None))
     # Same-position ties: resolve targets first (pre-cd), apply the cd next,
-    # and let an opacity marker (e.g. the `)` closing a subshell that both
-    # ends the cd's segment and discards its effect) win last.
-    priority = {"target": 0, "chdir": 1, "opaque": 2}
+    # then the ||/list bookkeeping, and let an opacity marker (e.g. the `)`
+    # closing a subshell that both ends the cd's segment and discards its
+    # effect) win last.
+    priority = {"target": 0, "chdir": 1, "orelse": 2, "listsep": 3, "opaque": 4}
     events.sort(key=lambda e: (e[0], priority[e[1]]))
 
     current: Path | None = cwd
+    cd_applied_in_list = False
     out: list[tuple[str, Path | None]] = []
     for _pos, kind, value in events:
         if kind == "target":
@@ -310,10 +328,22 @@ def resolved_bash_targets(
             continue
         if kind == "opaque":
             current = None
+            cd_applied_in_list = False
+            continue
+        if kind == "orelse":
+            # the RHS of || runs exactly when something failed — possibly a
+            # cd applied earlier in this list on the success assumption
+            if cd_applied_in_list:
+                current = None
+                cd_applied_in_list = False
+            continue
+        if kind == "listsep":
+            cd_applied_in_list = False
             continue
         sep, verb, flags, target, unusable = value
         if sep == "|" or sep == "||" or unusable or verb == "popd":
             current = None
+            cd_applied_in_list = False
             continue
         flags = str(flags or "")
         if verb == "pushd" and "-n" in flags.split():
@@ -351,6 +381,7 @@ def resolved_bash_targets(
             continue  # relative cd from an unknown cwd stays unknown
         new_cwd = posixpath.normpath(new_cwd)
         current = Path(os.path.realpath(new_cwd)) if physical else Path(new_cwd)
+        cd_applied_in_list = True
     return out
 
 

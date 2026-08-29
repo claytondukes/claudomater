@@ -433,6 +433,41 @@ class TestBashFence:
             allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
             assert allow, (cmd, reason)
 
+    def test_quote_placeholder_keeps_word_adjacency(self, tmp_path):
+        """`echo "x"#suffix > /tmp_probe/out`: bash executes the redirect —
+        the space-padded placeholder invented a word boundary that turned
+        #suffix into a comment and ERASED the recognizable absolute write."""
+        p = payload("Bash", command='echo "x"#suffix > /tmp_probe/out')
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+
+    def test_hash_after_command_substitution_is_not_a_comment(self, tmp_path):
+        """`$(printf x)#suffix` continues the word — a `)` ends a
+        substitution whose result can be word-glued, so it must not count
+        as a comment boundary (that erased the absolute write after it)."""
+        p = payload("Bash", command="echo $(printf x)#suffix > /tmp_probe/out")
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+
+    def test_or_after_an_applied_cd_voids_the_tracked_cwd(self, tmp_path):
+        """`cd /definitely-missing && true || cat > out.txt`: the || branch
+        runs because the cd FAILED, so cat writes in the original cwd — the
+        success-assumed /definitely-missing must not deny it."""
+        p = payload(
+            "Bash", command="cd /definitely-missing && true || cat > out.txt"
+        )
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+        # a || in a LATER list says nothing about an earlier list's cd:
+        # deny power is kept across the `;`
+        p = payload("Bash", command="cd /etc; true || false; cat > passwd")
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+
     def test_eval_source_and_dot_void_tracking(self, tmp_path):
         """eval/source/. execute current-shell code the scanner cannot see
         (`eval 'cd <root>/server'` really moves the cwd) — after them the
