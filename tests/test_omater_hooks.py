@@ -553,6 +553,29 @@ class TestBashFence:
             allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
             assert allow, (cmd, reason)
 
+    def test_unresolved_target_constructs_fail_open_by_grammar(self, tmp_path):
+        """THE conservative target grammar (ratified fence contract:
+        seatbelt, not a security boundary): any construct the resolver has
+        not FULLY resolved classifies the write as UNRECOGNIZED -> fail
+        open. One grammar, one rule per construct CLASS — never new
+        per-construct bash semantics."""
+        for cmd in (
+            'echo x > "$OUT"/f',  # quoted span (placeholder)
+            "echo x > $OUT/f",  # parameter expansion
+            "echo x > $(dirname a)/f",  # command substitution
+            "echo x > `dirname a`/f",  # backtick substitution
+            "echo x > f\\ g.txt",  # escape
+            "echo x > proj?/f",  # glob
+            "echo x > proj[12]/f",  # glob class
+            "echo x > {a,b}/f",  # brace expansion
+            "echo x > ~-/f",  # directory-stack tilde
+            "echo x > ~nosuchuser8_/f",  # unresolvable user tilde
+        ):
+            resolutions = hooks.resolved_bash_targets(cmd, tmp_path)
+            assert resolutions, cmd  # the shape IS seen — and fails open
+            for _, resolved in resolutions:
+                assert resolved is None, (cmd, resolved)
+
     def test_invalid_builtin_flags_never_apply_the_target(self, tmp_path):
         """bash rejects `pushd -P /etc` and `cd -Z /etc` (invalid option)
         WITHOUT moving — applying the target tracked a cwd the shell never

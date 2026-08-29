@@ -322,6 +322,28 @@ _CHDIR = re.compile(
 _TRAILING_REDIRECT = re.compile(
     r"(?:\d*>{1,2}|&>{1,2}|\d*<{1,3})(?:[ \t]*&\d*-?)?[ \t]*[^\s;|&<>()]*"
 )
+# THE conservative write-target grammar (ratified fence contract: the
+# fence is an accident seatbelt, not a security boundary against an
+# evading agent). A target is RESOLVED only when it is a plain literal
+# path. ANY construct not fully resolved — a quoted-span placeholder,
+# parameter/command substitution ($ or backticks), an escape (backslash,
+# remnant continuations included), glob/brace expansion chars, or a tilde
+# surviving expanduser (~-, ~+, ~N, unknown users) — classifies the write
+# as UNRECOGNIZED and the caller fails OPEN. Do not add per-construct
+# resolution here: that path was five review rounds of bash-semantics
+# whack-a-mole, each special case breeding the next.
+_UNRESOLVED_CONSTRUCT = re.compile(r"[\\$*?\[{`]|_quoted_data_")
+
+
+def _resolved_target(raw: str) -> str | None:
+    """The expanded literal path for a fully resolved target token, else
+    None (UNRECOGNIZED -> fail open). See _UNRESOLVED_CONSTRUCT."""
+    if _UNRESOLVED_CONSTRUCT.search(raw):
+        return None
+    expanded = os.path.expanduser(raw)
+    if expanded.startswith("~"):
+        return None
+    return expanded
 # Any cd-ish token the pattern above did NOT positively match (quoted
 # assignment values, `command cd`, unmodeled prefixes, prose...) voids the
 # tracked cwd instead of being silently ignored — an unrecognized cd left
@@ -756,27 +778,7 @@ def resolved_bash_targets(
                 # almost certainly body DATA bash never executes
                 out.append((raw, None))
                 continue
-            if (
-                "_quoted_data_" in raw
-                or "$" in raw
-                or "\\" in raw
-                or any(ch in raw for ch in "*?[{")
-            ):
-                # Not a literal filename: a quoted span (placeholder), an
-                # expansion, an escape, or glob/brace chars — the actual
-                # path is unknowable (an expansion can even contain `..`,
-                # and a glob expands at RUNTIME: from the parent dir,
-                # `> projec?/out.txt` can land right back IN-root while
-                # the literal text resolves out-of-tree). Resolving the
-                # literal falsely denied both shapes. Same rule as cd
-                # targets below: fail open.
-                out.append((raw, None))
-            elif os.path.expanduser(raw).startswith("~"):
-                # a tilde surviving expanduser: directory-stack forms
-                # (`~-` = $OLDPWD, `~+`, `~N`) or an unknown user — runtime
-                # state, same rule as cd targets. Resolving the literal
-                # against the tracked cwd falsely denied `> ~-/out.txt`
-                # (an $OLDPWD write that landed in-root). Fail open.
+            if _resolved_target(raw) is None:
                 out.append((raw, None))
             elif Path(os.path.expanduser(raw)).is_absolute():
                 out.append((raw, _norm(raw, cwd)))
