@@ -433,6 +433,24 @@ class TestBashFence:
             allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
             assert allow, (cmd, reason)
 
+    def test_non_literal_targets_fail_open_even_under_a_tracked_cwd(self, tmp_path):
+        """A quoted or expansion-bearing target is not a literal filename:
+        resolving the placeholder against a tracked /etc cwd falsely denied
+        `cd /etc && echo x > "<root>/out.txt"` (an in-root write)."""
+        for cmd in (
+            f'cd /etc && echo x > "{tmp_path}/out.txt"',
+            "cd /etc && echo x > $PROJECT_ROOT/out.txt",
+        ):
+            p = payload("Bash", command=cmd)
+            p["cwd"] = str(tmp_path)
+            allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+            assert allow, (cmd, reason)
+        # literal targets under the tracked cwd keep full deny power
+        p = payload("Bash", command="cd /etc && echo x > out.txt")
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+
     def test_dash_p_realpaths_before_lexical_normalization(self, tmp_path):
         """`cd link && cd -P ..` lands in the link TARGET's parent —
         normalizing `..` away first erased the symlink hop and let the

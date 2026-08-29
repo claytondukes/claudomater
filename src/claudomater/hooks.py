@@ -266,10 +266,9 @@ def _scannable(command: str) -> str:
     # legitimate in-tree work. Quoted strings become a placeholder TOKEN,
     # not a bare space: erasing them entirely also erased argument
     # structure, so `cp "a b" /tmp/out` lost its source token and the
-    # copy-target regex no longer saw the out-of-tree write. The remaining
-    # cost is that a quoted redirect TARGET ('> "/x y"') reads as the
-    # (relative, in-tree) placeholder, which the deny-on-recognized
-    # contract accepts.
+    # copy-target regex no longer saw the out-of-tree write. A quoted
+    # redirect TARGET ('> "/x y"') reads as the placeholder, which the
+    # resolver treats as non-literal and fails OPEN on (deny-on-recognized).
     scannable = _HEREDOC.sub(lambda m: m.group(1), command)
     # No padding around the placeholder: quotes glued to other characters
     # (`echo "x"#suffix`, `cp x"a b"y t`) must keep their word intact — a
@@ -437,7 +436,14 @@ def resolved_bash_targets(
     for _pos, kind, value in events:
         if kind == "target":
             raw = str(value)
-            if Path(os.path.expanduser(raw)).is_absolute():
+            if "_quoted_data_" in raw or "$" in raw or "\\" in raw:
+                # Not a literal filename: a quoted span (placeholder), an
+                # expansion, or an escape — the actual path is unknowable
+                # (an expansion can even contain `..`), and resolving the
+                # placeholder against a tracked out-of-tree cwd falsely
+                # denied a quoted IN-ROOT absolute target. Fail open.
+                out.append((raw, None))
+            elif Path(os.path.expanduser(raw)).is_absolute():
                 out.append((raw, _norm(raw, cwd)))
             elif current is None:
                 out.append((raw, None))
