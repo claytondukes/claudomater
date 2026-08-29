@@ -610,13 +610,11 @@ class TestScrub:
 # ---- Phase 0 sandbox-proof rough edges (PHASE0-REPORT.md) ------------------
 
 
-import os
 import shlex
 
 from claudomater.phases import (
     RETRY_FEEDBACK_HEADER,
     ClaudeCliExecutor,
-    amend_prompt_with_failures,
     escalation_spec,
     orphaned_agent_pids,
     reap_orphaned_agents,
