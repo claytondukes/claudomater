@@ -502,6 +502,40 @@ class TestBashFence:
             allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
             assert not allow, cmd
 
+    def test_heredoc_prepass_shares_the_lexers_data_rules(self, tmp_path):
+        """The heredoc pre-pass and the main lexer must agree on what is
+        data: an ANSI-C escaped quote ($'fake \\' <<EOF') and a comment
+        after a group-closing paren ((echo ok)# <<EOF) both make the
+        <<EOF data — a pre-pass missing either rule took it as a live
+        introducer and ate the next line's real write as heredoc body."""
+        for cmd in (
+            "echo $'fake \\' <<EOF'\ncat > /tmp_probe/real\nEOF",
+            "(echo ok)# <<EOF\ncat > /tmp_probe/real\nEOF",
+        ):
+            p = payload("Bash", command=cmd)
+            p["cwd"] = str(tmp_path)
+            allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+            assert not allow, cmd
+
+    def test_pure_arithmetic_parens_do_not_void_the_tracked_cwd(self, tmp_path):
+        """Arithmetic evaluation cannot move the shell's cwd: treating
+        `((x++))` / `$((x+1))` parens as opacity let `cd /etc; ((x++));
+        cat > passwd` resolve its relative write against a 'lost' cwd
+        (fail open = ALLOW). A nested command substitution inside the
+        arithmetic keeps the span's full opacity."""
+        for cmd in (
+            "cd /etc; ((x++)); cat > passwd",
+            "cd /etc; echo $((x+1)); cat > passwd",
+        ):
+            p = payload("Bash", command=cmd)
+            p["cwd"] = str(tmp_path)
+            allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+            assert not allow, cmd
+        p = payload("Bash", command="cd /etc; ((x = $(id -u) )); cat > passwd")
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason  # nested substitution: conservative fail open
+
     def test_glob_write_targets_fail_open_never_falsely_deny(self, tmp_path):
         """An unquoted glob/brace in a write target expands at RUNTIME:
         from the parent dir, `> <roo>?/out.txt` can uniquely expand back

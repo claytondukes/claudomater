@@ -74,42 +74,111 @@ def _escape_parity(text: str, idx: int) -> int:
     return run % 2
 
 
-def _data_spans(text: str) -> list[tuple[int, int]]:
-    """Rough spans of RAW text that are data (quoted spans and comments) —
-    used only to keep the heredoc pass from consuming a `<<` bash treats as
-    data (`echo ok # <<EOF`, `echo '<<EOF'`). Misclassifying here degrades
-    to the residual-<< wall (fail open), never to a guess."""
-    spans: list[tuple[int, int]] = []
+def _lex_spans(text: str) -> list[tuple[str, int, int]]:
+    """Data spans — ("quote", start, end) / ("comment", start, end) — from
+    ONE scanner with shared lexical state. Both the masked-text renderer
+    (_mask_data) and the heredoc pre-pass (_data_spans) draw from it: two
+    divergent scanners cannot express bash here — a `#` inside quotes is
+    data, a quote inside a comment is comment text, and the pre-pass
+    disagreeing with the lexer on ANY rule (ANSI-C escaped quotes, the
+    group-closing-`)` comment) let a fake heredoc introducer that bash
+    treats as data eat real commands as its body.
+
+    Quotes are escape-aware BY PARITY: a quote after an ODD backslash run
+    is a literal char; after an EVEN run (`\\\\"` = escaped backslash +
+    real quote) it delimits. Inside double quotes \\" does not end the
+    span; a plain single-quoted span cannot contain escapes in bash;
+    ANSI-C $'...' can. Unterminated quotes yield no span
+    (deny-on-recognized).
+
+    A comment starts at `#` at the start of a WORD: after whitespace, a
+    shell metacharacter, the string start — or a GROUP-closing `)`
+    (`(echo ok)# ignored`), but NOT a substitution-closing `)`
+    (`$(printf x)#suffix` continues the word). Telling those apart needs
+    pair matching: `(` openers are classified by their preceding char
+    ($/</> = substitution, else grouping) and each `)` inherits its
+    opener's kind. Comments INSIDE backticks are real comments, but the
+    closing backtick terminates the substitution even mid-comment, so
+    there a comment ends at newline-or-backtick. `file#1` and `${#var}`
+    are not comments."""
+    spans: list[tuple[str, int, int]] = []
+    stack: list[str] = []
+    in_backtick = False
     i, n = 0, len(text)
+
+    def escaped(idx: int) -> bool:
+        """An escaped space/metachar is part of the WORD — `echo foo\\ #bar`
+        keeps #bar in the argument, not a comment."""
+        return _escape_parity(text, idx) == 1
+
+    def comment_end(idx: int) -> int:
+        stops = "\n`" if in_backtick else "\n"
+        while idx < n and text[idx] not in stops:
+            idx += 1
+        return idx
+
     while i < n:
         c = text[i]
-        if c in "'\"" and _escape_parity(text, i) == 0:
+        if c == "`" and not escaped(i):  # parity, like quotes: \\\\` opens
+            in_backtick = not in_backtick
+            i += 1
+            continue
+        if c == "#":
+            prev = text[i - 1] if i else ""
+            if i == 0 or (prev in " \t\n;&|(<>" and not escaped(i - 1)):
+                # BEFORE the quote branch: a quote in the comment is text
+                end = comment_end(i)
+                spans.append(("comment", i, end))
+                i = end
+                continue
+        if c in "'\"" and not escaped(i):
             if c == "'":
-                end = text.find("'", i + 1)
+                # ANSI-C quoting $'...' allows backslash-escaped quotes
+                # inside; a plain single-quoted span cannot contain any.
+                if i > 0 and text[i - 1] == "$" and not escaped(i - 1):
+                    end = i + 1
+                    while end < n and not (
+                        text[end] == "'" and not escaped(end)
+                    ):
+                        end += 1
+                    if end >= n:
+                        end = -1
+                else:
+                    end = text.find("'", i + 1)
             else:
                 end = i + 1
                 while end < n and not (
-                    text[end] == '"' and _escape_parity(text, end) == 0
+                    text[end] == '"' and not escaped(end)
                 ):
                     end += 1
                 if end >= n:
                     end = -1
             if end != -1:
-                spans.append((i, end + 1))
+                spans.append(("quote", i, end + 1))
                 i = end + 1
                 continue
-        elif c == "#":
+        elif c == "(" and not in_backtick and not escaped(i):
+            # \\( is word data, not a group open; parens inside backticks
+            # belong to the substitution's own parser
             prev = text[i - 1] if i else ""
-            if i == 0 or (
-                prev in " \t\n;&|(<>" and _escape_parity(text, i - 1) == 0
-            ):
-                end = text.find("\n", i)
-                end = n if end == -1 else end
-                spans.append((i, end))
+            stack.append("sub" if prev in ("$", "<", ">") else "group")
+        elif c == ")" and not in_backtick and not escaped(i):
+            # \\) is word data: `echo \\)#x > f` keeps its redirect
+            kind = stack.pop() if stack else "group"
+            if kind == "group" and i + 1 < n and text[i + 1] == "#":
+                end = comment_end(i + 1)
+                spans.append(("comment", i + 1, end))
                 i = end
                 continue
         i += 1
     return spans
+
+
+def _data_spans(text: str) -> list[tuple[int, int]]:
+    """Spans of RAW text that are data (quoted spans and comments) — keeps
+    the heredoc pass from consuming a `<<` bash treats as data (`echo ok #
+    <<EOF`, `echo '<<EOF'`). Same lexer as _mask_data by construction."""
+    return [(start, end) for _, start, end in _lex_spans(text)]
 
 
 def _arith_spans(text: str) -> list[tuple[int, int]]:
@@ -179,101 +248,20 @@ _HEREDOC = re.compile(
     re.DOTALL | re.MULTILINE,
 )
 def _mask_data(text: str) -> str:
-    """Quote masking and comment blanking in ONE scanner with shared
-    lexical state. Two sequential passes cannot express bash here: a `#`
-    inside quotes is data (so comments cannot be stripped first), and a
-    quote inside a comment is comment text (so quotes cannot be masked
-    first — `echo ok # "` opened a span that swallowed the executable
-    lines after it, hiding a real out-of-tree write from the scan).
-
-    Quoted spans become the placeholder TOKEN, escape-aware BY PARITY: a
-    quote after an ODD backslash run is a literal char; after an EVEN run
-    (`\\\\"` = escaped backslash + real quote) it opens/closes a span.
-    Inside double quotes \\" does not end the span; a plain single-quoted
-    span cannot contain escapes in bash; ANSI-C $'...' can. Unterminated
-    quotes are left as-is (deny-on-recognized).
-
-    Comments are blanked space-preservingly (offsets intact). A comment
-    starts at `#` at the start of a WORD: after whitespace, a shell
-    metacharacter, the string start — or a GROUP-closing `)` (`(echo ok)#
-    ignored`), but NOT a substitution-closing `)` (`$(printf x)#suffix`
-    continues the word). Telling those apart needs pair matching, so this
-    is a scanner, not a regex: `(` openers are classified by their
-    preceding char ($/</> = substitution, else grouping) and each `)`
-    inherits its opener's kind. Comments INSIDE backticks are real
-    comments, but the closing backtick terminates the substitution even
-    mid-comment, so there they blank only to newline-or-backtick.
-    `file#1` and `${#var}` are not comments."""
+    """Render the scan text from _lex_spans: quoted spans become the
+    placeholder TOKEN (a bare space also erased argument structure —
+    `cp "a b" /tmp/out` lost its source token), comments are blanked
+    space-preservingly (offsets intact). Sharing the one lexer is the
+    point — masking quotes in a pass BEFORE comment blanking let a quote
+    that was comment text (`echo ok # "`) open a span that swallowed the
+    executable lines after it, hiding a real out-of-tree write."""
     out: list[str] = []
-    stack: list[str] = []
-    in_backtick = False
-    i, n = 0, len(text)
-
-    def escaped(idx: int) -> bool:
-        """An escaped space/metachar is part of the WORD — `echo foo\\ #bar`
-        keeps #bar in the argument, not a comment."""
-        return _escape_parity(text, idx) == 1
-
-    def blank_to(idx: int, stops: str) -> int:
-        while idx < n and text[idx] not in stops:
-            out.append(" ")
-            idx += 1
-        return idx
-
-    while i < n:
-        c = text[i]
-        if c == "`" and not escaped(i):  # parity, like quotes: \\\\` opens
-            in_backtick = not in_backtick
-            out.append(c)
-            i += 1
-            continue
-        if c == "#":
-            prev = text[i - 1] if i else ""
-            if i == 0 or (prev in " \t\n;&|(<>" and not escaped(i - 1)):
-                # BEFORE the quote branch: a quote in the comment is text
-                i = blank_to(i, "\n`" if in_backtick else "\n")
-                continue
-        if c in "'\"" and not escaped(i):
-            if c == "'":
-                # ANSI-C quoting $'...' allows backslash-escaped quotes
-                # inside; a plain single-quoted span cannot contain any.
-                if i > 0 and text[i - 1] == "$" and not escaped(i - 1):
-                    end = i + 1
-                    while end < n and not (
-                        text[end] == "'" and not escaped(end)
-                    ):
-                        end += 1
-                    if end >= n:
-                        end = -1
-                else:
-                    end = text.find("'", i + 1)
-            else:
-                end = i + 1
-                while end < n and not (
-                    text[end] == '"' and not escaped(end)
-                ):
-                    end += 1
-                if end >= n:
-                    end = -1
-            if end != -1:
-                out.append("_quoted_data_")
-                i = end + 1
-                continue
-        elif c == "(" and not in_backtick and not escaped(i):
-            # \\( is word data, not a group open; parens inside backticks
-            # belong to the substitution's own parser
-            prev = text[i - 1] if i else ""
-            stack.append("sub" if prev in ("$", "<", ">") else "group")
-        elif c == ")" and not in_backtick and not escaped(i):
-            # \\) is word data: `echo \\)#x > f` keeps its redirect
-            kind = stack.pop() if stack else "group"
-            out.append(c)
-            i += 1
-            if kind == "group" and i < n and text[i] == "#":
-                i = blank_to(i, "\n")
-            continue
-        out.append(c)
-        i += 1
+    pos = 0
+    for kind, start, end in _lex_spans(text):
+        out.append(text[pos:start])
+        out.append("_quoted_data_" if kind == "quote" else " " * (end - start))
+        pos = end
+    out.append(text[pos:])
     return "".join(out)
 _REDIRECT = re.compile(r"(?<![<>&\d])\d?>{1,2}\s*([^\s;|&<>()]+)")
 _TEE = re.compile(r"\btee\s+(?:-[a-zA-Z]+\s+)*([^\s;|&<>()]+)")
@@ -501,9 +489,26 @@ def resolved_bash_targets(
     events: list[tuple[int, str, Any]] = [
         (pos, "target", raw) for pos, raw in _positioned_write_targets(scannable)
     ]
+    arith = _arith_spans(scannable)
+
+    def _pure_arith(idx: int) -> bool:
+        # A paren inside PURE arithmetic — no nested command substitution
+        # ($( or backtick) in the span — is the arithmetic's own delimiter
+        # or grouping: evaluation cannot move the shell's cwd, and voiding
+        # tracking over `((x++))` let `cd /etc; ((x++)); cat > passwd`
+        # slip through against a "lost" cwd. Any nested substitution keeps
+        # the span's full opacity (its parens included).
+        for start, end in arith:
+            if start <= idx < end:
+                body = scannable[start:end].lstrip("$")[2:-2]
+                return "$(" not in body and "`" not in body
+        return False
+
     for m in _CWD_OPAQUE.finditer(scannable):
         if _escape_parity(scannable, m.start()) == 1:
             continue  # \( \) \` are literal word chars, not delimiters
+        if _pure_arith(m.start()):
+            continue
         events.append((m.start(), "opaque", None))
     # Command-induced opacity (an unnameable/current-shell command) takes
     # effect at the SEGMENT boundary, not the command start: bash opens
@@ -534,7 +539,6 @@ def resolved_bash_targets(
     # enforceable. (`<<<` here-strings excluded; supported heredocs had
     # their marker blanked; a << in arithmetic is a SHIFT — `$((x<<2))`
     # walling off the rest of its own line hid a real redirect there.)
-    arith = _arith_spans(scannable)
     for m in re.finditer(r"(?<!<)<<(?!<)", scannable):
         if any(start <= m.start() < end for start, end in arith):
             continue
