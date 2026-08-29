@@ -433,6 +433,38 @@ class TestBashFence:
             allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
             assert allow, (cmd, reason)
 
+    def test_even_backslash_run_before_quote_still_opens_the_span(self, tmp_path):
+        """Escapes are parity-based: `\\\\\"` is an escaped backslash + a REAL
+        quote — the span must mask, or a genuinely quoted `>` gets falsely
+        denied."""
+        p = payload("Bash", command='echo \\\\"quoted > /tmp_probe/out"')
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+
+    def test_heredoc_delimiters_beyond_word_chars(self, tmp_path):
+        """`<<END-MARK` is a valid heredoc — an unrecognized delimiter left
+        the body scannable and its cd falsely denied the later write."""
+        cmd = "cat <<END-MARK\ncd /etc\nEND-MARK\ncat > out.txt"
+        p = payload("Bash", command=cmd)
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+
+    def test_runtime_tilde_and_brace_cd_targets_are_untrackable(self, tmp_path):
+        """`cd ~-` returns to $OLDPWD (runtime state), `~nobody`-style names
+        stay literal to expanduser, and one-value brace expansions resolve
+        away from their literal braces — all unknown, fail open."""
+        for cmd in (
+            "cd /etc; cd ~-; cat > out.txt",
+            "cd ~no_such_user_xyz/dir && cat > out.txt",
+            "cd {a,b}/dir && cat > out.txt",
+        ):
+            p = payload("Bash", command=cmd)
+            p["cwd"] = str(tmp_path)
+            allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+            assert allow, (cmd, reason)
+
     def test_pipe_ampersand_is_a_pipeline_not_background(self, tmp_path):
         """`|&` pipes stderr. Its `&` must not read as backgrounding (that
         spuriously cleared a tracked /etc and missed the later write), and a

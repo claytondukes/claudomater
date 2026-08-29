@@ -69,13 +69,47 @@ def _allowed(path: Path, root: Path, scratch_dirs: list[Path]) -> bool:
 # group 1 = the heredoc intro line (kept scannable: `cat <<EOF > /etc/x`
 # carries its redirect there); body + terminator are dropped as data.
 _HEREDOC = re.compile(
-    r"(<<-?\s*(['\"]?)(\w+)\2[^\n]*\n).*?^\s*\3\s*$", re.DOTALL | re.MULTILINE
+    r"(<<-?\s*(['\"]?)([\w.+-]+)\2[^\n]*\n).*?^\s*\3\s*$", re.DOTALL | re.MULTILINE
 )
-# Escape-aware: an escaped \" inside double quotes does NOT end the span
-# (`echo "x\\" # still quoted"` is one argument), and a backslash-escaped
-# opening quote is a literal char, not a quote start. Single-quoted spans
-# cannot contain escapes in bash.
-_QUOTED = re.compile(r"(?<!\\)'[^']*'|(?<!\\)\"(?:[^\"\\]|\\.)*\"", re.DOTALL)
+def _mask_quotes(text: str) -> str:
+    """Replace quoted spans with the placeholder, escape-aware BY PARITY: a
+    quote after an ODD backslash run is a literal char; after an EVEN run
+    (`\\\\"` = escaped backslash + real quote) it opens/closes a span. Inside
+    double quotes, \\" does not end the span; single-quoted spans cannot
+    contain escapes in bash. A lookbehind regex could not express parity and
+    left genuinely-quoted redirects visible to the scanner (false deny).
+    Unterminated quotes are left as-is (deny-on-recognized)."""
+
+    def escape_parity(idx: int) -> int:
+        run = 0
+        j = idx - 1
+        while j >= 0 and text[j] == "\\":
+            run += 1
+            j -= 1
+        return run % 2
+
+    out: list[str] = []
+    i, n = 0, len(text)
+    while i < n:
+        c = text[i]
+        if c in "'\"" and escape_parity(i) == 0:
+            if c == "'":
+                end = text.find("'", i + 1)
+            else:
+                end = i + 1
+                while end < n and not (
+                    text[end] == '"' and escape_parity(end) == 0
+                ):
+                    end += 1
+                if end >= n:
+                    end = -1
+            if end != -1:
+                out.append("_quoted_data_")
+                i = end + 1
+                continue
+        out.append(c)
+        i += 1
+    return "".join(out)
 def _strip_comments(text: str) -> str:
     """Blank bash comments (space-preserving, offsets intact). A comment
     starts at `#` at the start of a WORD: after whitespace, a shell
@@ -289,7 +323,7 @@ def _scannable(command: str) -> str:
     # (`echo "x"#suffix`, `cp x"a b"y t`) must keep their word intact — a
     # space-padded placeholder invented a word boundary that turned #suffix
     # into a comment and erased the recognizable write after it.
-    scannable = _QUOTED.sub("_quoted_data_", scannable)
+    scannable = _mask_quotes(scannable)
     # Backslash-newline is a line CONTINUATION, not a boundary: `false && \
     # cd /etc` is one guarded list, and leaving the newline in made the cd
     # read as an unconditional new command. Quoted spans were already
@@ -524,17 +558,23 @@ def resolved_bash_targets(
             continue
         if (
             "\\" in target
-            or any(ch in target for ch in "*?[")
+            or any(ch in target for ch in "*?[{")
             or (verb == "pushd" and re.fullmatch(r"[+-]\d+", target))
         ):
             # Not a literal path: a backslash means the token was truncated
-            # at an escaped character (`cd a\ b/c` scans as `a\`); glob
-            # chars expand at runtime (`cd ../proj*` can land right back
-            # in-root); pushd +N/-N rotates the directory stack to an entry
-            # this scan cannot know. All -> unknown, fail open.
+            # at an escaped character (`cd a\ b/c` scans as `a\`); glob and
+            # brace chars expand at runtime (`cd ../proj*` can land right
+            # back in-root); pushd +N/-N rotates the directory stack to an
+            # entry this scan cannot know. All -> unknown, fail open.
             current = None
             continue
         step = Path(os.path.expanduser(target))
+        if str(step).startswith("~"):
+            # a tilde expanduser could not resolve: directory-stack forms
+            # (`~-` = $OLDPWD, `~+`, `~N`) or an unknown user — the real
+            # destination is runtime state this scan cannot know
+            current = None
+            continue
         # Bash cds LOGICALLY by default (-L): `cd link && cd ..` returns to
         # the link's parent, not the symlink target's parent. Track the
         # logical cwd (lexical `..` handling, no realpath per hop) and
