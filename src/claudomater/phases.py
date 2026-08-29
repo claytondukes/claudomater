@@ -63,6 +63,9 @@ class ExecutionResult:
     # Structured denial list from the CLI envelope — the §3 zero-stall /
     # fence-audit metric, measured instead of inferred.
     permission_denials: list[Any] | None = None
+    # The CLI's stderr (warnings, errors) — post-mortem context that must not
+    # be silently discarded.
+    stderr: str | None = None
 
 
 class Executor(Protocol):
@@ -70,11 +73,17 @@ class Executor(Protocol):
 
 
 class PhaseTimeout(Exception):
-    def __init__(self, message: str, partial_text: str | None = None):
+    def __init__(
+        self,
+        message: str,
+        partial_text: str | None = None,
+        stderr: str | None = None,
+    ):
         super().__init__(message)
         # whatever the agent produced before the timeout — the attempts most
         # in need of a post-mortem must still leave a transcript
         self.partial_text = partial_text
+        self.stderr = stderr
 
 
 class ClaudeCliExecutor:
@@ -147,7 +156,7 @@ class ClaudeCliExecutor:
         if on_spawn is not None:
             on_spawn(proc.pid)
         try:
-            stdout, _stderr = proc.communicate(timeout=spec.timeout_s)
+            stdout, stderr = proc.communicate(timeout=spec.timeout_s)
         except subprocess.TimeoutExpired as exc:
             # Kill the whole process group: killing only the leader leaves
             # grandchildren (test runners, builds) running unsupervised.
@@ -155,13 +164,23 @@ class ClaudeCliExecutor:
                 os.killpg(proc.pid, signal.SIGKILL)
             except OSError:
                 proc.kill()
-            stdout, _stderr = proc.communicate()
+            stdout, stderr = proc.communicate()
             raise PhaseTimeout(
                 f"phase {spec.name!r} exceeded {spec.timeout_s}s",
                 partial_text=stdout,
+                stderr=stderr or None,
             ) from exc
         result = self._parse_output(stdout)
         result.returncode = proc.returncode
+        if stderr and stderr.strip():
+            # stderr is post-mortem context (CLI warnings/errors); keep it on
+            # the result, and inside a stream transcript as a synthetic event
+            # line so the artifact stays valid JSONL.
+            result.stderr = stderr
+            if result.transcript is not None:
+                result.transcript += (
+                    json.dumps({"type": "stderr", "text": stderr}) + "\n"
+                )
         return result
 
     @staticmethod
@@ -412,6 +431,13 @@ def salvage_uncommitted(project_root: Path, message: str = "wip(phase-crash)") -
     return True
 
 
+def _tail(text: str, limit: int = 500) -> str:
+    """Last `limit` chars, single-line — enough stderr context for a failure
+    reason without flooding the run log (the full text goes to the transcript)."""
+    tail = text.strip()[-limit:]
+    return " ".join(tail.split())
+
+
 def _accounting(exec_result: ExecutionResult | None) -> dict[str, Any]:
     """The CLI envelope's cost accounting, ready to merge into event detail.
     `permission_denials` rides along even when empty — zero denials is the
@@ -632,6 +658,13 @@ class PhaseRunner:
             except PhaseTimeout as exc:
                 failure = f"timeout: {exc}"
                 transcript_text = exc.partial_text
+                if exc.stderr:
+                    failure += f" (stderr tail: {_tail(exc.stderr)})"
+                    # timed-out attempts need post-mortems most: keep stderr
+                    # with whatever partial output survived
+                    transcript_text = (
+                        (transcript_text or "") + "\n[stderr]\n" + exc.stderr
+                    )
 
             # Empty output is still a captured transcript ("the agent
             # produced nothing" is post-mortem information); only a timeout
@@ -652,6 +685,10 @@ class PhaseRunner:
                 # A JSON blob in the output of a FAILED executor run is not a
                 # result — the agent errored; treat the attempt as failed.
                 failure = f"executor-failed: exit {exec_result.returncode}"
+                if exec_result.stderr:
+                    # the CLI's own error usually lives here — surface it in
+                    # the run log and the retry agent's feedback
+                    failure += f" (stderr tail: {_tail(exec_result.stderr)})"
             elif exec_result is not None:
                 result = extract_json_result(exec_result.text)
                 if result is None:

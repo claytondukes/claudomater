@@ -719,6 +719,46 @@ class TestFullSessionCapture:
             )
         assert '"tool_use"' in (exc.value.partial_text or "")
 
+    def test_stderr_is_retained_not_discarded(self, tmp_path):
+        """CLI warnings/errors land on stderr; discarding them strips exactly
+        the context a post-mortem needs. In a stream transcript it rides
+        along as a synthetic JSONL event so the artifact stays parseable."""
+        stub = stream_stub(tmp_path, [TOOL_EVENT, RESULT_EVENT])
+        with open(stub, "a", encoding="utf-8") as fh:
+            fh.write("echo 'warning: model fallback engaged' >&2\n")
+        result = ClaudeCliExecutor(claude_bin=str(stub)).run(
+            PhaseSpec("dev", "m", "p"), "m"
+        )
+        assert "model fallback engaged" in result.stderr
+        last_line = result.transcript.strip().splitlines()[-1]
+        assert json.loads(last_line) == {
+            "type": "stderr",
+            "text": "warning: model fallback engaged\n",
+        }
+
+    def test_executor_failure_reason_carries_stderr_tail(self, tmp_path):
+        """`executor-failed: exit 1` alone says nothing — the CLI's actual
+        error message (stderr) must reach the run log and retry feedback."""
+
+        class FailingExecutor:
+            def __init__(self):
+                self.n = 0
+
+            def run(self, spec, model):
+                self.n += 1
+                if self.n == 1:
+                    return ExecutionResult(
+                        text="", returncode=1, stderr="Error: invalid API key\n"
+                    )
+                return ExecutionResult(text=GOOD)
+
+        log = RunLog.create(tmp_path)
+        outcome = PhaseRunner(tmp_path, log, FailingExecutor()).run_phase(
+            PhaseSpec("dev", "m", "p")
+        )
+        assert outcome.status == "verified"
+        assert "invalid API key" in outcome.failure_reasons[0]
+
     def test_runner_retains_stream_transcript_as_jsonl(self, tmp_path):
         class StreamExecutor:
             def run(self, spec, model):
@@ -920,7 +960,7 @@ class TestResultFileExists:
         verdict = result_file_exists("artifact")(
             VerifierContext(project_root=tmp_path, result={"artifact": "ghost.txt"})
         )
-        assert not verdict.ok and "does not exist" in verdict.detail
+        assert not verdict.ok and "not an existing file" in verdict.detail
 
     def test_existing_file_outside_the_project_root_fails(self, tmp_path):
         verdict = result_file_exists("artifact")(
@@ -934,6 +974,19 @@ class TestResultFileExists:
         assert not v(
             VerifierContext(project_root=tmp_path, result={"artifact": 3})
         ).ok
+
+    def test_directories_do_not_count_as_artifacts(self, tmp_path):
+        """Naming a directory — including '.' (the project root itself) —
+        must fail: an agent could otherwise satisfy the verifier without
+        producing any artifact at all."""
+        (tmp_path / "outdir").mkdir()
+        v = result_file_exists("artifact")
+        for claimed in (".", "outdir"):
+            verdict = v(
+                VerifierContext(project_root=tmp_path, result={"artifact": claimed})
+            )
+            assert not verdict.ok, claimed
+            assert "not an existing file" in verdict.detail
 
     def test_declarative_form_builds(self, tmp_path):
         (tmp_path / "out.txt").write_text("x", encoding="utf-8")

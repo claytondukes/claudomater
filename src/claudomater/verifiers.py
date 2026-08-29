@@ -145,11 +145,13 @@ def result_file_exists(name: str) -> Verifier:
                 False,
                 f"result[{name!r}] = {value!r} resolves outside the project root",
             )
-        if not path.exists():
+        # is_file, not exists: naming a directory (".", the project root...)
+        # would let an agent pass without producing any artifact at all
+        if not path.is_file():
             return Verdict(
                 "result_file_exists",
                 False,
-                f"result[{name!r}] = {value!r} does not exist",
+                f"result[{name!r}] = {value!r} is not an existing file",
             )
         return Verdict("result_file_exists", True, f"result[{name!r}] -> {value!r} exists")
 
