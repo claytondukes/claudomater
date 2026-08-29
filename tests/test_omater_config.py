@@ -152,6 +152,13 @@ class TestProjectConfig:
             with pytest.raises(ConfigError, match="must be a mapping"):
                 load_project_config(tmp_path)
 
+    def test_scalar_scopes_is_a_config_error_not_a_char_list(self, tmp_path):
+        """`scopes: global` must not silently become ['g','l','o','b','a','l']."""
+        with pytest.raises(ConfigError, match="learning.scopes"):
+            load_project_config(
+                write_project(tmp_path, "project: x\nlearning:\n  scopes: global\n")
+            )
+
     def test_secrets_deny_and_scopes(self, tmp_path):
         cfg = load_project_config(
             write_project(
@@ -287,6 +294,16 @@ class TestUserConfig:
             path = tmp_path / "config.yaml"
             path.write_text(text, encoding="utf-8")
             with pytest.raises(ConfigError, match="must be an integer"):
+                load_user_config(path)
+
+    def test_non_string_learning_paths_are_config_errors(self, tmp_path):
+        for text in (
+            "learning:\n  db_path: 3\n",
+            "learning:\n  export_path: [a, b]\n",
+        ):
+            path = tmp_path / "config.yaml"
+            path.write_text(text, encoding="utf-8")
+            with pytest.raises(ConfigError, match="path string"):
                 load_user_config(path)
 
     def test_non_list_degrade_path_is_a_config_error(self, tmp_path):

@@ -266,6 +266,18 @@ def load_project_config(root: Path | str) -> ProjectConfig:
     ):
         raise ConfigError(f"{PROJECT_CONFIG_NAME}: secrets_deny must be a list of names")
 
+    scopes = learning_raw.get("scopes")
+    if scopes is None:
+        scopes = ["global"]
+    # list() on a scalar string would silently explode it into characters
+    if not isinstance(scopes, list) or not scopes or not all(
+        isinstance(s, str) and s for s in scopes
+    ):
+        raise ConfigError(
+            f"{PROJECT_CONFIG_NAME}: learning.scopes must be a non-empty list of "
+            f"scope names, got {scopes!r}"
+        )
+
     return ProjectConfig(
         project=project,
         deployment_type=deployment_type,
@@ -277,7 +289,7 @@ def load_project_config(root: Path | str) -> ProjectConfig:
             "issue_tracker": adapters_raw.get("issue_tracker"),
             "qa_board": adapters_raw.get("qa_board"),
         },
-        learning_scopes=list(learning_raw.get("scopes") or ["global"]),
+        learning_scopes=list(scopes),
         ci_tier_on_push=ci_raw.get("tier_on_push"),
         ci_tier_on_merge=ci_raw.get("tier_on_merge", "full"),
         gates=_require_mapping("gates", data.get("gates")),
@@ -402,8 +414,12 @@ def load_user_config(path: Path | str | None = None) -> UserConfig:
     learning_raw = _require_mapping("learning", data.get("learning"))
 
     cfg = UserConfig(usage=usage, slack_webhook=notify_raw.get("slack_webhook"))
-    if learning_raw.get("db_path"):
-        cfg.learning_db_path = Path(learning_raw["db_path"])
-    if learning_raw.get("export_path"):
-        cfg.learning_export_path = Path(learning_raw["export_path"])
+    for key, attr in (("db_path", "learning_db_path"), ("export_path", "learning_export_path")):
+        value = learning_raw.get(key)
+        if value is None:
+            continue
+        if not isinstance(value, str) or not value:
+            # Path(3) is a TypeError, not a ConfigError — fail loudly at load
+            raise ConfigError(f"learning.{key} must be a path string, got {value!r}")
+        setattr(cfg, attr, Path(value))
     return cfg
