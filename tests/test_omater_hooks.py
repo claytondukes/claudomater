@@ -433,6 +433,41 @@ class TestBashFence:
             allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
             assert allow, (cmd, reason)
 
+    def test_comments_inside_backtick_substitutions_are_blanked(self, tmp_path):
+        """A comment inside a substitution is a real comment — its text
+        (`# > /tmp_probe/never`) must not stay scannable as a write."""
+        cmd = "echo `printf x # > /tmp_probe/never\n` > out.txt"
+        p = payload("Bash", command=cmd)
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+
+    def test_prefix_whitespace_does_not_swallow_newlines(self, tmp_path):
+        """`false && MODE=x\\ncd /etc; cat > passwd`: two separate commands —
+        the unconditional cd DOES run, so the /etc/passwd write must stay a
+        recognized deny (merging the lines guarded the wrong cd and let it
+        pass). And `cd -P\\ncat > out` must not parse `cat` as the directory."""
+        p = payload("Bash", command="false && MODE=x\ncd /etc; cat > passwd")
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+        p = payload("Bash", command="cd -P\ncat > out.txt")
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason  # leftover -P target -> unknown, fail open
+
+    def test_expansion_braces_are_not_compound_bodies(self, tmp_path):
+        """`${HOME}` and `file{1,2}` are expansions — treating their braces
+        as hard opacity killed tracking and let a real /etc write pass."""
+        for cmd in (
+            "echo ${HOME}; cd /etc && cat > passwd",
+            "echo file{1,2}; cd /etc && cat > passwd",
+        ):
+            p = payload("Bash", command=cmd)
+            p["cwd"] = str(tmp_path)
+            allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+            assert not allow, cmd
+
     def test_line_continuation_is_not_a_boundary(self, tmp_path):
         """`false && \\<newline> cd /etc; cat > out.txt` is ONE guarded list
         — the cd never runs; parsing the newline as a boundary made it an

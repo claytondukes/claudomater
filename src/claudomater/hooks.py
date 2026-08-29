@@ -98,10 +98,24 @@ def _strip_comments(text: str) -> str:
     while i < n:
         c = text[i]
         if c == "`":
+            if i and text[i - 1] == "\\":  # escaped: not a delimiter
+                i += 1
+                continue
             in_backtick = not in_backtick
             i += 1
             continue
         if in_backtick:
+            # comments INSIDE a substitution are real comments — bash never
+            # executes them, so their text (e.g. `# > /etc/x`) must not stay
+            # scannable. The closing backtick terminates the substitution
+            # even mid-comment, so blank only up to newline or backtick.
+            if c == "#":
+                prev = text[i - 1] if i else ""
+                if i == 0 or prev in " \t\n;&|(<>":
+                    while i < n and text[i] not in "\n`":
+                        res[i] = " "
+                        i += 1
+                    continue
             i += 1
             continue
         if c == "(":
@@ -136,11 +150,16 @@ _COPY = re.compile(r"\b(?:cp|mv|rsync|install)\s+(?:-[^\s]+\s+)*(?:[^\s;|&<>()]+
 # `|`: a cd inside a pipeline segment runs in a subshell and moves NOTHING),
 # group 2 = verb, group 3 = option/flag prefix, group 4 = target token
 # ('' when bare / immediately followed by && etc).
+# Intra-command spacing is HORIZONTAL only ([ \t]) for the assignment and
+# option prefixes: `\s` would swallow a newline and merge two separate
+# commands into one chdir (`false && MODE=x\ncd /etc` guarded the wrong cd).
+# The post-separator gap keeps `\s*` — a newline right after `&&`/`||`/`;`
+# is a legal continuation of that operator.
 _CHDIR = re.compile(
     r"(^|\|\||&&|[\n;&|(])\s*"
-    r"(?:[A-Za-z_][A-Za-z0-9_]*=[^\s;|&<>()]*\s+)*"
-    r"(cd|pushd|popd)(?![^\s;&|)\n])\s*"
-    r"((?:--\s+|-[A-Za-z]+\s+)*)([^\s;|&<>()]*)"
+    r"(?:[A-Za-z_][A-Za-z0-9_]*=[^\s;|&<>()]*[ \t]+)*"
+    r"(cd|pushd|popd)(?![^\s;&|)\n])[ \t]*"
+    r"((?:--[ \t]+|-[A-Za-z]+[ \t]+)*)([^\s;|&<>()]*)"
 )
 # Any cd-ish token the pattern above did NOT positively match (quoted
 # assignment values, `command cd`, unmodeled prefixes, prose...) voids the
@@ -220,7 +239,12 @@ _CWD_OPAQUE = re.compile(r"[()`]")
 _COMPOUND = re.compile(
     r"(?:^|[\n;&|(])\s*"
     r"(?:if|then|elif|else|fi|for|while|until|do|done|case|esac|function)\b"
-    r"|[{}]"
+    # brace GROUPS only: `{ ...; }` at a command position (incl. after a
+    # function's `()`). `${HOME}` and brace expansion `file{1,2}` are
+    # expansions, not compound bodies — treating them as hard opacity let
+    # a real /etc write pass unrecognized.
+    r"|(?:^|[\n;&|()])\s*\{(?=[ \t\n])"
+    r"|(?:^|[\n;&|])\s*\}"
 )
 # eval/source/. run current-shell code the scanner cannot see, but they
 # EXECUTE AND RETURN: top-level flow demonstrably resumes after them, so
@@ -441,7 +465,15 @@ def resolved_bash_targets(
             # working directory — the cwd genuinely stays where it is
             continue
         target = str(target or "")
-        if not target or target == "-" or "$" in target or "_quoted_data_" in target:
+        # any dash-leading remnant is an option, `-` (OLDPWD), or a flag the
+        # newline-bounded option group could not consume — never a literal
+        # directory we can trust
+        if (
+            not target
+            or target.startswith("-")
+            or "$" in target
+            or "_quoted_data_" in target
+        ):
             current = None
             continue
         if "\\" in target or (verb == "pushd" and re.fullmatch(r"[+-]\d+", target)):
