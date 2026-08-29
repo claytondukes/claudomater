@@ -442,18 +442,40 @@ class TestBashFence:
         allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
         assert allow, reason
 
-    def test_unsupported_heredoc_shapes_are_hard_opacity(self, tmp_path):
+    def test_unsupported_heredoc_shapes_are_a_wall(self, tmp_path):
         """Delimiters beyond the supported grammar (END@MARK, <<\\EOF) leave
-        their bodies scannable — instead of applying body text as commands
-        (false deny), a surviving << kills tracking (fail open)."""
+        their bodies scannable — but body text is DATA: neither its cds nor
+        its redirects (absolute included) execute. Everything after the
+        introducer line fails open."""
         for cmd in (
             "cat <<END@MARK\ncd /etc\nEND@MARK\ncat > out.txt",
             "cat <<\\EOF\ncd /etc\nEOF\ncat > out.txt",
+            "cat <<END@MARK\necho > /tmp_probe/not-executed\nEND@MARK",
         ):
             p = payload("Bash", command=cmd)
             p["cwd"] = str(tmp_path)
             allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
             assert allow, (cmd, reason)
+
+    def test_line_continuation_joins_token_fragments(self, tmp_path):
+        """`c\\<newline>d <dir>` is the word `cd` — spacing the fragments
+        apart left the tracked cwd stale and falsely denied the write."""
+        (tmp_path / "server").mkdir()
+        cmd = f"cd /etc; c\\\nd {tmp_path}/server && cat > ../.omater/scratch/x"
+        p = payload("Bash", command=cmd)
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+
+    def test_indented_terminator_does_not_end_a_heredoc(self, tmp_path):
+        """Bash requires an exact column-zero terminator for << — an
+        indented ` EOF` body line must not end the heredoc and expose the
+        rest of the body (its absolute redirect never executes)."""
+        cmd = "cat <<EOF\n EOF\ncat > /tmp_probe/not-executed\nEOF\necho done"
+        p = payload("Bash", command=cmd)
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
 
     def test_backtick_escaping_is_parity_based(self, tmp_path):
         """`\\\\\\`` after an even backslash run OPENS a substitution — the

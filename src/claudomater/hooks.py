@@ -68,10 +68,13 @@ def _allowed(path: Path, root: Path, scratch_dirs: list[Path]) -> bool:
 # targets. Only recognizable shapes — the deny is best-effort by design.
 # group 1 = the heredoc intro line (kept scannable: `cat <<EOF > /etc/x`
 # carries its redirect there); body + terminator are dropped as data.
+# Terminators are EXACT lines: column zero for <<, leading TABS only for
+# <<- (bash grammar). A lax `\s*` accepted an indented body line as the
+# terminator and exposed the rest of the body to the scanner.
 _HEREDOC = re.compile(
-    r"(<<-?\s*(?:(['\"])((?:(?!\2)[^\n])+)\2|([\w.+-]+))[^\n]*\n)"
-    r".*?^\s*(?:\3|\4)\s*$",
-    re.DOTALL | re.MULTILINE
+    r"(<<(-)?[ \t]*(?:(['\"])((?:(?!\3)[^\n])+)\3|([\w.+-]+))[^\n]*\n)"
+    r".*?^(?(2)\t*)(?:\4|\5)$",
+    re.DOTALL | re.MULTILINE,
 )
 def _mask_quotes(text: str) -> str:
     """Replace quoted spans with the placeholder, escape-aware BY PARITY: a
@@ -342,8 +345,8 @@ def _scannable(command: str) -> str:
         # `<<delim` marker: any << SURVIVING this pass is a heredoc shape the
         # pattern does not support, which the resolver treats as hard opacity
         intro = m.group(1)
-        delim_end = m.end(3) if m.group(3) is not None else m.end(4)
-        if m.group(2):
+        delim_end = m.end(4) if m.group(4) is not None else m.end(5)
+        if m.group(3):
             delim_end += 1  # closing quote
         cut = delim_end - m.start(1)
         return " " * cut + intro[cut:]
@@ -356,10 +359,11 @@ def _scannable(command: str) -> str:
     scannable = _mask_quotes(scannable)
     # Backslash-newline is a line CONTINUATION, not a boundary: `false && \
     # cd /etc` is one guarded list, and leaving the newline in made the cd
-    # read as an unconditional new command. Quoted spans were already
-    # placeholdered, so what remains is a real continuation; two spaces keep
-    # offsets intact.
-    scannable = scannable.replace("\\\n", "  ")
+    # read as an unconditional new command. The pair is REMOVED (not spaced)
+    # because bash joins the adjacent fragments into one token — `c\<nl>d`
+    # is the word `cd`. Quoted spans were already placeholdered, so what
+    # remains is a real continuation.
+    scannable = scannable.replace("\\\n", "")
     # Unquoted comments are data too: `cd x  # note; cd /etc` must not have
     # its comment text scanned as commands. Blanking is space-preserving so
     # every event offset in this string stays consistent.
@@ -439,12 +443,16 @@ def resolved_bash_targets(
     for pos in _bare_ampersands(scannable):
         events.append((pos, "opaque", None))
     # A `<<` surviving _scannable is a heredoc shape the parser does not
-    # support (exotic delimiters: END@MARK, <<\EOF, ...) — its body stayed
-    # scannable, so tracking anything after it would apply data as commands.
-    # Hard opacity, per the fail-open contract. (`<<<` here-strings excluded;
-    # supported heredocs had their marker blanked.)
+    # support (exotic delimiters: END@MARK, <<\EOF, ...) — its BODY stayed
+    # scannable, and body text is DATA: neither cds nor redirects in it
+    # execute, so from the end of the introducer line onward EVERYTHING
+    # fails open, absolute targets included (a "wall", stronger than hard
+    # opacity). Redirects on the introducer line itself are real and stay
+    # enforceable. (`<<<` here-strings excluded; supported heredocs had
+    # their marker blanked.)
     for m in re.finditer(r"(?<!<)<<(?!<)", scannable):
-        events.append((m.start(), "hard", None))
+        eol = scannable.find("\n", m.start())
+        events.append((len(scannable) if eol == -1 else eol, "wall", None))
     # A cd is APPLIED on the assumption it succeeded; a later `||` in the
     # same list runs its RHS precisely when something failed — possibly that
     # cd — so the cwd there (and after) is unknowable. `;`/newline resets
@@ -519,16 +527,23 @@ def resolved_bash_targets(
         "listsep": 3,
         "opaque": 4,
         "hard": 5,
+        "wall": 6,
     }
     events.sort(key=lambda e: (e[0], priority[e[1]]))
 
     current: Path | None = cwd
     cd_applied_in_list = False
     dead = False  # hard opacity: no cd may recover tracking anymore
+    walled = False  # unparseable remainder: even absolute targets fail open
     out: list[tuple[str, Path | None]] = []
     for _pos, kind, value in events:
         if kind == "target":
             raw = str(value)
+            if walled:
+                # inside/after an unsupported heredoc: this "target" is
+                # almost certainly body DATA bash never executes
+                out.append((raw, None))
+                continue
             if "_quoted_data_" in raw or "$" in raw or "\\" in raw:
                 # Not a literal filename: a quoted span (placeholder), an
                 # expansion, or an escape — the actual path is unknowable
@@ -547,6 +562,12 @@ def resolved_bash_targets(
             current = None
             cd_applied_in_list = False
             dead = True
+            continue
+        if kind == "wall":
+            current = None
+            cd_applied_in_list = False
+            dead = True
+            walled = True
             continue
         if kind == "opaque":
             current = None
