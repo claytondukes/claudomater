@@ -433,6 +433,35 @@ class TestBashFence:
             allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
             assert allow, (cmd, reason)
 
+    def test_backtick_escaping_is_parity_based(self, tmp_path):
+        """`\\\\\\`` after an even backslash run OPENS a substitution — the
+        single-char check missed it, and a backtick inside a later real
+        comment then ended the phantom span early, exposing a redirect bash
+        ignores."""
+        cmd = "echo \\\\`true` # tail with ` and > /tmp_probe/x"
+        p = payload("Bash", command=cmd)
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+
+    def test_escaped_paren_is_word_data_not_group_close(self, tmp_path):
+        """`echo \\)#suffix > /tmp_probe/out`: the escaped paren keeps
+        #suffix in the word, so the redirect EXECUTES — classifying it as a
+        group close comment-stripped the redirect away (a miss)."""
+        p = payload("Bash", command="echo \\)#suffix > /tmp_probe/out")
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+
+    def test_quoted_heredoc_delimiter_with_spaces(self, tmp_path):
+        """`<<'END MARK'` is a valid heredoc — its body (containing a cd) is
+        data, and scanning it falsely denied the later in-root write."""
+        cmd = "cat <<'END MARK'\ncd /etc\nEND MARK\ncat > out.txt"
+        p = payload("Bash", command=cmd)
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+
     def test_even_backslash_run_before_quote_still_opens_the_span(self, tmp_path):
         """Escapes are parity-based: `\\\\\"` is an escaped backslash + a REAL
         quote — the span must mask, or a genuinely quoted `>` gets falsely

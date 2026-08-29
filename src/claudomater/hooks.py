@@ -69,7 +69,9 @@ def _allowed(path: Path, root: Path, scratch_dirs: list[Path]) -> bool:
 # group 1 = the heredoc intro line (kept scannable: `cat <<EOF > /etc/x`
 # carries its redirect there); body + terminator are dropped as data.
 _HEREDOC = re.compile(
-    r"(<<-?\s*(['\"]?)([\w.+-]+)\2[^\n]*\n).*?^\s*\3\s*$", re.DOTALL | re.MULTILINE
+    r"(<<-?\s*(?:(['\"])((?:(?!\2)[^\n])+)\2|([\w.+-]+))[^\n]*\n)"
+    r".*?^\s*(?:\3|\4)\s*$",
+    re.DOTALL | re.MULTILINE
 )
 def _mask_quotes(text: str) -> str:
     """Replace quoted spans with the placeholder, escape-aware BY PARITY: a
@@ -147,7 +149,7 @@ def _strip_comments(text: str) -> str:
     while i < n:
         c = text[i]
         if c == "`":
-            if i and text[i - 1] == "\\":  # escaped: not a delimiter
+            if escaped(i):  # parity-based, like quotes: \\\\` is unescaped
                 i += 1
                 continue
             in_backtick = not in_backtick
@@ -168,11 +170,17 @@ def _strip_comments(text: str) -> str:
             i += 1
             continue
         if c == "(":
+            if escaped(i):  # \\( is word data, not a group open
+                i += 1
+                continue
             prev = text[i - 1] if i else ""
             stack.append("sub" if prev in ("$", "<", ">") else "group")
             i += 1
             continue
         if c == ")":
+            if escaped(i):  # \\) is word data: `echo \\)#x > f` keeps its redirect
+                i += 1
+                continue
             kind = stack.pop() if stack else "group"
             i += 1
             if kind == "group" and i < n and text[i] == "#":
