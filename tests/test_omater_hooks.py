@@ -553,6 +553,31 @@ class TestBashFence:
             allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
             assert allow, (cmd, reason)
 
+    def test_quotes_inside_nested_substitution_never_falsely_deny(self, tmp_path):
+        """Bash gives $(...) its own quote context inside double quotes:
+        in `echo "$(echo "> /tmp_probe/x")"` the `>` is quoted argument
+        data — pairing the outer quote with the nested one left it
+        scannable and falsely denied the command. Recursive parsing is
+        frozen out, so the misparse SHAPE (unclosed opener or backtick in
+        the scanned content) classifies the remainder as unrecognized:
+        fail open. Balanced substitutions keep exact pairing and their
+        real redirects keep denying."""
+        for cmd in (
+            'echo "$(echo "> /tmp_probe/x")"',
+            # the space keeps the exposed target un-glued from the next
+            # placeholder — the target-grammar backstop alone missed this
+            'echo "$(echo "> /tmp_probe/x ")"',
+            'echo "${X:-"> /tmp_probe/x "}"',
+        ):
+            p = payload("Bash", command=cmd)
+            p["cwd"] = str(tmp_path)
+            allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+            assert allow, (cmd, reason)
+        p = payload("Bash", command='echo "$(hostname)" > /tmp_probe/x')
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+
     def test_negated_cd_voids_tracking_never_goes_stale(self, tmp_path):
         """`! cd server` runs cd in the CURRENT shell (status negation) —
         rejecting the `!` prefix kept the stale pre-cd cwd and falsely

@@ -166,6 +166,32 @@ def _lex_spans(text: str) -> list[tuple[str, int, int]]:
                     end += 1
                 if end >= n:
                     end = -1
+            if end != -1 and c == '"':
+                # bash gives $(...) / ${...} / `...` their OWN quote
+                # context inside double quotes, so a `"` in there does not
+                # close the outer span — pairing with it left a QUOTED `>`
+                # scannable and falsely denied the command. Recursive
+                # parsing is frozen out (fence contract), so the misparse
+                # SHAPE — an opener left unclosed in the scanned content,
+                # or any backtick — classifies the remainder of the
+                # command as unrecognized: one data span to the end, fail
+                # open. Balanced substitutions with no inner quotes keep
+                # exact pairing (and their real redirects keep denying).
+                expect: list[str] = []
+                hazard = False
+                for j in range(i + 1, end):
+                    ch = text[j]
+                    if ch == "`" and not escaped(j):
+                        hazard = True
+                        break
+                    if ch in "({" and not escaped(j):
+                        if expect or (text[j - 1] == "$" and not escaped(j - 1)):
+                            expect.append(")" if ch == "(" else "}")
+                    elif expect and ch == expect[-1] and not escaped(j):
+                        expect.pop()
+                if hazard or expect:
+                    spans.append(("quote", i, n))
+                    break
             if end != -1:
                 spans.append(("quote", i, end + 1))
                 i = end + 1
