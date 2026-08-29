@@ -112,6 +112,56 @@ def _data_spans(text: str) -> list[tuple[int, int]]:
     return spans
 
 
+def _arith_spans(text: str) -> list[tuple[int, int]]:
+    """Spans of arithmetic context — `$((...))` anywhere, `((...))` at a
+    command position — where `<<` is a SHIFT operator, not a heredoc
+    introducer: `$((1 << EOF))` must neither eat the following lines as a
+    heredoc body nor raise the residual-<< wall. Detection is quote-,
+    comment-, and escape-aware via _data_spans, so a `$((` that is data
+    cannot open a span. Unbalanced arithmetic yields NO span: bash rejects
+    the whole command before running anything, so nothing executes either
+    way. A `<<` inside a command substitution NESTED in the arithmetic is
+    also treated as a shift (its heredoc body stays scannable) — the
+    parens have already voided the tracked cwd, and best-effort deny
+    accepts that pathological shape."""
+    data = _data_spans(text)
+
+    def in_data(idx: int) -> bool:
+        return any(start <= idx < end for start, end in data)
+
+    spans: list[tuple[int, int]] = []
+    i, n = 0, len(text)
+    while i < n:
+        if in_data(i) or not text.startswith("((", i) or _escape_parity(text, i):
+            i += 1
+            continue
+        dollar = i > 0 and text[i - 1] == "$" and not _escape_parity(text, i - 1)
+        if not dollar:
+            # bare (( is arithmetic only as a COMMAND, not mid-word
+            # (`( (echo x) )` is a subshell, but its inner (( is adjacent
+            # only when it, too, sits right at the command position)
+            j = i - 1
+            while j >= 0 and text[j] in " \t":
+                j -= 1
+            if not (j < 0 or (text[j] in ";&|\n(" and not _escape_parity(text, j))):
+                i += 1
+                continue
+        depth, k = 2, i + 2
+        while k < n and depth:
+            if not in_data(k):
+                if text[k] == "(" and not _escape_parity(text, k):
+                    depth += 1
+                elif text[k] == ")" and not _escape_parity(text, k):
+                    depth -= 1
+            k += 1
+        if depth == 0:
+            spans.append((i - 1 if dollar else i, k))
+            i = k
+        else:
+            i += 1
+    return spans
+
+
 # Bash write patterns: redirections, tee, file-creating commands, copy/move
 # targets. Only recognizable shapes — the deny is best-effort by design.
 # group 1 = the heredoc intro line (kept scannable: `cat <<EOF > /etc/x`
@@ -119,40 +169,78 @@ def _data_spans(text: str) -> list[tuple[int, int]]:
 # Terminators are EXACT lines: column zero for <<, leading TABS only for
 # <<- (bash grammar). A lax `\s*` accepted an indented body line as the
 # terminator and exposed the rest of the body to the scanner.
+# The lookarounds keep NON-heredoc `<<` text out entirely: `<<<` is a
+# here-string (matching from its second `<` invented a heredoc named by
+# the here-string word), and arithmetic shifts are excluded by
+# _arith_spans at the call site.
 _HEREDOC = re.compile(
-    r"(<<(-)?[ \t]*(?:(['\"])((?:(?!\3)[^\n])+)\3|([\w.+-]+))[^\n]*\n)"
+    r"((?<!<)<<(-)?(?!<)[ \t]*(?:(['\"])((?:(?!\3)[^\n])+)\3|([\w.+-]+))[^\n]*\n)"
     r".*?^(?(2)\t*)(?:\4|\5)$",
     re.DOTALL | re.MULTILINE,
 )
-def _mask_quotes(text: str) -> str:
-    """Replace quoted spans with the placeholder, escape-aware BY PARITY: a
+def _mask_data(text: str) -> str:
+    """Quote masking and comment blanking in ONE scanner with shared
+    lexical state. Two sequential passes cannot express bash here: a `#`
+    inside quotes is data (so comments cannot be stripped first), and a
+    quote inside a comment is comment text (so quotes cannot be masked
+    first — `echo ok # "` opened a span that swallowed the executable
+    lines after it, hiding a real out-of-tree write from the scan).
+
+    Quoted spans become the placeholder TOKEN, escape-aware BY PARITY: a
     quote after an ODD backslash run is a literal char; after an EVEN run
-    (`\\\\"` = escaped backslash + real quote) it opens/closes a span. Inside
-    double quotes, \\" does not end the span; single-quoted spans cannot
-    contain escapes in bash. A lookbehind regex could not express parity and
-    left genuinely-quoted redirects visible to the scanner (false deny).
-    Unterminated quotes are left as-is (deny-on-recognized)."""
+    (`\\\\"` = escaped backslash + real quote) it opens/closes a span.
+    Inside double quotes \\" does not end the span; a plain single-quoted
+    span cannot contain escapes in bash; ANSI-C $'...' can. Unterminated
+    quotes are left as-is (deny-on-recognized).
 
-    def escape_parity(idx: int) -> int:
-        run = 0
-        j = idx - 1
-        while j >= 0 and text[j] == "\\":
-            run += 1
-            j -= 1
-        return run % 2
-
+    Comments are blanked space-preservingly (offsets intact). A comment
+    starts at `#` at the start of a WORD: after whitespace, a shell
+    metacharacter, the string start — or a GROUP-closing `)` (`(echo ok)#
+    ignored`), but NOT a substitution-closing `)` (`$(printf x)#suffix`
+    continues the word). Telling those apart needs pair matching, so this
+    is a scanner, not a regex: `(` openers are classified by their
+    preceding char ($/</> = substitution, else grouping) and each `)`
+    inherits its opener's kind. Comments INSIDE backticks are real
+    comments, but the closing backtick terminates the substitution even
+    mid-comment, so there they blank only to newline-or-backtick.
+    `file#1` and `${#var}` are not comments."""
     out: list[str] = []
+    stack: list[str] = []
+    in_backtick = False
     i, n = 0, len(text)
+
+    def escaped(idx: int) -> bool:
+        """An escaped space/metachar is part of the WORD — `echo foo\\ #bar`
+        keeps #bar in the argument, not a comment."""
+        return _escape_parity(text, idx) == 1
+
+    def blank_to(idx: int, stops: str) -> int:
+        while idx < n and text[idx] not in stops:
+            out.append(" ")
+            idx += 1
+        return idx
+
     while i < n:
         c = text[i]
-        if c in "'\"" and escape_parity(i) == 0:
+        if c == "`" and not escaped(i):  # parity, like quotes: \\\\` opens
+            in_backtick = not in_backtick
+            out.append(c)
+            i += 1
+            continue
+        if c == "#":
+            prev = text[i - 1] if i else ""
+            if i == 0 or (prev in " \t\n;&|(<>" and not escaped(i - 1)):
+                # BEFORE the quote branch: a quote in the comment is text
+                i = blank_to(i, "\n`" if in_backtick else "\n")
+                continue
+        if c in "'\"" and not escaped(i):
             if c == "'":
                 # ANSI-C quoting $'...' allows backslash-escaped quotes
                 # inside; a plain single-quoted span cannot contain any.
-                if i > 0 and text[i - 1] == "$" and escape_parity(i - 1) == 0:
+                if i > 0 and text[i - 1] == "$" and not escaped(i - 1):
                     end = i + 1
                     while end < n and not (
-                        text[end] == "'" and escape_parity(end) == 0
+                        text[end] == "'" and not escaped(end)
                     ):
                         end += 1
                     if end >= n:
@@ -162,7 +250,7 @@ def _mask_quotes(text: str) -> str:
             else:
                 end = i + 1
                 while end < n and not (
-                    text[end] == '"' and escape_parity(end) == 0
+                    text[end] == '"' and not escaped(end)
                 ):
                     end += 1
                 if end >= n:
@@ -171,90 +259,22 @@ def _mask_quotes(text: str) -> str:
                 out.append("_quoted_data_")
                 i = end + 1
                 continue
+        elif c == "(" and not in_backtick and not escaped(i):
+            # \\( is word data, not a group open; parens inside backticks
+            # belong to the substitution's own parser
+            prev = text[i - 1] if i else ""
+            stack.append("sub" if prev in ("$", "<", ">") else "group")
+        elif c == ")" and not in_backtick and not escaped(i):
+            # \\) is word data: `echo \\)#x > f` keeps its redirect
+            kind = stack.pop() if stack else "group"
+            out.append(c)
+            i += 1
+            if kind == "group" and i < n and text[i] == "#":
+                i = blank_to(i, "\n")
+            continue
         out.append(c)
         i += 1
     return "".join(out)
-def _strip_comments(text: str) -> str:
-    """Blank bash comments (space-preserving, offsets intact). A comment
-    starts at `#` at the start of a WORD: after whitespace, a shell
-    metacharacter, the string start — or a GROUP-closing `)` (`(echo ok)#
-    ignored`), but NOT a substitution-closing `)` (`$(printf x)#suffix`
-    continues the word). Telling those apart needs pair matching, so this
-    is a scanner, not a regex: `(` openers are classified by their preceding
-    char ($/</> = substitution, else grouping) and each `)` inherits its
-    opener's kind. Backtick spans are left untouched (a blanked comment
-    inside one could eat the closing backtick; backticks already make the
-    cwd opaque). `file#1` and `${#var}` are not comments."""
-    res = list(text)
-    stack: list[str] = []
-    in_backtick = False
-    i, n = 0, len(text)
-
-    def escaped(idx: int) -> bool:
-        """Is the char at idx backslash-escaped? (odd run of backslashes
-        before it). An escaped space/metachar is part of the WORD —
-        `echo foo\\ #bar` keeps #bar in the argument, not a comment."""
-        backslashes = 0
-        j = idx - 1
-        while j >= 0 and text[j] == "\\":
-            backslashes += 1
-            j -= 1
-        return backslashes % 2 == 1
-
-    def blank_to_eol(start: int) -> int:
-        end = text.find("\n", start)
-        end = n if end == -1 else end
-        for k in range(start, end):
-            res[k] = " "
-        return end
-
-    while i < n:
-        c = text[i]
-        if c == "`":
-            if escaped(i):  # parity-based, like quotes: \\\\` is unescaped
-                i += 1
-                continue
-            in_backtick = not in_backtick
-            i += 1
-            continue
-        if in_backtick:
-            # comments INSIDE a substitution are real comments — bash never
-            # executes them, so their text (e.g. `# > /etc/x`) must not stay
-            # scannable. The closing backtick terminates the substitution
-            # even mid-comment, so blank only up to newline or backtick.
-            if c == "#":
-                prev = text[i - 1] if i else ""
-                if i == 0 or (prev in " \t\n;&|(<>" and not escaped(i - 1)):
-                    while i < n and text[i] not in "\n`":
-                        res[i] = " "
-                        i += 1
-                    continue
-            i += 1
-            continue
-        if c == "(":
-            if escaped(i):  # \\( is word data, not a group open
-                i += 1
-                continue
-            prev = text[i - 1] if i else ""
-            stack.append("sub" if prev in ("$", "<", ">") else "group")
-            i += 1
-            continue
-        if c == ")":
-            if escaped(i):  # \\) is word data: `echo \\)#x > f` keeps its redirect
-                i += 1
-                continue
-            kind = stack.pop() if stack else "group"
-            i += 1
-            if kind == "group" and i < n and text[i] == "#":
-                i = blank_to_eol(i)
-            continue
-        if c == "#":
-            prev = text[i - 1] if i else ""
-            if i == 0 or (prev in " \t\n;&|(<>" and not escaped(i - 1)):
-                i = blank_to_eol(i)
-                continue
-        i += 1
-    return "".join(res)
 _REDIRECT = re.compile(r"(?<![<>&\d])\d?>{1,2}\s*([^\s;|&<>()]+)")
 _TEE = re.compile(r"\btee\s+(?:-[a-zA-Z]+\s+)*([^\s;|&<>()]+)")
 _CREATE = re.compile(r"\b(?:mkdir|touch)\s+(?:-[a-zA-Z=]+\s+)*([^\s;|&<>()]+)")
@@ -401,11 +421,12 @@ def _scannable(command: str) -> str:
         cut = delim_end - m.start(1)
         return " " * cut + intro[cut:]
 
-    data = _data_spans(command)
+    data = _data_spans(command) + _arith_spans(command)
 
     def _outside_data(m: re.Match) -> str:
-        # a << inside a comment or quoted span is DATA — bash starts no
-        # heredoc there, and eating the following lines hid real commands
+        # a << inside a comment, quoted span, or arithmetic expansion is
+        # DATA (a comment/string starts no heredoc; in arithmetic << is a
+        # SHIFT) — eating the following lines as a body hid real commands
         if any(start <= m.start(1) < end for start, end in data):
             return m.group(0)
         return _heredoc_repl(m)
@@ -415,18 +436,19 @@ def _scannable(command: str) -> str:
     # (`echo "x"#suffix`, `cp x"a b"y t`) must keep their word intact — a
     # space-padded placeholder invented a word boundary that turned #suffix
     # into a comment and erased the recognizable write after it.
-    scannable = _mask_quotes(scannable)
+    scannable = _mask_data(scannable)
     # Backslash-newline is a line CONTINUATION, not a boundary: `false && \
     # cd /etc` is one guarded list, and leaving the newline in made the cd
     # read as an unconditional new command. The pair is REMOVED (not spaced)
     # because bash joins the adjacent fragments into one token — `c\<nl>d`
-    # is the word `cd`. Quoted spans were already placeholdered, so what
-    # remains is a real continuation.
-    scannable = scannable.replace("\\\n", "")
-    # Unquoted comments are data too: `cd x  # note; cd /etc` must not have
-    # its comment text scanned as commands. Blanking is space-preserving so
-    # every event offset in this string stays consistent.
-    return _strip_comments(scannable)
+    # is the word `cd`. Joined AFTER the data pass on purpose: a backslash
+    # that was comment text (`# note \`) is blanked by then, so it cannot
+    # join the next line into the comment — bash ends every comment at the
+    # newline, continuation or not (removing the pair first fed `# note
+    # cd /etc`-style joins to the comment blanker and hid the real cd).
+    # Quoted spans are already placeholdered, so what remains is a real
+    # continuation.
+    return scannable.replace("\\\n", "")
 
 
 def _positioned_write_targets(scannable: str) -> list[tuple[int, str]]:
@@ -510,8 +532,12 @@ def resolved_bash_targets(
     # fails open, absolute targets included (a "wall", stronger than hard
     # opacity). Redirects on the introducer line itself are real and stay
     # enforceable. (`<<<` here-strings excluded; supported heredocs had
-    # their marker blanked.)
+    # their marker blanked; a << in arithmetic is a SHIFT — `$((x<<2))`
+    # walling off the rest of its own line hid a real redirect there.)
+    arith = _arith_spans(scannable)
     for m in re.finditer(r"(?<!<)<<(?!<)", scannable):
+        if any(start <= m.start() < end for start, end in arith):
+            continue
         eol = scannable.find("\n", m.start())
         events.append((len(scannable) if eol == -1 else eol, "wall", None))
     # A cd is APPLIED on the assumption it succeeded; a later `||` in the
@@ -614,12 +640,20 @@ def resolved_bash_targets(
                 # almost certainly body DATA bash never executes
                 out.append((raw, None))
                 continue
-            if "_quoted_data_" in raw or "$" in raw or "\\" in raw:
+            if (
+                "_quoted_data_" in raw
+                or "$" in raw
+                or "\\" in raw
+                or any(ch in raw for ch in "*?[{")
+            ):
                 # Not a literal filename: a quoted span (placeholder), an
-                # expansion, or an escape — the actual path is unknowable
-                # (an expansion can even contain `..`), and resolving the
-                # placeholder against a tracked out-of-tree cwd falsely
-                # denied a quoted IN-ROOT absolute target. Fail open.
+                # expansion, an escape, or glob/brace chars — the actual
+                # path is unknowable (an expansion can even contain `..`,
+                # and a glob expands at RUNTIME: from the parent dir,
+                # `> projec?/out.txt` can land right back IN-root while
+                # the literal text resolves out-of-tree). Resolving the
+                # literal falsely denied both shapes. Same rule as cd
+                # targets below: fail open.
                 out.append((raw, None))
             elif Path(os.path.expanduser(raw)).is_absolute():
                 out.append((raw, _norm(raw, cwd)))

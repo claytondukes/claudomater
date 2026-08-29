@@ -462,6 +462,63 @@ class TestBashFence:
             allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
             assert not allow, cmd
 
+    def test_quote_inside_comment_cannot_swallow_executable_lines(self, tmp_path):
+        """Quotes and comments share ONE lexical state: a quote that is
+        comment text opens no span. Masking quotes before blanking comments
+        let `echo ok # "` swallow the following lines up to the next quote,
+        hiding a real out-of-tree write (false ALLOW) — top-level, after a
+        group-closing `)`, inside backticks, and via a `\\`-continuation
+        (a comment ends at its newline; the backslash is comment text)."""
+        for cmd in (
+            'echo ok # "\ncat > /tmp_probe/real\necho "done"',
+            '(echo ok)# "\ncat > /tmp_probe/real\necho "done"',
+            'echo `true # "`\ncat > /tmp_probe/real\necho "done"',
+            "echo ok # note \\\ncat > /tmp_probe/real",
+        ):
+            p = payload("Bash", command=cmd)
+            p["cwd"] = str(tmp_path)
+            allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+            assert not allow, cmd
+        # and the inverse stays fixed: a # inside quotes is data, so the
+        # redirect after the closing quote is still recognized
+        p = payload("Bash", command='echo "a # b" > /tmp_probe/real')
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+
+    def test_arithmetic_shift_and_here_string_are_not_heredocs(self, tmp_path):
+        """`$((1 << EOF))` is a shift and `<<<` a here-string — parsing
+        either as a heredoc introducer ate the following executable lines
+        as body (false ALLOW), and a shift raising the residual-<< wall
+        hid a real redirect on its own line."""
+        for cmd in (
+            "echo $((1 << EOF))\ncat > /tmp_probe/real\nEOF",
+            "cat <<<EOF\ncat > /tmp_probe/real\nEOF",
+            "echo $((1<<2)) > /tmp_probe/real",
+            "(( x << 2 ))\ncat > /tmp_probe/real\n2",
+        ):
+            p = payload("Bash", command=cmd)
+            p["cwd"] = str(tmp_path)
+            allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+            assert not allow, cmd
+
+    def test_glob_write_targets_fail_open_never_falsely_deny(self, tmp_path):
+        """An unquoted glob/brace in a write target expands at RUNTIME:
+        from the parent dir, `> <roo>?/out.txt` can uniquely expand back
+        INTO the root while the literal text resolves out-of-tree — a
+        false deny. Same rule as cd targets: not a literal path, fail
+        open (absolute or relative)."""
+        glob_name = tmp_path.name[:-1] + "?"
+        for cmd in (
+            f"cd {tmp_path.parent} && echo x > {glob_name}/out.txt",
+            "echo x > /tmp_probe/rea?/out.txt",
+            "echo x > /tmp_probe/{a,b}/out.txt",
+        ):
+            p = payload("Bash", command=cmd)
+            p["cwd"] = str(tmp_path)
+            allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+            assert allow, (cmd, reason)
+
     def test_ansi_c_quoting_allows_escaped_quotes(self, tmp_path):
         """$'text \\' more' is ONE argument (ANSI-C quoting) — ending the
         span at the escaped quote exposed its text as a redirect target."""
