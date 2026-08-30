@@ -1136,7 +1136,11 @@ def resolved_bash_targets(
                     (_segment_boundary(scannable, im.end()), "opaque", None)
                 )
     for pos in _bare_ampersands(scannable, arith):
-        events.append((pos, "opaque", None))
+        # a bare & backgrounds ITS OWN and-or list only: the parent keeps
+        # the cwd it had when that list STARTED (`cd /etc; true & cat >
+        # passwd` writes /etc/passwd — unconditional voiding hid it), and
+        # never sees the backgrounded list's own cds
+        events.append((pos, "bgamp", None))
     for m in _SET_PHYSICAL.finditer(scannable):
         if (
             _real_anchor(m)
@@ -1351,6 +1355,7 @@ def resolved_bash_targets(
         "orelse": 2,
         "listsep": 3,
         "opaque": 4,
+        "bgamp": 4,
         "hard": 5,
         "wall": 6,
     }
@@ -1363,6 +1368,7 @@ def resolved_bash_targets(
 
     current: Path | None = cwd
     cd_applied_in_list = False
+    list_start_cwd: Path | None = cwd  # snapshot at each and-or list start
     dead = False  # hard opacity: no cd may recover tracking anymore
     walled = False  # unparseable remainder: even absolute targets fail open
     physical_mode: bool | None = False  # bash default -L; None = unknowable
@@ -1409,6 +1415,15 @@ def resolved_bash_targets(
                 cd_applied_in_list = False
             continue
         if kind == "listsep":
+            cd_applied_in_list = False
+            list_start_cwd = current
+            continue
+        if kind == "bgamp":
+            # the & backgrounds everything since the list started: the
+            # PARENT never experienced any of it — restore the snapshot
+            # (unless a hard compound made positions here unparseable)
+            if not dead:
+                current = list_start_cwd
             cd_applied_in_list = False
             continue
         if kind == "setmode":

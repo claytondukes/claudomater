@@ -553,6 +553,20 @@ class TestBashFence:
             allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
             assert allow, (cmd, reason)
 
+    def test_background_ampersand_restores_the_list_start_cwd(self, tmp_path):
+        """`cd /etc; true & cat > passwd`: only the `true` list is
+        backgrounded — the parent stays in /etc and the recognized write
+        must deny (unconditional voiding hid it). A backgrounded list's
+        OWN cds still never reach the parent."""
+        p = payload("Bash", command="cd /etc; true & cat > passwd")
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+        p = payload("Bash", command="cd /etc && true & cat > out.txt")
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+
     def test_arithmetic_text_never_disturbs_tracking(self, tmp_path):
         """Arithmetic evaluates — it runs no commands, changes no
         options, and its operators are not list control. Each shape
