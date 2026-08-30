@@ -298,12 +298,31 @@ class TestControl:
         assert [c["action"] for c in log.read_controls()] == ["resume"]
 
     def test_corrupt_middle_control_line_is_a_run_error(self, tmp_path):
+        """Damage in the MIDDLE of control history stays a loud error (only
+        a torn FINAL line is recoverable). Written directly — write_control
+        now repairs a damaged tail rather than welding new commands onto
+        it."""
         log = RunLog.create(tmp_path)
         with open(log.run_dir / "control.jsonl", "a", encoding="utf-8") as fh:
             fh.write("garbage\n")
-        log.write_control("resume")
+            fh.write('{"ts": "2026-08-28T22:00:00Z", "action": "resume"}\n')
         with pytest.raises(RunError, match="corrupt"):
             log.read_controls()
+
+    def test_torn_control_tail_is_repaired_before_append(self, tmp_path):
+        """Round-13 finding: read_controls() tolerates a torn FINAL command
+        (never issued), but write_control appended right after the fragment
+        — welding it to the new record and turning recoverable tail damage
+        into corrupt middle history for every later read. The control tail
+        is repaired under the same lock, event-log discipline, and the
+        repair is recorded as history."""
+        log = RunLog.create(tmp_path)
+        log.write_control("resume")
+        with open(log.run_dir / "control.jsonl", "a", encoding="utf-8") as fh:
+            fh.write('{"ts": "2026-08-28T22:00:00Z", "action": "abo')
+        log.write_control("approve")
+        assert [c["action"] for c in log.read_controls()] == ["resume", "approve"]
+        assert "control-tail-repaired" in [e["event"] for e in log.events()]
 
     def test_corrupt_middle_events_damage_is_not_reported_as_ended(self, tmp_path):
         """Round-12 finding (suppressed): write_control caught EVERY RunError

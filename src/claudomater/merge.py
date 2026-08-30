@@ -112,6 +112,17 @@ _SUITE_CLAIM = re.compile(
     r"\bsuite\s+" + _COUNT + r"(?:\s*(?:->|→)\s*" + _COUNT + r")?(?!\s*(?:->|→))",
     re.IGNORECASE,
 )
+# Ratio form: "398 of 486 tests passed" claims 398 — the passed count is the
+# NUMERATOR; the second number is the run's total, never a claim. Without
+# this grammar the generic matcher read the total as the claim, so a measured
+# count equal to the total looked clean over a body reporting failures.
+_RATIO_CLAIM = re.compile(
+    _COUNT + r"\s+of\s+" + _COUNT + r"\s+(?:tests?\s+)?passed\b", re.IGNORECASE
+)
+# Guard for the generic matcher: a count immediately preceded by "of"
+# (emphasis allowed in between, like the history markers) is a ratio's
+# denominator — a total, not a claim.
+_OF_MARKER = re.compile(r"\bof\s*[*_~]*\s*$", re.IGNORECASE)
 # An explicitly historical count is not a claim about NOW: "557 passed
 # (was 381 passed)" cites its baseline the way the arrow grammar's left side
 # does. History markers are matched immediately before the count, allowing
@@ -143,9 +154,15 @@ def stale_numeric_claims(text: str, tests_passed: int) -> list[str]:
         raise MergeSeamError(f"text must be a string, got {type(text).__name__}")
 
     claims: list[tuple[int, int, str, int]] = []  # (start, end, quoted, claimed)
+    for m in _RATIO_CLAIM.finditer(text):
+        if _HISTORY_MARKER.search(text, 0, m.start()):
+            continue  # "was 398 of 486 tests passed": a cited baseline
+        claims.append((m.start(), m.end(), m.group(0), int(m.group(1).replace(",", ""))))
     for m in _PASSED_CLAIM.finditer(text):
         if _HISTORY_MARKER.search(text, 0, m.start()):
             continue  # "was 381 passed": a cited baseline, not a claim
+        if _OF_MARKER.search(text, 0, m.start()):
+            continue  # "398 of 486 passed": 486 is the total, not a claim
         claims.append((m.start(), m.end(), m.group(0), int(m.group(1).replace(",", ""))))
     for m in _SUITE_CLAIM.finditer(text):
         if _HISTORY_MARKER.search(text, 0, m.start()):

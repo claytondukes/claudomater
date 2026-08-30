@@ -7,6 +7,7 @@ from __future__ import annotations
 import json
 import os
 import time
+from datetime import datetime, timezone
 
 import pytest
 
@@ -382,6 +383,50 @@ class TestStaleTtlAndNearLimitRule:
         d = evaluate(exc, UserConfig())
         assert d.action == "pause" and d.window == "five_hour"
         assert "near-limit" in d.reasons[0] and "projects" in d.reasons[0]
+
+    def test_pre_reset_reading_rebases_projection_at_the_reset(self):
+        """Round-13 finding: the projection drifted the PRE-RESET percentage
+        forward when the window reset during the stale interval — a 90%
+        reading paused a window that had already restarted (the false-deny
+        class the staleness-AND-near-limit rule exists to avoid). The reset
+        is a known zero point strictly better than the expired reading:
+        projection rebases from 0% at the reset."""
+
+        def iso(epoch):
+            return datetime.fromtimestamp(epoch, tz=timezone.utc).strftime(
+                "%Y-%m-%dT%H:%M:%SZ"
+            )
+
+        now = time.time()
+        snap = snapshot(five=90.0)
+        snap.fetched_at = now - 4000  # stale past the TTL
+        snap.five_hour_resets_at = iso(now - 600)  # reset 10 min ago
+        exc = UsageUnavailable("stale-cache", snapshot=snap, age_s=4000.0)
+        d = evaluate(exc, UserConfig())
+        assert d.action == "ok"
+        assert any("rebased from 0%" in r for r in d.reasons)
+        # a reset grants no free pass: drift from the reset's zero point
+        # still self-caps once enough stale time passes
+        snap.fetched_at = now - 200000
+        snap.five_hour_resets_at = iso(now - 190000)
+        exc = UsageUnavailable("stale-cache", snapshot=snap, age_s=200000.0)
+        d = evaluate(exc, UserConfig())
+        assert d.action == "pause" and d.window == "five_hour"
+        assert "rebased from 0%" in d.reasons[0]
+
+    def test_unparseable_reset_keeps_the_conservative_projection(self):
+        """Garbage resets_at maps to 'cannot detect a reset' (the
+        usage._num_or_none choke-point discipline): the old reading drifts
+        forward, which can only pause EARLIER — never a crash mid-guardrail,
+        never a local-time guess at a naive timestamp."""
+        now = time.time()
+        for bad in ("soon", "2026-08-30 12:00:00", None):  # naive incl.
+            snap = snapshot(five=90.0)
+            snap.fetched_at = now - 4000
+            snap.five_hour_resets_at = bad
+            exc = UsageUnavailable("stale-cache", snapshot=snap, age_s=4000.0)
+            d = evaluate(exc, UserConfig())
+            assert d.action == "pause", bad  # 90% + drift >= 95, no rebase
 
     def test_projection_caps_unbounded_staleness(self, tmp_path, monkeypatch):
         """Self-capping: even a near-zero reading pauses once it has been

@@ -130,6 +130,22 @@ class TestStaleNumericClaims:
         (msg,) = stale_numeric_claims("**620 passed**", 621)
         assert "621" in msg
 
+    def test_ratio_claims_select_the_passed_numerator(self):
+        """Round-13 finding: '398 of 486 tests passed' read as a claim of
+        486 (the run's TOTAL), so a measured 486 looked clean over a body
+        reporting 88 failures. The ratio grammar claims the numerator; a
+        count preceded by 'of' is a denominator, never a claim."""
+        (msg,) = stale_numeric_claims("398 of 486 tests passed", 486)
+        assert '"398 of 486 tests passed"' in msg and "486 passed" in msg
+        assert stale_numeric_claims("486 of 486 tests passed", 486) == []
+        assert stale_numeric_claims("398 of 486 passed", 398) == []
+        # the history exemption covers the ratio form too
+        assert stale_numeric_claims(
+            "was 398 of 486 tests passed; suite 490", 490
+        ) == []
+        # a malformed numerator keeps the whole construct a non-claim
+        assert stale_numeric_claims("1,2 of 486 tests passed", 999) == []
+
     def test_garbage_counts_fail_loudly(self):
         for bad in (True, -1, "486", None, 4.86):
             with pytest.raises(MergeSeamError):

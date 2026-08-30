@@ -24,6 +24,7 @@ Rules (from the design, §5):
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any
 
 from claudomater.config import SKIP, UserConfig, family_rank
@@ -42,6 +43,24 @@ WINDOW_LABELS = {"five_hour": "5h", "seven_day": "7d", "scoped": "scoped"}
 # threshold after ~190 stale minutes, so "proceed on stale" can never hold
 # forever — no separate hard cap needed.
 STALE_DRIFT_PP_PER_MIN = 0.5
+
+
+def _reset_epoch_or_none(resets_at: str | None) -> float | None:
+    """Epoch seconds of a window's recorded reset, or None when absent,
+    unparseable, or timezone-naive. Same choke-point discipline as
+    usage._num_or_none: garbage maps to None, and None keeps the
+    CONSERVATIVE branch (drift the old reading forward, which can only
+    pause earlier) — never a crash mid-guardrail, never a local-time
+    guess at a naive timestamp."""
+    if not isinstance(resets_at, str):
+        return None
+    try:
+        dt = datetime.fromisoformat(resets_at.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        return None
+    return dt.timestamp()
 
 
 @dataclass
@@ -98,6 +117,9 @@ def _stale_decision(
             "guardrails re-baselined"
         )
     drift = STALE_DRIFT_PP_PER_MIN * (age / 60.0)
+    # age was measured against fetched_at when the exception was raised, so
+    # this IS the evaluation clock — no second wall-clock read to disagree.
+    now = snap.fetched_at + age
     below: list[str] = []
     degrade_crossings: list[tuple[str, str | None]] = []
     for window, pct, resets in (
@@ -116,7 +138,24 @@ def _stale_decision(
                 snapshot=snap,
             )
         threshold = cfg.usage.pause_at[window]
-        projected = pct + drift
+        reset_epoch = _reset_epoch_or_none(resets)
+        if reset_epoch is not None and reset_epoch <= now:
+            # The reading predates its window's reset: that percentage
+            # belongs to the EXPIRED window, and drifting it forward would
+            # pause a window that has already restarted — a false deny, the
+            # exact class this rule exists to avoid. The reset is a known
+            # zero point strictly better than the pre-reset reading, so the
+            # projection rebases from 0% there. (A stale interval spanning
+            # several reset cycles rebases from the FIRST — over-projecting,
+            # i.e. erring toward pause.)
+            projected = STALE_DRIFT_PP_PER_MIN * ((now - reset_epoch) / 60.0)
+            reading = (
+                f"{WINDOW_LABELS[window]} {pct:.0f}% pre-reset (window reset "
+                f"at {resets}; projection rebased from 0% at the reset)"
+            )
+        else:
+            projected = pct + drift
+            reading = f"{WINDOW_LABELS[window]} {pct:.0f}%"
         if projected >= threshold:
             if cfg.usage.on_threshold[window] == PAUSE:
                 return Decision(
@@ -124,7 +163,7 @@ def _stale_decision(
                     reasons=prefix
                     + [
                         f"stale usage ({int(age)}s old) with a near-limit last "
-                        f"reading: {WINDOW_LABELS[window]} {pct:.0f}% projects to "
+                        f"reading: {reading} projects to "
                         f"{projected:.0f}% (+{STALE_DRIFT_PP_PER_MIN} pp/min) "
                         f">= {threshold}% -> pause"
                     ],
@@ -142,14 +181,13 @@ def _stale_decision(
             # no pause window exists to self-cap.)
             degrade_crossings.append((window, resets))
             below.append(
-                f"{WINDOW_LABELS[window]} {pct:.0f}% projects to "
+                f"{reading} projects to "
                 f"{projected:.0f}% >= {threshold}% but the window is "
                 "degrade-configured and degrades never act on stale data"
             )
             continue
         below.append(
-            f"{WINDOW_LABELS[window]} {pct:.0f}% projects to "
-            f"{projected:.0f}% < {threshold}%"
+            f"{reading} projects to {projected:.0f}% < {threshold}%"
         )
     if degrade_crossings and not any(
         cfg.usage.on_threshold[w] == PAUSE for w in ("five_hour", "seven_day")

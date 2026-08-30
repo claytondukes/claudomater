@@ -331,15 +331,20 @@ class RunLog:
 
     # ---- events ----------------------------------------------------------
 
-    def _repair_torn_tail(self) -> int:
-        """Truncate a torn FINAL events line before appending (call under the
-        append lock). The torn tail is a crash artifact the write-ahead
-        discipline already treats as never-happened on read — but an append
-        landing AFTER it would turn it into corrupt MIDDLE history, and every
-        later events() call would raise. Returns the count of discarded bytes
-        (0 = nothing to repair). Middle corruption is damage, not a crash
-        artifact, and still raises via events()."""
-        path = self.run_dir / EVENTS_JSONL
+    def _repair_torn_tail(
+        self, filename: str = EVENTS_JSONL, required_key: str = "event"
+    ) -> int:
+        """Truncate a torn FINAL line of an append-only jsonl log before
+        appending to it (call under the append lock). The torn tail is a
+        crash artifact the write-ahead discipline already treats as
+        never-happened on read — but an append landing AFTER it would weld
+        the fragment to the new record, turning recoverable tail damage into
+        corrupt MIDDLE history that fails every later read. Serves both the
+        event log and control.jsonl (which write_control appends to under
+        the same lock). Returns the count of discarded bytes (0 = nothing to
+        repair). Middle corruption is damage, not a crash artifact, and
+        still raises on read."""
+        path = self.run_dir / filename
         try:
             raw = path.read_bytes()
         except OSError:
@@ -351,7 +356,7 @@ class RunLog:
         last = stripped[start:]
         try:
             obj = json.loads(last.decode("utf-8"))
-            if isinstance(obj, dict) and "event" in obj:
+            if isinstance(obj, dict) and required_key in obj:
                 if not raw.endswith(b"\n"):
                     # A crash can land exactly between the JSON bytes and
                     # their newline: the record is complete and readable, but
@@ -612,6 +617,16 @@ class RunLog:
                     f"run {self.run_id} already ended; control {action!r} has "
                     "nothing to act on — start a new run instead"
                 ) from None
+            # read_controls() tolerates a torn FINAL command (never issued),
+            # but appending right after the fragment would weld it to this
+            # record and corrupt BOTH — repair the control tail under this
+            # same lock, exactly like the event log's append path. The
+            # repair is itself history.
+            discarded = self._repair_torn_tail(CONTROL_JSONL, "action")
+            if discarded:
+                self._append_event(
+                    "run", "control-tail-repaired", {"discarded_bytes": discarded}
+                )
             with open(self.run_dir / CONTROL_JSONL, "a", encoding="utf-8") as fh:
                 fh.write(json.dumps(record, sort_keys=True) + "\n")
                 fh.flush()
