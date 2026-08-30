@@ -47,7 +47,7 @@ are deliberate, and where the seams are.
   `adopt()` is orchestrator takeover and records its verb. Parked
   (`run-parked`) is a lifecycle fact cleared only by `phase-spawn` or
   `control-resume` — bookkeeping and sibling appends do not unpark — and
-  `run-failed` is refused while parked. Appends serialize under an flock;
+  `run-failed` is refused while parked. Appends serialize under a flock;
   every check-then-append rule lives inside that critical section.
 - **`review.review_gate(findings, floor)`** is the single gating seam: the
   floor decides from findings, the reviewing agent's verdict is advisory,
