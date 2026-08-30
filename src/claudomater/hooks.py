@@ -419,9 +419,14 @@ _CMD_ANCHOR = (
     r"(?:[A-Za-z_][A-Za-z0-9_]*=[^\s;|&<>()]*[ \t]+)*"
     r"(?:(?:command|builtin|nohup|sudo|env|time)[ \t]+(?:-[^\s;|&<>()]+[ \t]+)*)*"
 )
-_TEE = re.compile(_CMD_ANCHOR + r"tee\s+(?:-[a-zA-Z]+\s+)*([^\s;|&<>()]+)")
+# tee/mkdir/touch accept MULTIPLE operands — group 1 captures the whole
+# list (checking only the first let `tee <root>/ok passwd` open
+# /etc/passwd unrecognized); dash tokens inside are skipped per-operand.
+_TEE = re.compile(
+    _CMD_ANCHOR + r"tee\s+(?:-[a-zA-Z]+\s+)*((?:[^\s;|&<>()]+[ \t]*)+)"
+)
 _CREATE = re.compile(
-    _CMD_ANCHOR + r"(?:mkdir|touch)\s+(?:-[a-zA-Z=]+\s+)*([^\s;|&<>()]+)"
+    _CMD_ANCHOR + r"(?:mkdir|touch)\s+(?:-[a-zA-Z=]+\s+)*((?:[^\s;|&<>()]+[ \t]*)+)"
 )
 _DD_OF = re.compile(_CMD_ANCHOR + r"dd\b[^;|&]*\bof=([^\s;|&<>()]+)")
 _COPY = re.compile(
@@ -696,26 +701,55 @@ def _scannable(command: str) -> str:
     return scannable.replace("\\\n", "")
 
 
+# -t/--target-directory (bundled forms included) reverses the operand
+# roles: `cp -t dest src...` makes the LAST operand a source — resolving
+# it as the destination falsely denied it. Unrecognized, fail open.
+_TARGET_DIR_OPT = re.compile(r"(?:^|\s)(?:-\w*t\w*|--target-directory)(?:[=\s]|$)")
+
+
 def _positioned_write_targets(scannable: str) -> list[tuple[int, str]]:
     targets: list[tuple[int, str]] = []
 
-    def keep(m: re.Match) -> None:
-        target = m.group(1).strip("'\"")
-        if target and not target.startswith("&"):
-            targets.append((m.start(1), target))
+    def keep(pos: int, token: str) -> None:
+        token = token.strip("'\"")
+        if token and not token.startswith("&"):
+            targets.append((pos, token))
+
+    def anchored_on_syntax(m: re.Match) -> bool:
+        first = scannable[m.start()]
+        if first in ";&|(" and _escape_parity(scannable, m.start()) == 1:
+            return True  # escaped separator: word data (`echo \; mkdir x`)
+        if (
+            first == "&"
+            and m.start() > 0
+            and scannable[m.start() - 1] in "<>"
+            and _escape_parity(scannable, m.start() - 1) == 0
+        ):
+            # the & of >&/<&: `echo hi >& tee f` redirects to a FILE
+            # named tee — matching here falsely denied echo's argument
+            return True
+        return False
 
     for m in _REDIRECT.finditer(scannable):
         # `test x \> passwd` passes a LITERAL > to test — reporting a
         # write falsely denied it against the tracked cwd
         op = m.start() + m.group(0).index(">")
         if _escape_parity(scannable, op) == 0:
-            keep(m)
-    for pattern in (_TEE, _CREATE, _DD_OF, _COPY):
+            keep(m.start(1), m.group(1))
+    for pattern in (_TEE, _CREATE):
         for m in pattern.finditer(scannable):
-            first = scannable[m.start()]
-            if first in ";&|(" and _escape_parity(scannable, m.start()) == 1:
-                continue  # anchored on word data (`echo \; mkdir x`)
-            keep(m)
+            if anchored_on_syntax(m):
+                continue
+            for operand in re.finditer(r"[^\s;|&<>()]+", m.group(1)):
+                if not operand.group().startswith("-"):
+                    keep(m.start(1) + operand.start(), operand.group())
+    for m in _DD_OF.finditer(scannable):
+        if not anchored_on_syntax(m):
+            keep(m.start(1), m.group(1))
+    for m in _COPY.finditer(scannable):
+        if anchored_on_syntax(m) or _TARGET_DIR_OPT.search(m.group(0)):
+            continue
+        keep(m.start(1), m.group(1))
     return targets
 
 

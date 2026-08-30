@@ -553,6 +553,48 @@ class TestBashFence:
             allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
             assert allow, (cmd, reason)
 
+    def test_multi_operand_writers_check_every_operand(self, tmp_path):
+        """tee/mkdir/touch take multiple operands — checking only the
+        first let `cd /etc; tee <root>/ok passwd` open /etc/passwd
+        unrecognized. All-in-root operand lists still pass."""
+        for cmd in (
+            f"cd /etc; tee {tmp_path}/ok passwd",
+            f"cd /etc; touch {tmp_path}/ok passwd",
+            f"cd /etc; mkdir {tmp_path}/ok passwd",
+        ):
+            p = payload("Bash", command=cmd)
+            p["cwd"] = str(tmp_path)
+            allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+            assert not allow, cmd
+        p = payload("Bash", command=f"tee {tmp_path}/a {tmp_path}/b")
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+
+    def test_redirect_ampersand_does_not_anchor_command_words(self, tmp_path):
+        """`echo hi >& tee /tmp_probe/x` redirects to a FILE named tee —
+        /tmp_probe/x is just an echo argument; matching _TEE at the
+        redirect's & falsely denied it."""
+        p = payload("Bash", command="echo hi >& tee /tmp_probe/x")
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+
+    def test_target_directory_copies_fail_open(self, tmp_path):
+        """`cp -t <root>/dest hosts` writes INTO dest — the last operand
+        is a SOURCE, and resolving it as the destination falsely denied
+        it as /etc/hosts. Unrecognized, fail open; plain copies keep
+        denying."""
+        (tmp_path / "dest").mkdir()
+        p = payload("Bash", command=f"cd /etc; cp -t {tmp_path}/dest hosts")
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+        p = payload("Bash", command="cd /etc; cp x passwd")
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+
     def test_unterminated_quote_is_a_syntax_error_not_a_write(self, tmp_path):
         """`echo " > /tmp_probe/out` hits EOF inside the quote: bash
         rejects the whole input and writes NOTHING — the exposed redirect
