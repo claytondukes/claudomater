@@ -303,10 +303,13 @@ def _arith_spans(
                 while j >= 0 and text[j] not in " \t\n;&|(":
                     j -= 1
                 word = text[j + 1 : w_end + 1]
+                # `{` included: `{ (( x > passwd )); }` keeps (( at
+                # command position (the walk continues left to confirm
+                # the brace itself is one)
                 if word in (
                     "!", "if", "elif", "while", "until", "then", "else",
-                    "do", "for",
-                ) and (word != "!" or not _escape_parity(text, w_end)):
+                    "do", "for", "{",
+                ) and (word not in ("!", "{") or not _escape_parity(text, w_end)):
                     continue
                 j = w_end if word else j
                 break
@@ -541,9 +544,15 @@ _CMD_ANCHOR = (
     r"(?:^|[\n;&|()]|\{(?=[ \t\n]))\s*"
     r"(?:(?:if|elif|while|until|then|else|do)[ \t]+)*"
     r"(?:![ \t]+)*"
+    # leading assignments are bash-level prefixes; AFTER a wrapper an
+    # assignment-looking word is argv-preserving only for env/sudo/time —
+    # `nohup MODE=x touch /x` executes a program named MODE=x and touch
+    # never runs (recognizing it falsely denied a write that never
+    # happens). Unsupported compositions fail open.
+    r"(?:[A-Za-z_][A-Za-z0-9_]*=[^\s;|&<>()]*[ \t]+)*"
     r"(?:"
-    r"[A-Za-z_][A-Za-z0-9_]*=[^\s;|&<>()]*[ \t]+"
-    r"|(?:command|nohup|sudo|env|time)[ \t]+"
+    r"(?:env|sudo|time)[ \t]+(?:[A-Za-z_][A-Za-z0-9_]*=[^\s;|&<>()]*[ \t]+)*"
+    r"|(?:command|nohup)[ \t]+"
     r")*"
 )
 # tee/mkdir/touch accept MULTIPLE operands — group 1 captures the whole
@@ -1148,7 +1157,7 @@ def resolved_bash_targets(
         if _real_anchor(m) and not _in_arith(m.end() - 1):
             events.append((m.start(), "hard", None))
     dead_spans: list[tuple[int, int]] = []
-    func_names: set[str] = set()
+    func_defined_at: dict[str, int] = {}
     for m in _FUNC_DEF.finditer(scannable):
         # definitions execute nothing (see _FUNC_DEF): a bounded body is
         # a dead span; an unmatchable one falls back to the wall
@@ -1163,14 +1172,20 @@ def resolved_bash_targets(
             kw_body = _FUNCTION_KW_BODY.match(scannable, m.end())
             opener = kw_body.start(1) if kw_body else None
             name_m = re.match(r"[ \t]*([A-Za-z_][A-Za-z0-9_]*)", scannable[m.end() :])
-        if name_m:
-            func_names.add(name_m.group(name_m.lastindex or 0))
         end = _func_body_end(scannable, opener) if opener is not None else None
+        if name_m:
+            # a name is a FUNCTION only from its definition's completion
+            # onward — `f; cat > passwd; f() { :; }` runs an undefined f
+            # first, and voiding on that call hid the recognized write
+            name = name_m.group(name_m.lastindex or 0)
+            completed = end if end is not None else def_start
+            if name not in func_defined_at or completed < func_defined_at[name]:
+                func_defined_at[name] = completed
         if end is None:
             events.append((def_start, "wall", None))
         else:
             dead_spans.append((def_start, end))
-    if func_names:
+    if func_defined_at:
         # INVOKING a defined function runs its body in the current shell
         # — it may cd anywhere (`f() { cd <root>; }; cd /etc; f` really
         # returns in-root, and keeping /etc falsely denied the write).
@@ -1178,7 +1193,7 @@ def resolved_bash_targets(
         # ONE alternation pass: a scan per name was O(names x command)
         # in the synchronous hook.
         alternation = "|".join(
-            re.escape(n) for n in sorted(func_names, key=len, reverse=True)
+            re.escape(n) for n in sorted(func_defined_at, key=len, reverse=True)
         )
         # assignment words and condition/body reserved words keep the
         # invocation in the current shell (`MODE=x f` and `if f; then`
@@ -1188,12 +1203,16 @@ def resolved_bash_targets(
             r"(?:^|[\n;&|({])\s*"
             r"(?:(?:if|elif|while|until|then|else|do)[ \t]+)*"
             r"(?:![ \t]+)*"
-            r"(?:[A-Za-z_][A-Za-z0-9_]*=[^\s;|&<>()]*[ \t]+)*(?:"
+            r"(?:[A-Za-z_][A-Za-z0-9_]*=[^\s;|&<>()]*[ \t]+)*(?P<fname>"
             + alternation
             + r")(?![^\s;&|)<>\n])",
             scannable,
         ):
-            if _real_anchor(im) and not _in_arith(im.end() - 1):
+            if (
+                _real_anchor(im)
+                and not _in_arith(im.end() - 1)
+                and im.start("fname") > func_defined_at[im.group("fname")]
+            ):
                 events.append(
                     (_segment_boundary(scannable, im.end()), "opaque", None)
                 )

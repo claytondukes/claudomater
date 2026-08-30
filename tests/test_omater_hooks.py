@@ -553,6 +553,38 @@ class TestBashFence:
             allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
             assert allow, (cmd, reason)
 
+    def test_invocation_before_definition_is_not_a_call(self, tmp_path):
+        """In `cd /etc; f; cat > passwd; f() {{ :; }}` the early f is
+        UNDEFINED when it runs — nothing moves the cwd, and voiding on it
+        hid the recognized write."""
+        p = payload("Bash", command="cd /etc; f; cat > passwd; f() { :; }")
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+
+    def test_non_env_wrappers_do_not_pass_assignments(self, tmp_path):
+        """`nohup MODE=x touch /x` executes a program NAMED MODE=x —
+        touch never runs (false deny closed); `env MODE=x touch /x`
+        really runs touch and keeps denying."""
+        p = payload("Bash", command="nohup MODE=x touch /tmp_probe/x")
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+        p = payload("Bash", command="env MODE=x touch /tmp_probe/x")
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+
+    def test_brace_group_arithmetic_is_a_comparison(self, tmp_path):
+        """`{ (( x > /tmp_probe/out )); }` compares — the brace opener
+        keeps (( at command position (its phantom ABSOLUTE redirect was
+        falsely denied; relative ones already failed open via the
+        brace's hard opacity)."""
+        p = payload("Bash", command="{ (( x > /tmp_probe/out )); }")
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+
     def test_function_definition_inside_a_subshell_is_dead(self, tmp_path):
         """`(f() { touch /tmp_probe/x; }; true)` only DEFINES f — the
         subshell-anchored definition must dead-span its body like any
