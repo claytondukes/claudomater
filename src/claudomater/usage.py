@@ -310,9 +310,17 @@ def read_usage(
         )
 
     try:
-        payload = json.loads(cache.read_text(encoding="utf-8"))
-        mtime = cache.stat().st_mtime
-    except (OSError, json.JSONDecodeError, ValueError):
+        # One open descriptor for BOTH the bytes and the mtime: the shared
+        # statusline can replace the cache between two path-based calls, and
+        # a torn pair (old payload, new mtime) would let an arbitrarily old
+        # low reading skip the stale branch and bypass projection entirely.
+        # fstat on the fd we read from keeps payload, provenance, and age
+        # describing the same inode.
+        with open(cache, "rb") as fh:
+            raw = fh.read()
+            mtime = os.fstat(fh.fileno()).st_mtime
+        payload = json.loads(raw.decode("utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError, ValueError):
         raise UsageUnavailable(
             f"no-usage-data: cache unreadable at {cache}"
             + (f" ({failure})" if failure else "")

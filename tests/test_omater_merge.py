@@ -69,6 +69,15 @@ class TestStaleNumericClaims:
             "previously 100 tests passed; now suite 200", 200
         ) == []
 
+    def test_history_markers_cover_the_suite_grammar_too(self):
+        """Round-10 finding: the exemption only guarded the `passed`
+        grammar — 'previously suite 100' was still reported as stale,
+        against the function's own contract."""
+        assert stale_numeric_claims("previously suite 100; now suite 200", 200) == []
+        assert stale_numeric_claims("was suite 381, suite 381 -> 624", 624) == []
+        (msg,) = stale_numeric_claims("previously suite 100; now suite 200", 300)
+        assert '"suite 200"' in msg and "100" not in msg
+
     def test_malformed_comma_forms_are_not_claims(self):
         """Round-1 finding: '1,2 passed' read as a claim of 12, and partial
         matches inside malformed digit runs could claim their tail. A count

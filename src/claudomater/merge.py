@@ -140,6 +140,8 @@ def stale_numeric_claims(text: str, tests_passed: int) -> list[str]:
             continue  # "was 381 passed": a cited baseline, not a claim
         claims.append((m.start(), m.end(), m.group(0), int(m.group(1).replace(",", ""))))
     for m in _SUITE_CLAIM.finditer(text):
+        if _HISTORY_MARKER.search(text, 0, m.start()):
+            continue  # "previously suite 100": a cited baseline, not a claim
         current = m.group(2) or m.group(1)  # arrow form: the right side is current
         claims.append((m.start(), m.end(), m.group(0), int(current.replace(",", ""))))
 
