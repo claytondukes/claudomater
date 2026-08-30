@@ -553,6 +553,48 @@ class TestBashFence:
             allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
             assert allow, (cmd, reason)
 
+    def test_flagged_declare_assignments_are_effective(self, tmp_path):
+        """`declare -x HOME=<root>` really assigns — missing the option
+        words resolved ~ under the stale home (false deny)."""
+        p = payload("Bash", command=f"declare -x HOME={tmp_path}; echo hi > ~/out.txt")
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+
+    def test_wrapped_current_shell_executors_void_tracking(self, tmp_path):
+        """`command source` / `builtin eval` still run in the CURRENT
+        shell — missing them kept a stale /etc that falsely denied later
+        relative writes; a prefixed `set -P` likewise changes the cd
+        mode."""
+        for cmd in (
+            "cd /etc; command source setup.sh; cat > passwd",
+            "cd /etc; builtin eval 'true'; cat > passwd",
+        ):
+            p = payload("Bash", command=cmd)
+            p["cwd"] = str(tmp_path)
+            allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+            assert allow, (cmd, reason)
+        for cmd in (
+            "MODE=x set -P; cd sub && cat > out.txt",
+            "command set -P; cd sub && cat > out.txt",
+        ):
+            [(_, resolved)] = hooks.resolved_bash_targets(cmd, tmp_path)
+            assert resolved is None, cmd
+
+    def test_guarded_list_scan_is_linear(self, tmp_path):
+        """The &&-list-end scan ran per guarded cd to the same terminator
+        — quadratic on generated `&& cd .` chains in the synchronous
+        hook. One precomputed terminator list + bisect is linear."""
+        import time
+
+        cmd = "true" + " && cd ." * 8000 + "; cat > out.txt"
+        p = payload("Bash", command=cmd)
+        p["cwd"] = str(tmp_path)
+        started = time.monotonic()
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert time.monotonic() - started < 2.0
+        assert allow, reason
+
     def test_command_prefix_assignments_are_one_shot(self, tmp_path):
         """`CDPATH=/tmp printf x` scopes the assignment to printf — the
         later cd uses the ORIGINAL CDPATH and its escape stays recognized

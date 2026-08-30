@@ -654,7 +654,9 @@ _CD_WRAPPERS = frozenset({"command", "builtin", "time", "!"})
 # assignment words. An argument mention (`printf CDPATH=/tmp`) is not one.
 _ASSIGN_PREFIX = (
     r"(?:^|[\n;&|({])\s*(?:![ \t]+)*"
-    r"(?:(?:export|declare|local|readonly)[ \t]+)?"
+    # `declare -x HOME=...` really assigns — option words between the
+    # builtin and the assignment were missed (false deny via stale ~)
+    r"(?:(?:export|declare|local|readonly)[ \t]+(?:-[A-Za-z]+[ \t]+)*)?"
     r"(?:[A-Za-z_][A-Za-z0-9_]*=[^\s;|&<>()]*[ \t]+)*"
 )
 _CDPATH_ASSIGN = re.compile(_ASSIGN_PREFIX + r"CDPATH=")
@@ -751,8 +753,13 @@ _CWD_OPAQUE = re.compile(r"[()`]")
 # could restore it, but option state is not modeled precisely): a flagless
 # relative or dot-traversing cd afterwards fails open instead of tracking
 # a logically-computed cwd the shell may not actually be in.
+# `MODE=x set -P` and `command set -P` change the current shell's mode
+# too — a bare-`set` anchor missed them (logical stepping through an
+# in-root symlink then mis-resolved a physically-outside write).
 _SET_PHYSICAL = re.compile(
-    r"(?:^|[\n;&|(])\s*set[ \t]+[^\n;&|()]*(?:[-+][A-Za-z]*P|[-+]o[ \t]+physical)"
+    r"(?:^|[\n;&|(])\s*"
+    r"(?:[A-Za-z_][A-Za-z0-9_]*=[^\s;|&<>()]*[ \t]+|(?:command|builtin)[ \t]+)*"
+    r"set[ \t]+[^\n;&|()]*(?:[-+][A-Za-z]*P|[-+]o[ \t]+physical)"
 )
 # Compound control flow this scanner does not model: a cd inside
 # `if false; then cd /etc; fi`, a function body, or a zero-iteration loop
@@ -834,11 +841,13 @@ def _func_body_end(scannable: str, opener: int) -> int | None:
 # unlike a compound body, whose extent is unparseable (hard, above).
 _SHELL_EXEC = re.compile(
     r"(?:^|[\n;&|(])\s*"
-    # MODE=x source ... and `> /dev/null source ...` are valid: a
-    # redirect prefix still runs source in the CURRENT shell, and
-    # missing it left a stale cwd that falsely denied a later write
+    # MODE=x source ..., `> /dev/null source ...`, `command source ...`,
+    # and `builtin eval ...` all still run in the CURRENT shell —
+    # missing any prefix left a stale cwd that falsely denied later
+    # relative writes
     r"(?:[A-Za-z_][A-Za-z0-9_]*=[^\s;|&<>()]*[ \t]+"
-    r"|\d*[<>]{1,2}(?:&\d+-?)?[ \t]*[^\s;|&<>()]*[ \t]+)*"
+    r"|\d*[<>]{1,2}(?:&\d+-?)?[ \t]*[^\s;|&<>()]*[ \t]+"
+    r"|(?:command|builtin)[ \t]+)*"
     r"(?:(?:eval|source)\b|\.(?![^\s;&|)\n]))"
 )
 
@@ -1338,6 +1347,14 @@ def resolved_bash_targets(
             and _cd_word_can_execute(m.start())
         ):
             events.append((_segment_boundary(scannable, m.end()), "opaque", None))
+    # unescaped list terminators (an escaped ;/) is word data — `echo \;`
+    # is not the list's end), precomputed once for the &&-guard scan below
+    list_terminators = [
+        k
+        for k in range(len(scannable))
+        if scannable[k] in ";\n)"
+        and (scannable[k] == "\n" or _escape_parity(scannable, k) == 0)
+    ]
     for m in chdir_matches:
         # The cd takes effect at its segment's END, not at the verb: a
         # redirect attached to the cd command itself (`cd /etc > cd.log`)
@@ -1390,19 +1407,11 @@ def resolved_bash_targets(
             # resumes whether or not the guard passed, and the cwd there is
             # unknowable (`false && cd /etc; cat > out.txt` writes in the
             # ORIGINAL cwd). Void the tracked cwd at the list boundary.
-            list_end = effect_pos
-            while list_end < len(scannable) and (
-                scannable[list_end] not in ";\n)"
-                # an escaped ;/) is word data (`echo \;`), not the list's
-                # terminator — voiding there cleared a still-guarded cwd
-                or (
-                    scannable[list_end] != "\n"
-                    and _escape_parity(scannable, list_end) == 1
-                )
-            ):
-                list_end += 1
-            if list_end < len(scannable):
-                events.append((list_end, "opaque", None))
+            # bisect over the precomputed terminators: a forward scan per
+            # &&-guarded cd was quadratic on `true && cd . && cd . ...`
+            t_idx = bisect.bisect_left(list_terminators, effect_pos)
+            if t_idx < len(list_terminators):
+                events.append((list_terminators[t_idx], "opaque", None))
     # Same-position ties: resolve targets first (pre-cd), apply the cd next,
     # then the ||/list bookkeeping, and let an opacity marker (e.g. the `)`
     # closing a subshell that both ends the cd's segment and discards its
