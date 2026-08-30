@@ -40,7 +40,7 @@ def start_run(
             )
         cfg = load_project_config(root)
         log = RunLog.create(root, run_id=run_id)
-    except BaseException:
+    except BaseException as exc:
         # A start that FAILS must not leave the fence armed - the lifecycle
         # is "exists only while a run is live". One exception: when the
         # failure is the one-live-run conflict (or anything else while a
@@ -48,7 +48,15 @@ def start_run(
         try:
             RunLog.attach(root)  # raises unless a live run exists
         except RunError:
-            hooks.deprovision(root)
+            try:
+                hooks.deprovision(root)
+            except hooks.HookProvisionError as cleanup:
+                # The ORIGINAL failure is the story; a cleanup failure must
+                # never mask it. Attach it as a note so both surface.
+                exc.add_note(
+                    "cleanup also failed: could not disarm the write fence "
+                    f"({cleanup}); remove it with `omater teardown`"
+                )
         raise
     log.event("run", "policy", cfg.policy())
     return log, cfg

@@ -2732,6 +2732,28 @@ class TestFenceScopeP11:
         finally:
             blocked.chmod(0o700)
 
+    def test_rollback_failure_never_masks_the_start_failure(
+        self, tmp_path, monkeypatch, omater_on_path
+    ):
+        """Copilot round-3 finding: if the failed-start rollback's
+        deprovision itself raises (unwritable settings), that cleanup error
+        replaced the ORIGINAL failure. The original propagates; the cleanup
+        failure rides along as an exception note with the remediation."""
+        import pytest
+
+        from claudomater import run as run_mod
+        from claudomater.run import start_run
+        from claudomater.runlog import RunError
+
+        def boom(root):
+            raise hooks.HookProvisionError("cannot write settings (simulated)")
+
+        monkeypatch.setattr(run_mod.hooks, "deprovision", boom)
+        with pytest.raises(RunError, match="drift") as excinfo:
+            start_run(tmp_path)  # no .omater.yaml -> drift refusal
+        notes = getattr(excinfo.value, "__notes__", [])
+        assert any("omater teardown" in n for n in notes)
+
     def test_teardown_cli_disarms(self, tmp_path, capsys):
         from claudomater.cli import EXIT_OK, main
 
