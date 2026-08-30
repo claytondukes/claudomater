@@ -553,6 +553,40 @@ class TestBashFence:
             allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
             assert allow, (cmd, reason)
 
+    def test_command_prefix_assignments_are_one_shot(self, tmp_path):
+        """`CDPATH=/tmp printf x` scopes the assignment to printf — the
+        later cd uses the ORIGINAL CDPATH and its escape stays recognized
+        (persistent arming hid it); same for HOME. A one-shot prefixing
+        the writer itself still covers that command (fail open)."""
+        (tmp_path / "server").mkdir()
+        for cmd in (
+            "CDPATH=/tmp printf x; cd server; touch ../../escape",
+            "HOME=/tmp printf x; echo hi > ~/omater-probe6.txt",
+        ):
+            p = payload("Bash", command=cmd)
+            p["cwd"] = str(tmp_path)
+            allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+            assert not allow, cmd
+        p = payload("Bash", command=f"HOME={tmp_path} tee ~/one-shot.txt")
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+
+    def test_unmatched_cd_fallback_is_linear(self, tmp_path):
+        """Each unmatched cd word back-scanned and re-tokenized its
+        segment prefix — quadratic on `echo cd cd ...` (24s at 12000
+        tokens in the synchronous hook). Tokenize-once verdicts keep it
+        linear."""
+        import time
+
+        cmd = "echo " + "cd " * 12000 + "; cat > out.txt"
+        p = payload("Bash", command=cmd)
+        p["cwd"] = str(tmp_path)
+        started = time.monotonic()
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert time.monotonic() - started < 2.0
+        assert allow, reason  # every cd is prose; out.txt stays in-root
+
     def test_sibling_heredocs_consume_in_order(self, tmp_path):
         """`cat <<A <<B` queues BOTH bodies — after their terminators the
         next command executes, and the leftover <<B walled the real write

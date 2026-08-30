@@ -1263,6 +1263,23 @@ def resolved_bash_targets(
     # same verb token, so membership is exact — and the per-token interval
     # rescan was O(N^2) in the cd count inside the synchronous hook
     matched_verb_starts = {m.start(2) for m in chdir_matches}
+    # segment starts, ONE forward pass (same stop set, parity, and >&-skip
+    # as the old per-token back-scan — which was O(prefix) per token and
+    # quadratic on `echo cd cd ...` in the synchronous hook)
+    seg_starts = [0]
+    for k in range(len(scannable)):
+        c = scannable[k]
+        if c in ";&|(\n" and _escape_parity(scannable, k) == 0:
+            if (
+                c == "&"
+                and k >= 1
+                and scannable[k - 1] in "<>"
+                and _escape_parity(scannable, k - 1) == 0
+            ):
+                continue  # the & of >&/<& — not a segment boundary
+            seg_starts.append(k + 1)
+    _seg_verdicts: dict[int, dict[int, bool]] = {}
+
     def _cd_word_can_execute(pos: int) -> bool:
         # An unmatched cd-ish token can move THIS shell's cwd only when
         # every word between its segment start and the token leaves it in
@@ -1271,51 +1288,43 @@ def resolved_bash_targets(
         # makes it an argument — voiding a correctly tracked cwd there hid
         # a recognized /etc write behind the fail-open path. A placeholder
         # prefix word (`"command" cd`) is caught by _GLUED_COMMAND instead.
-        s = pos
-        while s > 0:
-            c = scannable[s - 1]
-            if c in ";&|(\n" and _escape_parity(scannable, s - 1) == 0:
-                if (
-                    c == "&"
-                    and s >= 2
-                    and scannable[s - 2] in "<>"
-                    and _escape_parity(scannable, s - 2) == 0
-                ):
-                    s -= 1  # the & of >&/<& — inside the segment, keep going
-                    continue
-                break
-            s -= 1
-        # split on UNESCAPED whitespace only: `MODE=a\ b` is ONE assignment
-        # word — str.split() shattered it and the stray fragment read as a
-        # command word, so the real cd neither tracked nor voided (stale
-        # cwd, false deny)
-        words: list[str] = []
-        word_start = -1
-        for j in range(s, pos):
-            if scannable[j] in " \t\n" and _escape_parity(scannable, j) == 0:
-                if word_start >= 0:
-                    words.append(scannable[word_start:j])
-                    word_start = -1
-            elif word_start < 0:
-                word_start = j
-        if word_start >= 0:
-            words.append(scannable[word_start:pos])
-        k = 0
-        while k < len(words):
-            w = words[k]
-            if _BARE_REDIRECT.fullmatch(w):
-                if k + 1 >= len(words):
-                    # the redirect's operand is the cd TOKEN itself
-                    # (`< cd`): a filename, not a command — voiding on it
-                    # lost a known cwd and hid the recognized write
-                    return False
-                k += 2  # the next word is this redirect's file operand
-                continue
-            if w in _CD_WRAPPERS or _TRANSPARENT_PREFIX_WORD.fullmatch(w):
-                k += 1
-                continue
-            return False
-        return True
+        # The segment is tokenized ONCE and each word start carries the
+        # verdict for a token at that position (words split on UNESCAPED
+        # whitespace: `MODE=a\ b` is ONE assignment word).
+        s = seg_starts[bisect.bisect_right(seg_starts, pos) - 1]
+        verdicts = _seg_verdicts.get(s)
+        if verdicts is None:
+            verdicts = {}
+            end = _segment_boundary(scannable, s)
+            words: list[tuple[int, str]] = []
+            word_start = -1
+            for j in range(s, end):
+                if scannable[j] in " \t\n" and _escape_parity(scannable, j) == 0:
+                    if word_start >= 0:
+                        words.append((word_start, scannable[word_start:j]))
+                        word_start = -1
+                elif word_start < 0:
+                    word_start = j
+            if word_start >= 0:
+                words.append((word_start, scannable[word_start:end]))
+            # ok: command position; pending: this word is a preceding
+            # bare redirect's file operand (`< cd` names a file); opaque:
+            # a real command word came earlier — everything after is an
+            # ARGUMENT (absorbing)
+            state = "ok"
+            for w_pos, w in words:
+                verdicts[w_pos] = state == "ok"
+                if state == "pending":
+                    state = "ok"
+                elif state == "ok":
+                    if _BARE_REDIRECT.fullmatch(w):
+                        state = "pending"
+                    elif not (
+                        w in _CD_WRAPPERS or _TRANSPARENT_PREFIX_WORD.fullmatch(w)
+                    ):
+                        state = "opaque"
+            _seg_verdicts[s] = verdicts
+        return verdicts.get(pos, False)
 
     for m in _CD_WORD.finditer(scannable):
         # a cd-ish token the parser did not positively match voids tracking
@@ -1423,7 +1432,14 @@ def resolved_bash_targets(
     # arithmetic never runs. The position is kept so the flag applies only
     # to events AFTER it: a write before the assignment resolves under
     # the ORIGINAL value.
-    def _first_assignment(pattern: re.Pattern) -> int | None:
+    def _assignment_ranges(pattern: re.Pattern) -> list[tuple[int, int]]:
+        # An assignment-only statement (or export/declare form) is
+        # PERSISTENT; a command-prefix assignment (`CDPATH=/x printf y`)
+        # is TEMPORARY — bash scopes it to that one command, and treating
+        # it as persistent hid recognizable denies after it. A one-shot
+        # range ends at the segment boundary, which still covers the
+        # one-shot `CDPATH=/x cd t` itself.
+        ranges: list[tuple[int, int]] = []
         for am in pattern.finditer(scannable):
             first = scannable[am.start()]
             if first in ";&|({" and _escape_parity(scannable, am.start()) == 1:
@@ -1432,15 +1448,30 @@ def resolved_bash_targets(
                 continue
             if _in_dead is not None and _in_dead(am.end() - 1):
                 continue
-            return am.end()
-        return None
+            seg_end = _segment_boundary(scannable, am.end())
+            tail = scannable[am.end() : seg_end]
+            # drop this assignment's value, then any further assignment
+            # words; a remaining word is the prefixed COMMAND
+            tail = re.sub(r"^[^\s;|&<>()]*", "", tail)
+            tail = re.sub(
+                r"^(?:[ \t]+[A-Za-z_][A-Za-z0-9_]*=[^\s;|&<>()]*)*", "", tail
+            )
+            if tail.strip():
+                ranges.append((am.end(), seg_end))
+            else:
+                ranges.append((am.end(), len(scannable)))
+        return ranges
 
-    cdpath_pos = _first_assignment(_CDPATH_ASSIGN)
+    def _in_ranges(ranges: list[tuple[int, int]], p: int) -> bool:
+        return any(start < p <= end for start, end in ranges)
+
+    cdpath_ranges = _assignment_ranges(_CDPATH_ASSIGN)
     # An in-command HOME assignment changes what `~` means to bash, while
     # expanduser reads the HOOK's environment — resolving `~` through the
     # stale HOME falsely denied in-root writes. No HOME tracking (frozen):
-    # `~`-leading targets AFTER the assignment are unresolved, fail open.
-    home_pos = _first_assignment(_HOME_ASSIGN)
+    # `~`-leading targets in an assignment's effective range are
+    # unresolved, fail open.
+    home_ranges = _assignment_ranges(_HOME_ASSIGN)
     events.sort(key=lambda e: (e[0], priority[e[1]]))
 
     current: Path | None = cwd
@@ -1459,9 +1490,7 @@ def resolved_bash_targets(
                 out.append((raw, None))
                 continue
             if _resolved_target(raw) is None or (
-                home_pos is not None
-                and _pos > home_pos
-                and raw.startswith("~")
+                raw.startswith("~") and _in_ranges(home_ranges, _pos)
             ):
                 out.append((raw, None))
             elif Path(os.path.expanduser(raw)).is_absolute():
@@ -1569,7 +1598,7 @@ def resolved_bash_targets(
             # entry this scan cannot know. All -> unknown, fail open.
             current = None
             continue
-        if home_pos is not None and _pos > home_pos and target.startswith("~"):
+        if target.startswith("~") and _in_ranges(home_ranges, _pos):
             # same stale-HOME rule as write targets: `HOME=<root>; cd ~`
             # returns IN-root while expanduser tracked the old home
             current = None
@@ -1602,7 +1631,7 @@ def resolved_bash_targets(
         if step.is_absolute():
             new_cwd = str(step)
         elif (
-            cdpath_env or (cdpath_pos is not None and _pos > cdpath_pos)
+            cdpath_env or _in_ranges(cdpath_ranges, _pos)
         ) and not (
             target in (".", "..") or target.startswith(("./", "../"))
         ):
