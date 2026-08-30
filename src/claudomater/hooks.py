@@ -398,7 +398,9 @@ _GLUED_COMMAND = re.compile(
 # all move the cwd; `echo cd`, `env cd`, `xargs cd` cannot). `!` is the
 # status-negation reserved word — rejecting it resolved a later relative
 # write against the STALE pre-cd cwd (false deny).
-_TRANSPARENT_PREFIX_WORD = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=\S*|\d*[<>]\S*|&>\S*|-\S*")
+# Words are pre-tokenized on UNESCAPED whitespace, so `.*` here: an
+# escaped blank is part of the word (`MODE=a\ b` is ONE assignment).
+_TRANSPARENT_PREFIX_WORD = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=.*|\d*[<>].*|&>.*|-.*")
 _CD_WRAPPERS = frozenset({"command", "builtin", "time", "!"})
 # A redirect operator with NO glued operand (`>`, `2>>`, `>&`, `&>`) takes
 # the NEXT word as its file — `> /dev/null cd <root>` redirects and then
@@ -765,7 +767,21 @@ def resolved_bash_targets(
                     continue
                 break
             s -= 1
-        words = scannable[s:pos].split()
+        # split on UNESCAPED whitespace only: `MODE=a\ b` is ONE assignment
+        # word — str.split() shattered it and the stray fragment read as a
+        # command word, so the real cd neither tracked nor voided (stale
+        # cwd, false deny)
+        words: list[str] = []
+        word_start = -1
+        for j in range(s, pos):
+            if scannable[j] in " \t\n" and _escape_parity(scannable, j) == 0:
+                if word_start >= 0:
+                    words.append(scannable[word_start:j])
+                    word_start = -1
+            elif word_start < 0:
+                word_start = j
+        if word_start >= 0:
+            words.append(scannable[word_start:pos])
         k = 0
         while k < len(words):
             w = words[k]

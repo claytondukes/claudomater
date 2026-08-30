@@ -553,6 +553,24 @@ class TestBashFence:
             allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
             assert allow, (cmd, reason)
 
+    def test_escaped_whitespace_in_prefix_words_stays_one_word(self, tmp_path):
+        """`MODE=a\\ b cd <dir>` is one assignment word and the cd RUNS —
+        str.split() shattered it, the stray fragment read as a command
+        word, and the un-voided stale /etc falsely denied the in-root
+        scratch write. An escaped BACKSLASH before the blank
+        (`MODE=a\\\\ b`) really ends the word: b is the command and its
+        argument cd must leave tracking alone."""
+        (tmp_path / "server").mkdir()
+        cmd = f"cd /etc; MODE=a\\ b cd {tmp_path}/server; cat > ../.omater/scratch/x"
+        p = payload("Bash", command=cmd)
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+        p = payload("Bash", command="cd /etc; MODE=a\\\\ b cd; cat > passwd")
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+
     def test_spaced_redirect_prefix_keeps_cd_at_command_position(self, tmp_path):
         """`> /dev/null cd <dir>` redirects and then RUNS cd — checking
         the spaced operand as an independent command word rejected the
