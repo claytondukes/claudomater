@@ -395,18 +395,7 @@ class RunLog:
           empty-reasons death. Resume it (phase-spawn / control-resume) or
           abort it."""
         with self._append_lock():
-            discarded = self._repair_torn_tail()
-            if discarded:
-                # the repair is itself history: a crash artifact was here
-                self._append_event(
-                    "run", "torn-tail-repaired", {"discarded_bytes": discarded}
-                )
-            events = self.events()
-            if events and events[-1]["event"] in TERMINAL_EVENTS:
-                raise RunError(
-                    f"run {self.run_id} has ended; no further events can be "
-                    "appended — post-mortem history must not grow"
-                )
+            events = self._repaired_live_events()
             if event == "run-failed" and _is_parked(events):
                 raise RunError(
                     f"run {self.run_id} is parked (live-and-waiting), not "
@@ -414,6 +403,29 @@ class RunLog:
                     "recreates the Epic 9 empty-reasons death"
                 )
             return self._append_event(phase, event, detail, story_key)
+
+    def _repaired_live_events(self) -> list[dict[str, Any]]:
+        """Call under the append lock: repair the torn tail, validate the
+        REPAIRED prefix is live, and only then record the repair marker.
+        Order matters — the marker is itself an append, and recording it
+        before the terminal check let a torn fragment AFTER a terminal
+        record smuggle the marker in as the new last event, reopening
+        post-mortem history. On an ended run the truncation still happens
+        (restoring disk to what reads already said) but nothing is recorded
+        and the append is refused."""
+        discarded = self._repair_torn_tail()
+        events = self.events()
+        if events and events[-1]["event"] in TERMINAL_EVENTS:
+            raise RunError(
+                f"run {self.run_id} has ended; no further events can be "
+                "appended — post-mortem history must not grow"
+            )
+        if discarded:
+            # the repair is itself history: a crash artifact was here
+            self._append_event(
+                "run", "torn-tail-repaired", {"discarded_bytes": discarded}
+            )
+        return events
 
     def _append_event(
         self,
@@ -572,17 +584,13 @@ class RunLog:
         # still land in control.jsonl even though the event append raised.
         # _append_event, not event(): flock does not re-enter in-process.
         with self._append_lock():
-            discarded = self._repair_torn_tail()
-            if discarded:
-                self._append_event(
-                    "run", "torn-tail-repaired", {"discarded_bytes": discarded}
-                )
-            events = self.events()
-            if events and events[-1]["event"] in TERMINAL_EVENTS:
+            try:
+                self._repaired_live_events()
+            except RunError:
                 raise RunError(
                     f"run {self.run_id} already ended; control {action!r} has "
                     "nothing to act on — start a new run instead"
-                )
+                ) from None
             with open(self.run_dir / CONTROL_JSONL, "a", encoding="utf-8") as fh:
                 fh.write(json.dumps(record, sort_keys=True) + "\n")
                 fh.flush()

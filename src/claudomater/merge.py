@@ -104,6 +104,14 @@ _PASSED_CLAIM = re.compile(_COUNT + r"\s+(?:tests?\s+)?passed\b", re.IGNORECASE)
 _SUITE_CLAIM = re.compile(
     r"\bsuite\s+" + _COUNT + r"(?:\s*(?:->|→)\s*" + _COUNT + r")?", re.IGNORECASE
 )
+# An explicitly historical count is not a claim about NOW: "557 passed
+# (was 381 passed)" cites its baseline the way the arrow grammar's left side
+# does. History markers are matched immediately before the count; quoted
+# citations of old claims are deliberately NOT exempted — a genuinely stale
+# claim can sit in quotes too, so those stay with the caller's judgment.
+_HISTORY_MARKER = re.compile(
+    r"\b(?:was|were|previously|formerly|from)\s*[:(]?\s*$", re.IGNORECASE
+)
 
 
 def stale_numeric_claims(text: str, tests_passed: int) -> list[str]:
@@ -126,6 +134,8 @@ def stale_numeric_claims(text: str, tests_passed: int) -> list[str]:
 
     claims: list[tuple[int, int, str, int]] = []  # (start, end, quoted, claimed)
     for m in _PASSED_CLAIM.finditer(text):
+        if _HISTORY_MARKER.search(text, 0, m.start()):
+            continue  # "was 381 passed": a cited baseline, not a claim
         claims.append((m.start(), m.end(), m.group(0), int(m.group(1).replace(",", ""))))
     for m in _SUITE_CLAIM.finditer(text):
         current = m.group(2) or m.group(1)  # arrow form: the right side is current

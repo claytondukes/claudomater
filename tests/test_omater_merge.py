@@ -55,6 +55,20 @@ class TestStaleNumericClaims:
         numbers carry no count claim to verify."""
         assert stale_numeric_claims("all tests passed; CI green; 42 files", 7) == []
 
+    def test_explicitly_historical_counts_are_not_claims(self):
+        """Round-6 finding: '557 passed (was 381 passed)' cited its baseline
+        the way the arrow grammar's left side does, but the generic matcher
+        flagged it. History markers (was/were/previously/formerly/from)
+        immediately before a count exempt it; quoted citations of old claims
+        deliberately do NOT — a genuinely stale claim can sit in quotes."""
+        text = "Full suite: 557 passed (was 381 passed)."
+        assert stale_numeric_claims(text, 557) == []
+        (msg,) = stale_numeric_claims(text, 560)
+        assert '"557 passed"' in msg and "381" not in msg
+        assert stale_numeric_claims(
+            "previously 100 tests passed; now suite 200", 200
+        ) == []
+
     def test_malformed_comma_forms_are_not_claims(self):
         """Round-1 finding: '1,2 passed' read as a claim of 12, and partial
         matches inside malformed digit runs could claim their tail. A count

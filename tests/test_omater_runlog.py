@@ -517,6 +517,28 @@ class TestPark:
         with pytest.raises(RunError, match="ended"):
             log.park("too late")
 
+    def test_torn_fragment_after_the_terminal_record_cannot_reopen_the_run(
+        self, tmp_path
+    ):
+        """Round-6 finding (thread + suppressed twin): the repair marker is
+        itself an append, and recording it BEFORE the terminal check let a
+        torn fragment after run-complete smuggle the marker in as the new
+        last event — reopening post-mortem history through the very
+        mechanism meant to protect it. Truncate, validate the repaired
+        prefix, only then record."""
+        log = RunLog.create(tmp_path)
+        log.finish("run-complete")
+        with open(log.run_dir / "events.jsonl", "a", encoding="utf-8") as fh:
+            fh.write('{"ts": "2026-08-30T00:00:00Z", "event": "phase-ver')
+        with pytest.raises(RunError, match="post-mortem"):
+            log.event("dev", "phase-spawn", {"model": "m", "attempt": 1})
+        with pytest.raises(RunError, match="nothing to act on"):
+            log.write_control("resume")
+        names = [e["event"] for e in log.events()]
+        assert names[-1] == "run-complete"  # the marker did not reopen it
+        assert not log.is_live()
+        assert log.read_controls() == []
+
     def test_no_handle_may_append_after_the_run_ends(self, tmp_path):
         """Round-5 finding: terminal enforcement was scoped to attach()
         handles, but ownership does not make post-mortem history safe — the
