@@ -553,6 +553,15 @@ class TestBashFence:
             allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
             assert allow, (cmd, reason)
 
+    def test_function_definition_inside_a_subshell_is_dead(self, tmp_path):
+        """`(f() { touch /tmp_probe/x; }; true)` only DEFINES f — the
+        subshell-anchored definition must dead-span its body like any
+        other (the never-executed absolute write was falsely denied)."""
+        p = payload("Bash", command="(f() { touch /tmp_probe/x; }; true)")
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+
     def test_flagged_declare_assignments_are_effective(self, tmp_path):
         """`declare -x HOME=<root>` really assigns — missing the option
         words resolved ~ under the stale home (false deny)."""

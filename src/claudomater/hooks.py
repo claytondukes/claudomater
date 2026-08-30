@@ -792,7 +792,10 @@ _COMPOUND = re.compile(
 # (`cd /etc; f() { ... }` — dropping it lost the applied cd)
 _FUNC_DEF = re.compile(
     r"(?:^|[\n;&|(])\s*(?P<kw>function\b)"
-    r"|(?:^|[\n;&|])\s*(?P<fn>[A-Za-z_][A-Za-z0-9_]*[ \t]*\([ \t]*\)[ \t]*[({])"
+    # `(` anchors too: a definition inside a subshell (`(f() { ... };
+    # true)`) is still just a definition — missing it falsely denied the
+    # never-executed body write
+    r"|(?:^|[\n;&|(])\s*(?P<fn>[A-Za-z_][A-Za-z0-9_]*[ \t]*\([ \t]*\)[ \t]*[({])"
 )
 # the body opener of a `function name [()] { ...` form
 _FUNCTION_KW_BODY = re.compile(
