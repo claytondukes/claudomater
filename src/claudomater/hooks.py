@@ -1045,9 +1045,14 @@ def resolved_bash_targets(
         # directory — for BOTH stack builtins the cwd genuinely stays put
         # (checked before the generic popd-unknown). A trailing `-n` with no
         # operand lands in the TARGET slot (the flags group needs a trailing
-        # space), so check both.
+        # space), so check both — UNLESS a `--` terminator was consumed:
+        # `pushd -- -n` enters a directory NAMED -n, and reading it as the
+        # option kept a stale cwd that falsely denied an in-root write
+        # (the dash-target branch below fails open instead).
+        flag_words = flags.split()
         if verb in ("pushd", "popd") and (
-            "-n" in flags.split() or str(target or "") == "-n"
+            "-n" in flag_words
+            or (str(target or "") == "-n" and "--" not in flag_words)
         ):
             continue
         letters = "".join(re.findall(r"-([A-Za-z]+)", flags))

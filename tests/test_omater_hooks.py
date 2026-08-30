@@ -553,6 +553,21 @@ class TestBashFence:
             allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
             assert allow, (cmd, reason)
 
+    def test_dashdash_makes_target_slot_dash_n_an_operand(self, tmp_path):
+        """`pushd -- -n` enters a directory NAMED -n (the -- terminator
+        ends options) — reading it as the no-chdir option kept a stale
+        cwd and falsely denied the in-root scratch write; the dash-target
+        branch fails open instead. A real `pushd -n` (option) still
+        keeps the cwd tracked (and denying)."""
+        p = payload("Bash", command="pushd -- -n; cat > ../.omater/scratch/x")
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+        p = payload("Bash", command="cd /etc; pushd -n; cat > passwd")
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+
     def test_span_containment_lookups_stay_subquadratic(self, tmp_path):
         """Target filtering, the residual-<< wall skip, and the
         arithmetic cd checks each rescanned the full span list per item —
