@@ -1613,6 +1613,13 @@ def resolved_bash_targets(
             # drop this assignment's value, then any further assignment
             # words; a remaining word is the prefixed COMMAND
             tail = re.sub(r"^[^\s;|&<>()]*", "", tail)
+            if tail.startswith("("):
+                # the value carries a substitution (`HOME=$(pwd)`): its
+                # extent is unparseable — classify PERSISTENT so later ~
+                # resolution fails open instead of resolving through the
+                # hook's stale value (false deny)
+                ranges.append((am.end(), len(scannable)))
+                continue
             tail = re.sub(
                 r"^(?:[ \t]+[A-Za-z_][A-Za-z0-9_]*=[^\s;|&<>()]*)*", "", tail
             )
@@ -1653,6 +1660,7 @@ def resolved_bash_targets(
     dead = False  # hard opacity: no cd may recover tracking anymore
     walled = False  # unparseable remainder: even absolute targets fail open
     physical_mode: bool | None = False  # bash default -L; None = unknowable
+    env_unknown = False  # a csopaque may have changed HOME/CDPATH
     out: list[tuple[str, Path | None]] = []
     for _pos, kind, value in events:
         if kind == "target":
@@ -1663,7 +1671,7 @@ def resolved_bash_targets(
                 out.append((raw, None))
                 continue
             if _resolved_target(raw) is None or (
-                raw.startswith("~") and _in_home_range(_pos)
+                raw.startswith("~") and (env_unknown or _in_home_range(_pos))
             ):
                 out.append((raw, None))
             elif Path(os.path.expanduser(raw)).is_absolute():
@@ -1690,14 +1698,15 @@ def resolved_bash_targets(
             continue
         if kind == "csopaque":
             # CURRENT-shell opacity (source/eval, expanded command words,
-            # function invocations): the unseen code can flip `set -P`
-            # too — keeping the mode let a later absolute cd recover
-            # tracking under a stale logical/physical assumption and
-            # misresolve `..` through symlinks. Subshell opacity (parens,
-            # backticks) cannot touch the parent's mode and stays plain.
+            # function invocations): the unseen code can flip `set -P`,
+            # HOME, and CDPATH too — keeping any of them let later
+            # resolution run on stale state (a sourced HOME=<root> made
+            # `> ~/out` a false deny). Subshell opacity (parens,
+            # backticks) cannot touch the parent's state and stays plain.
             current = None
             cd_applied_in_list = False
             physical_mode = None
+            env_unknown = True
             continue
         if kind == "orelse":
             # the RHS of || runs exactly when something failed — possibly a
@@ -1785,7 +1794,7 @@ def resolved_bash_targets(
             # entry this scan cannot know. All -> unknown, fail open.
             current = None
             continue
-        if target.startswith("~") and _in_home_range(_pos):
+        if target.startswith("~") and (env_unknown or _in_home_range(_pos)):
             # same stale-HOME rule as write targets: `HOME=<root>; cd ~`
             # returns IN-root while expanduser tracked the old home
             current = None
@@ -1818,7 +1827,7 @@ def resolved_bash_targets(
         if step.is_absolute():
             new_cwd = str(step)
         elif (
-            cdpath_env or _in_cdpath_range(_pos)
+            cdpath_env or env_unknown or _in_cdpath_range(_pos)
         ) and not (
             target in (".", "..") or target.startswith(("./", "../"))
         ):

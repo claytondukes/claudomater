@@ -553,6 +553,30 @@ class TestBashFence:
             allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
             assert allow, (cmd, reason)
 
+    def test_substitution_valued_home_fails_open(self, tmp_path):
+        """`HOME=$(pwd); echo > ~/out` assigns an unparseable value — no
+        range was recorded and the later ~ resolved through the hook's
+        stale home (false deny). Unknown extent classifies persistent:
+        fail open."""
+        p = payload("Bash", command="HOME=$(pwd); echo hi > ~/out.txt")
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+
+    def test_current_shell_opacity_makes_env_unknown(self, tmp_path):
+        """A sourced script can reassign HOME: after `source x.sh`,
+        `> ~/out` may expand under the CHANGED home — resolving through
+        the hook's stale value falsely denied it. Without the source,
+        ~ keeps resolving (and denying)."""
+        p = payload("Bash", command="source x.sh; echo hi > ~/out.txt")
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+        p = payload("Bash", command="echo hi > ~/omater-probe8.txt")
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+
     def test_dd_requires_a_token_boundary(self, tmp_path):
         """`dd-not of=/f` is not dd — \\b fired after the hyphen and
         falsely denied a write dd never performs. Real dd keeps
