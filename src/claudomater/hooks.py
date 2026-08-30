@@ -52,9 +52,15 @@ AGENT_ENV = "OMATER_PHASE_AGENT"
 def fence_active(env: dict[str, str] | None = None) -> bool:
     """True only inside an omater-spawned phase agent's session. The hook
     process inherits the Claude session's environment, so a human session
-    (no marker) reads False and the fence stays inert for it."""
+    (no marker) reads False and the fence stays inert for it. STRICT
+    equality with the canonical value: the executor is the marker's only
+    legitimate writer and it writes exactly "1" - a stray non-canonical
+    value (OMATER_PHASE_AGENT=0 exported by hand, say) must read as NOT an
+    agent, because accidentally fencing a human is the P1-1 defect while a
+    disarmed fence for a mislabeled agent is only a lost seatbelt, backed
+    by verifiers and permission_denials accounting."""
     source = env if env is not None else os.environ
-    return bool(source.get(AGENT_ENV))
+    return source.get(AGENT_ENV) == "1"
 
 # Paths that are never a stall risk.
 _ALWAYS_ALLOWED = ("/dev/null", "/dev/stdout", "/dev/stderr", "/dev/tty")
@@ -2088,6 +2094,7 @@ def verify(project_root: Path | str, require: bool = True) -> list[str]:
     elif entry != _our_entry():
         problems.append(
             "write-fence PreToolUse hook drifted from the provisioned form — "
-            "re-arm it (provision) or remove it (teardown)"
+            "remove it with `omater teardown` (the next `omater start` "
+            "re-arms the canonical hook)"
         )
     return problems

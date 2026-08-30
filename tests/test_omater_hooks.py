@@ -2614,6 +2614,53 @@ class TestFenceScopeP11:
         assert hooks.fence_active({"OMATER_PHASE_AGENT": "1"}) is True
         assert hooks.fence_active({"OMATER_PHASE_AGENT": ""}) is False
 
+    def test_fence_active_is_strict_about_the_canonical_value(self):
+        """Copilot round-1 finding: bool() semantics made ANY non-empty
+        value activate the fence - a hand-exported OMATER_PHASE_AGENT=0
+        would fence a human session (the P1-1 defect, via a side door).
+        The executor writes exactly "1"; everything else reads inactive."""
+        for stray in ("0", "false", "yes", "true", " 1"):
+            assert hooks.fence_active({"OMATER_PHASE_AGENT": stray}) is False, stray
+
+    def test_drift_message_names_a_real_command(self, tmp_path):
+        """Copilot round-1 finding: the drift message said 're-arm it
+        (provision)' but no `omater provision` command exists. Remediation
+        must name the real CLI: `omater teardown` (start re-arms)."""
+        hooks.provision(tmp_path)
+        path = hooks.settings_path(tmp_path)
+        drifted = json.loads(path.read_text())
+        drifted["hooks"]["PreToolUse"][0]["matcher"] = "Write"
+        path.write_text(json.dumps(drifted), encoding="utf-8")
+        (problem,) = hooks.verify(tmp_path, require=False)
+        assert "omater teardown" in problem
+
+    def test_failed_start_does_not_leave_the_fence_armed(self, tmp_path, omater_on_path):
+        """Copilot round-1 finding (suppressed): start_run armed the fence
+        BEFORE the drift check and raised without rollback, leaving the
+        run-scoped hook installed with no run live. A failed start now
+        disarms - unless a LIVE run exists, which owns the fence."""
+        import pytest
+
+        from claudomater.run import start_run
+        from claudomater.runlog import RunError
+
+        # no .omater.yaml -> drift refusal; the fence must not stay behind
+        with pytest.raises(RunError, match="drift"):
+            start_run(tmp_path)
+        settings_file = hooks.settings_path(tmp_path)
+        assert (
+            not settings_file.exists()
+            or hooks._find_entry(json.loads(settings_file.read_text())) is None
+        )
+        # with a LIVE run holding the fence, a conflicting second start
+        # fails but must NOT disarm the live run's fence
+        run_init(tmp_path)
+        log, _cfg = start_run(tmp_path)
+        with pytest.raises(RunError):
+            start_run(tmp_path)  # one-live-run conflict
+        assert hooks.verify(tmp_path, require=True) == []
+        log.finish("run-aborted", {"reason": "test cleanup"})
+
     def test_executor_injects_the_agent_marker(self, monkeypatch):
         """The ONLY source of the marker is the phase executor - a human
         session can never carry it by accident of inheritance from the

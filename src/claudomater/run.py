@@ -31,12 +31,24 @@ def start_run(
         hooks.provision(root)  # arm the run-scoped fence (idempotent)
     except hooks.HookProvisionError as exc:
         raise RunError(f"cannot arm the write fence: {exc}") from exc
-    problems = initcmd.run_verify(root) + hooks.verify(root, require=True)
-    if problems:
-        raise RunError(
-            "refusing to start a run with provisioning drift: " + "; ".join(problems)
-        )
-    cfg = load_project_config(root)
-    log = RunLog.create(root, run_id=run_id)
+    try:
+        problems = initcmd.run_verify(root) + hooks.verify(root, require=True)
+        if problems:
+            raise RunError(
+                "refusing to start a run with provisioning drift: "
+                + "; ".join(problems)
+            )
+        cfg = load_project_config(root)
+        log = RunLog.create(root, run_id=run_id)
+    except BaseException:
+        # A start that FAILS must not leave the fence armed - the lifecycle
+        # is "exists only while a run is live". One exception: when the
+        # failure is the one-live-run conflict (or anything else while a
+        # live run exists), that run owns the fence and it must stay.
+        try:
+            RunLog.attach(root)  # raises unless a live run exists
+        except RunError:
+            hooks.deprovision(root)
+        raise
     log.event("run", "policy", cfg.policy())
     return log, cfg
