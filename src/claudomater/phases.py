@@ -147,6 +147,11 @@ class ClaudeCliExecutor:
     ) -> ExecutionResult:
         proc = subprocess.Popen(
             self.build_argv(spec, model),
+            # DEVNULL, not inherited: with a live inherited stdin the CLI
+            # waits 3s for piped data and warns on stderr (measured in the
+            # Phase 0.5 smoke); behavior varied by host process. The prompt
+            # travels in argv — the child never needs stdin.
+            stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -228,7 +233,7 @@ class ClaudeCliExecutor:
             # a lone result object IS the full output, not a session stream
             transcript=stdout if object_lines > 1 else None,
             cost_usd=final.get("total_cost_usd"),
-            model_usage=final.get("modelUsage"),
+            model_usage=_used_models(final.get("modelUsage")),
             permission_denials=final.get("permission_denials"),
         )
 
@@ -434,6 +439,65 @@ def salvage_uncommitted(project_root: Path, message: str = "wip(phase-crash)") -
         _unstage()
         return False
     return True
+
+
+# modelUsage consumption counters (documented CLI envelope fields) vs
+# capacity descriptors. A row is dropped only on the strength of fields we
+# positively recognize — the same deny-on-recognized posture as the fence.
+_CONSUMPTION_FIELDS = frozenset(
+    {
+        "inputTokens",
+        "outputTokens",
+        "cacheCreationInputTokens",
+        "cacheReadInputTokens",
+        "webSearchRequests",
+        "costUSD",
+    }
+)
+_CAPACITY_FIELDS = frozenset({"contextWindow", "maxOutputTokens"})
+
+
+def _is_number(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _used_models(model_usage: Any) -> Any:
+    """Drop modelUsage rows for models the run never actually consumed —
+    configured-but-unused entries are noise in cost rollups. A row is
+    dropped only when it carries at least one KNOWN consumption counter,
+    every known counter is zero, and no unrecognized numeric field is
+    present (an unknown numeric might be consumption under a future CLI
+    schema — retain rather than guess). Rows with any real consumption stay
+    untouched (the CLI's internal fast-path models carry small but real
+    cost), and unknown shapes pass through unfiltered."""
+    if not isinstance(model_usage, dict):
+        return model_usage
+    kept: dict[str, Any] = {}
+    for model, stats in model_usage.items():
+        if not isinstance(stats, dict):
+            kept[model] = stats
+            continue
+        known = [
+            v for k, v in stats.items() if k in _CONSUMPTION_FIELDS and _is_number(v)
+        ]
+        unknown_numeric = any(
+            k not in _CONSUMPTION_FIELDS and k not in _CAPACITY_FIELDS and _is_number(v)
+            for k, v in stats.items()
+        )
+        # a recognized counter in an unrecognized shape ({"inputTokens":
+        # "5"}) means the zeros we CAN read do not establish "unused"
+        malformed_known = any(
+            k in _CONSUMPTION_FIELDS and not _is_number(v) for k, v in stats.items()
+        )
+        if (
+            known
+            and not unknown_numeric
+            and not malformed_known
+            and all(v == 0 for v in known)
+        ):
+            continue
+        kept[model] = stats
+    return kept or None
 
 
 def _tail(text: str, limit: int = 500) -> str:

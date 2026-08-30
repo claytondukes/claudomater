@@ -20,7 +20,15 @@ USER_CONFIG_PATH = Path("~/.omater/config.yaml")
 
 DEPLOYMENT_TYPES = ("sandbox", "internal", "production", "mission-critical")
 FORGES = ("github", "bitbucket")
-MODEL_ROLES = ("orchestrator", "create", "dev", "sr_review", "merge", "escalation")
+MODEL_ROLES = (
+    "orchestrator",
+    "create",
+    "dev",
+    "sr_review",
+    "merge",
+    "escalation",
+    "lessons",  # the close pass (rev: Phase 0.5 rough edge #3 — it had no knob)
+)
 
 MODEL_FABLE = "claude-fable-5"
 MODEL_OPUS = "claude-opus-5"
@@ -50,6 +58,7 @@ DEPLOYMENT_POLICY: dict[str, dict[str, Any]] = {
             "sr_review": SKIP,
             "merge": MODEL_SONNET,
             "escalation": MODEL_FABLE,
+            "lessons": SKIP,  # sandbox has no close pass
         },
         "review_floor": "CRITICAL",
         "red_green": "no",
@@ -65,6 +74,7 @@ DEPLOYMENT_POLICY: dict[str, dict[str, Any]] = {
             "sr_review": MODEL_OPUS,
             "merge": MODEL_OPUS,
             "escalation": MODEL_FABLE,
+            "lessons": MODEL_OPUS,
         },
         "review_floor": "MUST-FIX",
         "red_green": "behavioral",
@@ -80,6 +90,7 @@ DEPLOYMENT_POLICY: dict[str, dict[str, Any]] = {
             "sr_review": MODEL_FABLE,
             "merge": MODEL_FABLE,
             "escalation": MODEL_FABLE,
+            "lessons": MODEL_OPUS,  # distillation does not need the top tier
         },
         "review_floor": "SHOULD-FIX",
         "red_green": "yes",
@@ -95,6 +106,9 @@ DEPLOYMENT_POLICY: dict[str, dict[str, Any]] = {
             "sr_review": MODEL_FABLE,
             "merge": MODEL_FABLE,
             "escalation": MODEL_FABLE,
+            # feeds always-loaded rules + runs beside the blind post-merge
+            # review at this tier — strongest model
+            "lessons": MODEL_FABLE,
         },
         "review_floor": "NOTE",
         "red_green": "yes+mutation",

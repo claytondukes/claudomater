@@ -138,6 +138,36 @@ class TestProjectConfig:
             for key in ("models", "review_floor", "red_green", "ci_on_push"):
                 assert key in policy, f"{dt} missing {key}"
 
+    def test_lessons_close_pass_has_a_model_role(self, tmp_path):
+        """Phase 0.5 rough edge #3: the close pass had no knob, so the
+        rehearsal driver had to borrow `orchestrator`. Every deployment
+        type resolves `lessons` (SKIP at sandbox — run_phase turns a skip
+        model into phase-skipped, so drivers call the phase unconditionally),
+        and it is overridable like any other role."""
+        from claudomater.config import MODEL_ROLES
+
+        assert "lessons" in MODEL_ROLES
+        expectations = {
+            "sandbox": SKIP,
+            "internal": MODEL_OPUS,
+            "production": MODEL_OPUS,
+            "mission-critical": MODEL_FABLE,
+        }
+        for dtype, expected in expectations.items():
+            cfg = load_project_config(
+                write_project(tmp_path, f"project: x\ndeployment_type: {dtype}\n")
+            )
+            assert cfg.model_for("lessons") == expected, dtype
+            assert cfg.policy()["models"]["lessons"] == expected, dtype
+        override = load_project_config(
+            write_project(
+                tmp_path,
+                "project: x\ndeployment_type: internal\n"
+                "models:\n  lessons: claude-sonnet-5\n",
+            )
+        )
+        assert override.model_for("lessons") == "claude-sonnet-5"
+
     def test_non_mapping_sections_are_config_errors(self, tmp_path):
         """merge: off (a string) must be a ConfigError at load, never an
         AttributeError traceback — fail loudly at load is the contract."""

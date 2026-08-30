@@ -239,6 +239,2262 @@ class TestBashFence:
             )
             assert allow, cmd
 
+    def test_relative_target_honors_in_command_cd(self, tmp_path):
+        """The Phase 0.5 measured false deny: `cd <root>/server && cat >
+        ../.omater/scratch/x` resolved the redirect against the SESSION cwd
+        (repo root) instead of server/, landing one level ABOVE the repo —
+        denied, though the real target was in-root scratch."""
+        (tmp_path / "server").mkdir()
+        cmd = f"cd {tmp_path}/server && cat > ../.omater/scratch/probe.py"
+        p = payload("Bash", command=cmd)
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+
+    def test_cd_tracking_also_catches_true_out_of_tree_writes(self, tmp_path):
+        """The same tracking that fixes the false deny makes the deny
+        smarter: a relative write after cd-ing out of the tree is now a
+        RECOGNIZED out-of-tree write."""
+        cmd = "cd /etc && cat > passwd"
+        p = payload("Bash", command=cmd)
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+
+    def test_untrackable_cwd_fails_open_never_falsely_denies(self, tmp_path):
+        """Deny-on-recognized: when the effective cwd is unknowable, a
+        RELATIVE target is not a recognized out-of-tree write — allow."""
+        for cmd in (
+            "cd $BUILD_DIR && cat > out.txt",  # variable cd target
+            'cd "some dir" && cat > out.txt',  # quoted cd target (placeholder)
+            "cd - && cat > out.txt",  # OLDPWD
+            "pushd /tmp && popd && cat > out.txt",  # popd
+            "(cd /tmp && echo hi) && cat > out.txt",  # subshell scoping
+            "cd $(mktemp -d) && cat > out.txt",  # command substitution
+            "cd /etc | cat > out.txt",  # pipeline segment = subshell
+            "cd /etc & cat > out.txt",  # backgrounded cd = subshell
+            "false || cd /etc; cat > out.txt",  # ||-guarded: conditional
+            "cd /definitely-missing || cat > out.txt",  # || RHS = cd FAILED
+            "cd /etc >/dev/null & cat > out.txt",  # redirect hid the `&`
+        ):
+            p = payload("Bash", command=cmd)
+            p["cwd"] = str(tmp_path)
+            allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+            assert allow, (cmd, reason)
+
+    def test_absolute_targets_deny_regardless_of_cwd_tracking(self, tmp_path):
+        """Losing the cwd must not disarm the fence for absolute targets."""
+        cmd = "cd $BUILD_DIR && cat > /tmp_probe/evil.txt"
+        p = payload("Bash", command=cmd)
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+
+    def test_relative_cd_chain_tracks_and_write_inside_subshell_denies(self, tmp_path):
+        (tmp_path / "a" / "b").mkdir(parents=True)
+        # chained relative cds stay in-tree -> allowed
+        p = payload("Bash", command="cd a && cd b && cat > out.txt")
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+        # a write INSIDE `(cd /tmp && ...)` is linearly tracked -> denied
+        p = payload("Bash", command="(cd /tmp_probe && cat > evil.txt)")
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+
+    def test_redirect_on_the_cd_command_itself_is_pre_cd(self, tmp_path):
+        """Bash opens redirections BEFORE running the builtin: `cd /etc >
+        cd.log` creates ./cd.log in the pre-cd cwd. Resolving it post-cd
+        falsely denied an in-tree write."""
+        p = payload("Bash", command="cd /etc > cd.log")
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+        # ...while a target in the NEXT segment is post-cd and still denies
+        p = payload("Bash", command="cd /etc > cd.log && cat > shadow")
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+
+    def test_pushd_n_does_not_move_the_cwd(self, tmp_path):
+        """pushd -n updates the directory stack only — the cwd stays put, so
+        a following relative write is still in-tree (was a false deny)."""
+        p = payload("Bash", command="pushd -n /etc && cat > out.txt")
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+        # plain pushd still tracks
+        p = payload("Bash", command="pushd /etc && cat > out.txt")
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+
+    def test_redirect_does_not_stop_cd_from_applying_across_and_and(self, tmp_path):
+        """`cd /etc >/dev/null && cat > x`: the redirect belongs to the cd,
+        but the && boundary still applies the cd for the next segment."""
+        p = payload("Bash", command="cd /etc >/dev/null && cat > x")
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+
+    def test_comment_text_is_not_scanned_as_commands(self, tmp_path):
+        """`cd <root>/server # note; cd /etc` — bash ignores everything from
+        the unquoted `#`; scanning it applied the /etc cd and falsely denied
+        the in-root scratch write."""
+        (tmp_path / "server").mkdir()
+        cmd = (
+            f"cd {tmp_path}/server # note; cd /etc\n"
+            "cat > ../.omater/scratch/x"
+        )
+        p = payload("Bash", command=cmd)
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+        # a hash inside a word is NOT a comment: the redirect still denies
+        p = payload("Bash", command="cat > /tmp_probe/file#1")
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+
+    def test_comment_after_a_metacharacter_is_a_comment_too(self, tmp_path):
+        """`echo ok;# ignored > /etc/x` — the # after `;` starts a comment;
+        scanning its text falsely denied a redirect bash never executes."""
+        p = payload("Bash", command="echo ok;# ignored > /etc/x\ncat > out.txt")
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+
+    def test_cdpath_makes_bare_relative_cd_targets_untrackable(self, tmp_path):
+        """CDPATH rewires where `cd target` lands (search path, not cwd) —
+        one-shot prefix or inherited env. Bare relative cd targets go
+        unknown (fail open); ./-anchored and absolute targets bypass CDPATH
+        per bash and keep tracking (and denying)."""
+        (tmp_path / "server").mkdir()
+        # one-shot prefix: tracker must NOT assume <root>/target
+        p = payload("Bash", command="CDPATH=/tmp_probe cd target && cat > out.txt")
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+        # inherited CDPATH: same rule via env
+        env = {"CDPATH": "/tmp_probe"}
+        p = payload("Bash", command="cd server && cat > out.txt")
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path, env=env)
+        assert allow, reason
+        # absolute cd is CDPATH-immune: still tracked, still denies
+        p = payload("Bash", command="cd /etc && cat > passwd")
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path, env=env)
+        assert not allow
+        # ./-anchored target bypasses CDPATH: tracked, in-root scratch allows
+        p = payload(
+            "Bash", command="cd ./server && cat > ../.omater/scratch/x"
+        )
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path, env=env)
+        assert allow, reason
+
+    def test_cd_needs_a_token_boundary(self, tmp_path):
+        """`cd/etc; cat > out.txt` runs a command NAMED cd/etc — bash stays
+        in the project root and out.txt is in-tree; parsing it as `cd /etc`
+        falsely denied the write."""
+        p = payload("Bash", command="cd/etc; cat > out.txt")
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+
+    def test_assignment_prefixed_cd_is_tracked(self, tmp_path):
+        """`MODE=x cd dir` legally prefixes the builtin — missing it would
+        re-open the original stale-cwd false deny with an env prefix."""
+        (tmp_path / "server").mkdir()
+        cmd = f"MODE=x cd {tmp_path}/server && cat > ../.omater/scratch/x"
+        p = payload("Bash", command=cmd)
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+        p = payload("Bash", command="MODE=x cd /etc && cat > passwd")
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+
+    def test_unrecognized_cd_forms_void_tracking_not_silently_ignored(self, tmp_path):
+        """Invariant: every cd-ish token either tracks correctly or voids
+        the cwd. An unmodeled form (quoted assignment value, `command cd`)
+        left silently untracked would resolve later relative targets against
+        a STALE cwd — the original false-deny shape."""
+        (tmp_path / "server").mkdir()
+        for cmd in (
+            f'MODE="a b" cd {tmp_path}/server && cat > ../.omater/scratch/x',
+            f"command cd {tmp_path}/server && cat > ../.omater/scratch/x",
+        ):
+            p = payload("Bash", command=cmd)
+            p["cwd"] = str(tmp_path)
+            allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+            assert allow, (cmd, reason)
+
+    def test_heredoc_introducer_inside_data_is_not_a_heredoc(self, tmp_path):
+        """A << inside a comment or quoted span starts no heredoc — eating
+        the following lines as a body hid a real out-of-tree write."""
+        for cmd in (
+            "echo ok # <<EOF\ncat > /tmp_probe/real\nEOF",
+            "echo '<<EOF'\ncat > /tmp_probe/real\nEOF",
+        ):
+            p = payload("Bash", command=cmd)
+            p["cwd"] = str(tmp_path)
+            allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+            assert not allow, cmd
+
+    def test_escaped_metachars_are_word_data_everywhere(self, tmp_path):
+        """Escaped separators/operators are arguments, not syntax:
+        `echo \\; cd /etc` never runs cd (false deny closed), and `echo \\&`
+        / `echo \\\\`` must not void a correctly tracked cwd (miss closed)."""
+        p = payload("Bash", command="echo \\; cd /etc; cat > out.txt")
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+        for cmd in (
+            "cd /etc; echo \\&; cat > passwd",
+            "cd /etc; echo \\`; cat > passwd",
+        ):
+            p = payload("Bash", command=cmd)
+            p["cwd"] = str(tmp_path)
+            allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+            assert not allow, cmd
+
+    def test_quote_inside_comment_cannot_swallow_executable_lines(self, tmp_path):
+        """Quotes and comments share ONE lexical state: a quote that is
+        comment text opens no span. Masking quotes before blanking comments
+        let `echo ok # "` swallow the following lines up to the next quote,
+        hiding a real out-of-tree write (false ALLOW) — top-level, after a
+        group-closing `)`, inside backticks, and via a `\\`-continuation
+        (a comment ends at its newline; the backslash is comment text)."""
+        for cmd in (
+            'echo ok # "\ncat > /tmp_probe/real\necho "done"',
+            '(echo ok)# "\ncat > /tmp_probe/real\necho "done"',
+            'echo `true # "`\ncat > /tmp_probe/real\necho "done"',
+            "echo ok # note \\\ncat > /tmp_probe/real",
+        ):
+            p = payload("Bash", command=cmd)
+            p["cwd"] = str(tmp_path)
+            allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+            assert not allow, cmd
+        # and the inverse stays fixed: a # inside quotes is data, so the
+        # redirect after the closing quote is still recognized
+        p = payload("Bash", command='echo "a # b" > /tmp_probe/real')
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+
+    def test_arithmetic_shift_and_here_string_are_not_heredocs(self, tmp_path):
+        """`$((1 << EOF))` is a shift and `<<<` a here-string — parsing
+        either as a heredoc introducer ate the following executable lines
+        as body (false ALLOW), and a shift raising the residual-<< wall
+        hid a real redirect on its own line."""
+        for cmd in (
+            "echo $((1 << EOF))\ncat > /tmp_probe/real\nEOF",
+            "cat <<<EOF\ncat > /tmp_probe/real\nEOF",
+            "echo $((1<<2)) > /tmp_probe/real",
+            "(( x << 2 ))\ncat > /tmp_probe/real\n2",
+        ):
+            p = payload("Bash", command=cmd)
+            p["cwd"] = str(tmp_path)
+            allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+            assert not allow, cmd
+
+    def test_heredoc_prepass_shares_the_lexers_data_rules(self, tmp_path):
+        """The heredoc pre-pass and the main lexer must agree on what is
+        data: an ANSI-C escaped quote ($'fake \\' <<EOF') and a comment
+        after a group-closing paren ((echo ok)# <<EOF) both make the
+        <<EOF data — a pre-pass missing either rule took it as a live
+        introducer and ate the next line's real write as heredoc body."""
+        for cmd in (
+            "echo $'fake \\' <<EOF'\ncat > /tmp_probe/real\nEOF",
+            "(echo ok)# <<EOF\ncat > /tmp_probe/real\nEOF",
+        ):
+            p = payload("Bash", command=cmd)
+            p["cwd"] = str(tmp_path)
+            allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+            assert not allow, cmd
+
+    def test_pure_arithmetic_parens_do_not_void_the_tracked_cwd(self, tmp_path):
+        """Arithmetic evaluation cannot move the shell's cwd: treating
+        `((x++))` / `$((x+1))` parens as opacity let `cd /etc; ((x++));
+        cat > passwd` resolve its relative write against a 'lost' cwd
+        (fail open = ALLOW). A nested command substitution inside the
+        arithmetic keeps the span's full opacity."""
+        for cmd in (
+            "cd /etc; ((x++)); cat > passwd",
+            "cd /etc; echo $((x+1)); cat > passwd",
+        ):
+            p = payload("Bash", command=cmd)
+            p["cwd"] = str(tmp_path)
+            allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+            assert not allow, cmd
+        p = payload("Bash", command="cd /etc; ((x = $(id -u) )); cat > passwd")
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason  # nested substitution: conservative fail open
+
+    def test_glob_write_targets_fail_open_never_falsely_deny(self, tmp_path):
+        """An unquoted glob/brace in a write target expands at RUNTIME:
+        from the parent dir, `> <roo>?/out.txt` can uniquely expand back
+        INTO the root while the literal text resolves out-of-tree — a
+        false deny. Same rule as cd targets: not a literal path, fail
+        open (absolute or relative)."""
+        glob_name = tmp_path.name[:-1] + "?"
+        for cmd in (
+            f"cd {tmp_path.parent} && echo x > {glob_name}/out.txt",
+            "echo x > /tmp_probe/rea?/out.txt",
+            "echo x > /tmp_probe/{a,b}/out.txt",
+        ):
+            p = payload("Bash", command=cmd)
+            p["cwd"] = str(tmp_path)
+            allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+            assert allow, (cmd, reason)
+
+    def test_substitution_valued_home_fails_open(self, tmp_path):
+        """`HOME=$(pwd); echo > ~/out` assigns an unparseable value — no
+        range was recorded and the later ~ resolved through the hook's
+        stale home (false deny). Unknown extent classifies persistent:
+        fail open."""
+        p = payload("Bash", command="HOME=$(pwd); echo hi > ~/out.txt")
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+
+    def test_current_shell_opacity_makes_env_unknown(self, tmp_path):
+        """A sourced script can reassign HOME: after `source x.sh`,
+        `> ~/out` may expand under the CHANGED home — resolving through
+        the hook's stale value falsely denied it. Without the source,
+        ~ keeps resolving (and denying)."""
+        p = payload("Bash", command="source x.sh; echo hi > ~/out.txt")
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+        p = payload("Bash", command="echo hi > ~/omater-probe8.txt")
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+
+    def test_dd_requires_a_token_boundary(self, tmp_path):
+        """`dd-not of=/f` is not dd — \\b fired after the hyphen and
+        falsely denied a write dd never performs. Real dd keeps
+        denying."""
+        p = payload("Bash", command="dd-not of=/tmp_probe/x")
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+        p = payload("Bash", command="dd if=/dev/zero of=/tmp_probe/x")
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+
+    def test_child_scope_assignments_do_not_persist(self, tmp_path):
+        """A pipeline, subshell, or backgrounded assignment runs in a
+        CHILD shell — the parent's HOME is unchanged and the later ~
+        write resolves under the original home (deny; each shape used to
+        fail open)."""
+        for cmd in (
+            "HOME=/tmp | true; echo hi > ~/omater-probe7.txt",
+            "(HOME=/tmp); echo hi > ~/omater-probe7.txt",
+            "HOME=/tmp & echo hi > ~/omater-probe7.txt",
+        ):
+            p = payload("Bash", command=cmd)
+            p["cwd"] = str(tmp_path)
+            allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+            assert not allow, cmd
+
+    def test_pipelined_function_definitions_do_not_register(self, tmp_path):
+        """`f() { :; } | true` defines f in the pipeline's subshell only
+        — the body's internal `;` fooled the boundary check, and voiding
+        on the later (undefined) f hid the recognized write."""
+        p = payload(
+            "Bash", command="f() { :; } | true; cd /etc; f; cat > passwd"
+        )
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+
+    def test_subshell_definitions_do_not_register_names(self, tmp_path):
+        """`(f() { :; }); cd /etc; f; cat > passwd` runs an UNDEFINED f —
+        the subshell definition never reaches the parent, and voiding on
+        the later call hid the recognized write. Parent-scope
+        definitions still void on invocation (existing test)."""
+        p = payload(
+            "Bash", command="(f() { :; }); cd /etc; f; cat > passwd"
+        )
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+
+    def test_stray_paren_rejects_direct_redirects_too(self, tmp_path):
+        """`) > /tmp_probe/x` is a syntax error: bash rejects the whole
+        input before opening the redirect — reporting the target
+        recreated the stray-paren false deny. Case-arm redirects keep
+        denying."""
+        p = payload("Bash", command=") > /tmp_probe/x")
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+        p = payload(
+            "Bash", command="case x in a) echo hi > /tmp_probe/x;; esac"
+        )
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+
+    def test_void_at_a_separator_applies_before_the_snapshot(self, tmp_path):
+        """`false && cd /etc; true & cat > out.txt`: the &&-guard's void
+        at the `;` belongs to the ENDING list — snapshotting first froze
+        /etc and the `&` restored it, falsely denying the root-relative
+        write."""
+        p = payload("Bash", command="false && cd /etc; true & cat > out.txt")
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+
+    def test_current_shell_opacity_invalidates_the_cd_mode(self, tmp_path):
+        """source/eval can flip `set -P` too: after one, an absolute cd
+        recovers the cwd but the MODE stays unknowable, so a flagless
+        `..` hop fails open instead of tracking a logical answer the
+        shell may not be in."""
+        [(_, resolved)] = hooks.resolved_bash_targets(
+            "source x.sh; cd /tmp && cd .. && cat > out.txt", tmp_path
+        )
+        assert resolved is None
+
+    def test_unmatched_paren_outside_case_is_a_syntax_error(self, tmp_path):
+        """`) touch /tmp_probe/x` is rejected by bash before anything
+        runs — anchoring on the stray ) falsely denied a write that never
+        happens. Inside a live `case ... in` the arm's ) still anchors
+        (and denies)."""
+        p = payload("Bash", command=") touch /tmp_probe/x")
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+        p = payload("Bash", command="case x in x) touch /tmp_probe/x;; esac")
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+
+    def test_shell_only_wrappers_after_exec_wrappers_fail_open(self, tmp_path):
+        """`env command touch /x` asks env to run an external program
+        NAMED command — touch never runs (false deny closed). The shell
+        order `command env touch /x` really runs touch and keeps
+        denying."""
+        p = payload("Bash", command="env command touch /tmp_probe/x")
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+        p = payload("Bash", command="command env touch /tmp_probe/x")
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+
+    def test_redirection_only_assignment_is_persistent(self, tmp_path):
+        """`HOME=<root> > /dev/null` has NO command name: the assignment
+        persists (reading the redirect as a command made it one-shot and
+        resolved the later ~ under the stale home — false deny)."""
+        p = payload(
+            "Bash", command=f"HOME={tmp_path} > /dev/null; echo hi > ~/out.txt"
+        )
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+
+    def test_unterminated_sibling_heredocs_bail_linearly(self, tmp_path):
+        """With any sibling body unterminated, the residual << walls the
+        rest anyway — re-collecting remaining siblings per marker was
+        quadratic (78s at 20000 markers in the synchronous hook)."""
+        import time
+
+        cmd = "cat " + "<<A " * 6000 + "\n"
+        p = payload("Bash", command=cmd)
+        p["cwd"] = str(tmp_path)
+        started = time.monotonic()
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert time.monotonic() - started < 2.0
+        assert allow, reason
+
+    def test_option_checks_stop_at_the_terminator(self, tmp_path):
+        """Dash tokens after `--` are OPERANDS: `touch -- -r /f` writes
+        both, and `cp -- -t src /f` copies to /f — reading them as
+        options skipped the recognized writes. Real pre-terminator
+        options still fail open."""
+        for cmd in (
+            "touch -- -r /tmp_probe/out",
+            "cp -- -t /tmp_probe/out",
+        ):
+            p = payload("Bash", command=cmd)
+            p["cwd"] = str(tmp_path)
+            allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+            assert not allow, cmd
+        p = payload("Bash", command=f"cd /etc; mkdir -m 755 {tmp_path}/safe")
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+
+    def test_path_qualified_writers_stay_recognized(self, tmp_path):
+        """`/bin/touch`, `/usr/bin/tee`, and `./tools/cp` are the same
+        statically identifiable writers — requiring bare names regressed
+        them to unrecognized. An argument-position path stays inert."""
+        for cmd in (
+            "/bin/touch /tmp_probe/x",
+            "echo x | /usr/bin/tee /tmp_probe/t",
+            "./tools/cp x /tmp_probe/c",
+        ):
+            p = payload("Bash", command=cmd)
+            p["cwd"] = str(tmp_path)
+            allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+            assert not allow, cmd
+        p = payload("Bash", command="echo /bin/touch /tmp_probe/x")
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+
+    def test_backgrounded_set_physical_does_not_flip_the_parent(self, tmp_path):
+        """`set -P & cd sub` backgrounds the mode flip into a subshell —
+        the parent stays logical and the cd stays tracked (the leaked
+        setmode made it unknowable)."""
+        (tmp_path / "sub").mkdir()
+        [(_, resolved)] = hooks.resolved_bash_targets(
+            "set -P & cd sub && cat > out.txt", tmp_path
+        )
+        assert resolved is not None
+
+    def test_pipeline_invoked_functions_keep_the_parent_cwd(self, tmp_path):
+        """`true | f` runs f in the pipeline's subshell — the parent cwd
+        is untouched, and voiding on the invocation hid the recognized
+        /etc write (same rule as pipeline source/eval/set)."""
+        p = payload(
+            "Bash",
+            command="f() { cd /tmp; }; cd /etc; true | f; cat > passwd",
+        )
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+
+    def test_case_inside_a_paren_function_body_walls(self, tmp_path):
+        """A case-arm `)` inside a subshell-form body aliases the close:
+        `f() ( case x in x) touch /x;; esac )` "ended" at x) and the
+        never-executed write was falsely denied — with a case in play the
+        close is unmatchable, wall fallback (fail open). Case-free paren
+        bodies stay bounded and post-definition writes keep denying."""
+        p = payload(
+            "Bash",
+            command="f() ( case x in a) :;; b) touch /tmp_probe/x;; esac )",
+        )
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+        p = payload("Bash", command="g() ( echo hi ); touch /tmp_probe/y")
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+
+    def test_export_operands_do_not_cut_the_range_short(self, tmp_path):
+        """`export HOME=<root> OTHER` persists HOME — OTHER is another
+        export OPERAND, and reading it as a prefixed command cut the
+        range at the semicolon and resolved the later ~ under the stale
+        home (false deny)."""
+        p = payload(
+            "Bash", command=f"export HOME={tmp_path} OTHER; echo hi > ~/out.txt"
+        )
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+
+    def test_assignment_range_lookup_is_logarithmic(self, tmp_path):
+        """A linear range scan per tilde target was quadratic against
+        many one-shot assignments in the synchronous hook; the bisect
+        lookup keeps it linear overall."""
+        import time
+
+        cmd = "".join(
+            f"HOME=/tmp printf x; echo hi > ~/f{i}.txt; " for i in range(9000)
+        )
+        p = payload("Bash", command=cmd)
+        p["cwd"] = str(tmp_path)
+        started = time.monotonic()
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert time.monotonic() - started < 2.0
+        # every ~ write is OUTSIDE each one-shot range: original home,
+        # out-of-tree, recognized
+        assert not allow
+
+    def test_invocation_before_definition_is_not_a_call(self, tmp_path):
+        """In `cd /etc; f; cat > passwd; f() {{ :; }}` the early f is
+        UNDEFINED when it runs — nothing moves the cwd, and voiding on it
+        hid the recognized write."""
+        p = payload("Bash", command="cd /etc; f; cat > passwd; f() { :; }")
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+
+    def test_non_env_wrappers_do_not_pass_assignments(self, tmp_path):
+        """`nohup MODE=x touch /x` executes a program NAMED MODE=x —
+        touch never runs (false deny closed); `env MODE=x touch /x`
+        really runs touch and keeps denying."""
+        p = payload("Bash", command="nohup MODE=x touch /tmp_probe/x")
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+        p = payload("Bash", command="env MODE=x touch /tmp_probe/x")
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+
+    def test_brace_group_arithmetic_is_a_comparison(self, tmp_path):
+        """`{ (( x > /tmp_probe/out )); }` compares — the brace opener
+        keeps (( at command position (its phantom ABSOLUTE redirect was
+        falsely denied; relative ones already failed open via the
+        brace's hard opacity)."""
+        p = payload("Bash", command="{ (( x > /tmp_probe/out )); }")
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+
+    def test_function_definition_inside_a_subshell_is_dead(self, tmp_path):
+        """`(f() { touch /tmp_probe/x; }; true)` only DEFINES f — the
+        subshell-anchored definition must dead-span its body like any
+        other (the never-executed absolute write was falsely denied)."""
+        p = payload("Bash", command="(f() { touch /tmp_probe/x; }; true)")
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+
+    def test_flagged_declare_assignments_are_effective(self, tmp_path):
+        """`declare -x HOME=<root>` really assigns — missing the option
+        words resolved ~ under the stale home (false deny)."""
+        p = payload("Bash", command=f"declare -x HOME={tmp_path}; echo hi > ~/out.txt")
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+
+    def test_wrapped_current_shell_executors_void_tracking(self, tmp_path):
+        """`command source` / `builtin eval` still run in the CURRENT
+        shell — missing them kept a stale /etc that falsely denied later
+        relative writes; a prefixed `set -P` likewise changes the cd
+        mode."""
+        for cmd in (
+            "cd /etc; command source setup.sh; cat > passwd",
+            "cd /etc; builtin eval 'true'; cat > passwd",
+        ):
+            p = payload("Bash", command=cmd)
+            p["cwd"] = str(tmp_path)
+            allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+            assert allow, (cmd, reason)
+        for cmd in (
+            "MODE=x set -P; cd sub && cat > out.txt",
+            "command set -P; cd sub && cat > out.txt",
+        ):
+            [(_, resolved)] = hooks.resolved_bash_targets(cmd, tmp_path)
+            assert resolved is None, cmd
+
+    def test_guarded_list_scan_is_linear(self, tmp_path):
+        """The &&-list-end scan ran per guarded cd to the same terminator
+        — quadratic on generated `&& cd .` chains in the synchronous
+        hook. One precomputed terminator list + bisect is linear."""
+        import time
+
+        cmd = "true" + " && cd ." * 8000 + "; cat > out.txt"
+        p = payload("Bash", command=cmd)
+        p["cwd"] = str(tmp_path)
+        started = time.monotonic()
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert time.monotonic() - started < 2.0
+        assert allow, reason
+
+    def test_command_prefix_assignments_are_one_shot(self, tmp_path):
+        """`CDPATH=/tmp printf x` scopes the assignment to printf — the
+        later cd uses the ORIGINAL CDPATH and its escape stays recognized
+        (persistent arming hid it); same for HOME. A one-shot prefixing
+        the writer itself still covers that command (fail open)."""
+        (tmp_path / "server").mkdir()
+        for cmd in (
+            "CDPATH=/tmp printf x; cd server; touch ../../escape",
+            "HOME=/tmp printf x; echo hi > ~/omater-probe6.txt",
+        ):
+            p = payload("Bash", command=cmd)
+            p["cwd"] = str(tmp_path)
+            allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+            assert not allow, cmd
+        # tilde expansion uses the shell's CURRENT home BEFORE the
+        # one-shot prefix applies to the child env: the write lands under
+        # the ORIGINAL home (out-of-tree) and must deny
+        p = payload("Bash", command=f"HOME={tmp_path} tee ~/one-shot.txt")
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+
+    def test_unmatched_cd_fallback_is_linear(self, tmp_path):
+        """Each unmatched cd word back-scanned and re-tokenized its
+        segment prefix — quadratic on `echo cd cd ...` (24s at 12000
+        tokens in the synchronous hook). Tokenize-once verdicts keep it
+        linear."""
+        import time
+
+        cmd = "echo " + "cd " * 12000 + "; cat > out.txt"
+        p = payload("Bash", command=cmd)
+        p["cwd"] = str(tmp_path)
+        started = time.monotonic()
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert time.monotonic() - started < 2.0
+        assert allow, reason  # every cd is prose; out.txt stays in-root
+
+    def test_sibling_heredocs_consume_in_order(self, tmp_path):
+        """`cat <<A <<B` queues BOTH bodies — after their terminators the
+        next command executes, and the leftover <<B walled the real write
+        into fail-open (miss). A sibling with a MISSING terminator still
+        walls: everything after is data."""
+        p = payload("Bash", command="cat <<A <<B\nA\nB\ncat > /tmp_probe/real")
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+        p = payload(
+            "Bash", command="cat <<A <<B\nA\ncat > /tmp_probe/not-executed\nEOF"
+        )
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+
+    def test_prefixed_function_invocations_void_tracking(self, tmp_path):
+        """`MODE=x f` (and `if f; then`) invoke f in the CURRENT shell —
+        missing the prefixes kept a stale /etc and falsely denied the
+        in-root write. An undefined prefixed word leaves tracking alone."""
+        cmd = f"f() {{ cd {tmp_path}; }}; cd /etc; MODE=x f; cat > out.txt"
+        p = payload("Bash", command=cmd)
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+        p = payload(
+            "Bash", command="g() { :; }; cd /etc; MODE=x h; cat > passwd"
+        )
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+
+    def test_case_arm_writers_stay_recognized(self, tmp_path):
+        """`case x in x) touch /tmp_probe/x;; esac` RUNS its writer when
+        the arm matches — the arm's unmatched `)` is a command position.
+        A substitution-closing `)` is NOT one: `echo $(true) touch
+        /tmp_probe/x` only prints (no false deny)."""
+        p = payload("Bash", command="case x in x) touch /tmp_probe/x;; esac")
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+        p = payload("Bash", command="echo $(true) touch /tmp_probe/x")
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+
+    def test_assignments_inside_function_bodies_are_inert(self, tmp_path):
+        """`f() { HOME=/tmp; }; echo hi > ~/outside` never assigns —
+        arming HOME from the dead body made the later recognizable tilde
+        write unresolved (miss)."""
+        p = payload(
+            "Bash", command="f() { HOME=/tmp; }; echo hi > ~/omater-probe5.txt"
+        )
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+
+    def test_env_var_mentions_as_arguments_do_not_disarm(self, tmp_path):
+        """`printf CDPATH=/tmp` / `printf HOME=/tmp` assign NOTHING — the
+        command-wide substring flags made later cds and `~` targets
+        untrackable and hid recognized escapes. Only a command-position
+        assignment counts, and only for text AFTER it (a write BEFORE the
+        assignment resolves under the original value). Real assignments
+        keep failing open."""
+        (tmp_path / "server").mkdir()
+        for cmd in (
+            "printf CDPATH=/tmp; cd server; touch ../../escape",
+            "printf HOME=/tmp; echo hi > ~/omater-probe3.txt",
+            "echo hi > ~/omater-probe4.txt; HOME=/tmp",
+        ):
+            p = payload("Bash", command=cmd)
+            p["cwd"] = str(tmp_path)
+            allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+            assert not allow, cmd
+        p = payload(
+            "Bash", command="export CDPATH=/x\ncd server; touch ../../escape"
+        )
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+
+    def test_background_ampersand_restores_the_list_start_cwd(self, tmp_path):
+        """`cd /etc; true & cat > passwd`: only the `true` list is
+        backgrounded — the parent stays in /etc and the recognized write
+        must deny (unconditional voiding hid it). A backgrounded list's
+        OWN cds still never reach the parent."""
+        p = payload("Bash", command="cd /etc; true & cat > passwd")
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+        p = payload("Bash", command="cd /etc && true & cat > out.txt")
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+
+    def test_arithmetic_text_never_disturbs_tracking(self, tmp_path):
+        """Arithmetic evaluates — it runs no commands, changes no
+        options, and its operators are not list control. Each shape
+        voided a correctly tracked /etc (miss), and a newline inside
+        ((...)) reset the ||-guard bookkeeping (false deny)."""
+        for cmd in (
+            "cd /etc; (($x)); cat > passwd",
+            "cd /etc; ((eval)); cat > passwd",
+            "cd /etc; ((if)); cat > passwd",
+            "cd /etc; ((set -P)); cd ..; cat > passwd",
+            "f() { :; }; cd /etc; ((f)); cat > passwd",
+            "cd /etc && ((1 || 0)); cat > passwd",
+        ):
+            p = payload("Bash", command=cmd)
+            p["cwd"] = str(tmp_path)
+            allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+            assert not allow, cmd
+        # the REAL || after the arithmetic still voids the failed-cd
+        # assumption: the write runs in the ORIGINAL cwd (in-root)
+        p = payload(
+            "Bash", command="cd /definitely-missing && ((\n1\n)) || cat > out.txt"
+        )
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+
+    def test_case_arm_comparisons_are_not_redirects(self, tmp_path):
+        """A case-arm's closing `)` is a command position: `case x in x)
+        (( x > /tmp_probe/out ));; esac` (and the [[ form) compares and
+        writes nothing — the phantom absolute targets were falsely
+        denied."""
+        for cmd in (
+            "case x in x) (( x > /tmp_probe/out ));; esac",
+            "case x in x) [[ a > /tmp_probe/out ]];; esac",
+        ):
+            p = payload("Bash", command=cmd)
+            p["cwd"] = str(tmp_path)
+            allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+            assert allow, (cmd, reason)
+
+    def test_function_name_scan_is_linear_in_definition_count(self, tmp_path):
+        """One invocation-scan per defined name was O(names x command) in
+        the synchronous hook (1.3s at 1500 definitions). A single
+        alternation pass is linear."""
+        import time
+
+        cmd = "".join(f"f{i}() {{ :; }}; " for i in range(4000)) + "cat > out.txt"
+        p = payload("Bash", command=cmd)
+        p["cwd"] = str(tmp_path)
+        started = time.monotonic()
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert time.monotonic() - started < 2.0
+        assert allow, reason  # out.txt is a relative in-root write
+
+    def test_backtick_cd_targets_are_not_literal(self, tmp_path):
+        """a cd target containing backticks expands at RUNTIME — an
+        ABSOLUTE fabricated path (`cd /\\`x\\`/sub`) overwrote the
+        backticks' own opacity and resolved later writes against a
+        directory bash never entered. Same rule as \\$()/globs: unknown,
+        fail open."""
+        [(_, resolved)] = hooks.resolved_bash_targets(
+            "cd /`pwd`/sub; cat > out.txt", tmp_path
+        )
+        assert resolved is None
+
+    def test_unterminated_heredoc_scan_is_linear(self, tmp_path):
+        """Every unterminated introducer made the DOTALL body search
+        rescan the remaining command — quadratic in the synchronous hook
+        (4.2s at 9000 introducers). The indexed forward pass is linear."""
+        import time
+
+        cmd = "".join(f"cat <<D{i} x\n" for i in range(9000))
+        p = payload("Bash", command=cmd)
+        p["cwd"] = str(tmp_path)
+        started = time.monotonic()
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert time.monotonic() - started < 1.5
+        assert allow, reason  # walls: everything fails open
+
+    def test_invoking_a_defined_function_voids_tracking(self, tmp_path):
+        """`f() { cd <root>; }; cd /etc; f; cat > out.txt` writes IN-root
+        (the invocation runs the body's cd) — keeping /etc falsely denied
+        it. A defined name at command position makes the cwd unknowable
+        (fail open); an UNDEFINED word leaves tracking alone (deny keeps
+        working)."""
+        cmd = f"f() {{ cd {tmp_path}; }}; cd /etc; f; cat > out.txt"
+        p = payload("Bash", command=cmd)
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+        p = payload(
+            "Bash", command="g() { cd /somewhere; }; cd /etc; h; cat > passwd"
+        )
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+
+    def test_double_dash_ends_writer_option_parsing(self, tmp_path):
+        """`touch -- -probe` creates the FILE -probe — skipping every
+        dash token hid the write behind the option filter."""
+        p = payload("Bash", command="cd /etc; touch -- -probe")
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+
+    def test_commands_after_a_bounded_function_body_execute(self, tmp_path):
+        """The definition's dead span ends at its matched close: `f() {
+        :; }; touch /tmp_probe/x` really executes the write (the
+        end-of-command wall hid it), and tracking resumes with the
+        pre-definition cwd."""
+        p = payload("Bash", command="f() { :; }; touch /tmp_probe/x")
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+        p = payload("Bash", command="cd /etc; f() { cd /tmp; }; cat > passwd")
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+
+    def test_cdpath_mention_is_not_an_assignment(self, tmp_path):
+        """`printf CDPATH` changes nothing — the substring check voided
+        cd tracking and hid a recognized relative escape. A real CDPATH
+        assignment still makes relative cds unknowable (fail open)."""
+        (tmp_path / "server").mkdir()
+        p = payload(
+            "Bash", command="printf CDPATH; cd server; touch ../../escape"
+        )
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+        p = payload(
+            "Bash", command="CDPATH=/x cd server && touch ../../escape"
+        )
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+
+    def test_reserved_word_arithmetic_is_a_comparison(self, tmp_path):
+        """`if (( x > /tmp_probe/out )); then :; fi` is arithmetic —
+        nothing is written; the reserved word keeps (( at command
+        position (same rule as [[)."""
+        p = payload(
+            "Bash", command="if (( x > /tmp_probe/out )); then :; fi"
+        )
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+
+    def test_builtin_wrapped_external_writers_fail_open(self, tmp_path):
+        """bash rejects `builtin touch /x` (touch is not a builtin)
+        without running it — recognizing the shape falsely denied a
+        write that never happens."""
+        p = payload("Bash", command="builtin touch /tmp_probe/x")
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+
+    def test_redirect_prefixed_source_voids_tracking(self, tmp_path):
+        """`> /dev/null source setup.sh` runs source in the CURRENT
+        shell — missing the redirect prefix left a stale /etc that
+        falsely denied the later relative write."""
+        p = payload(
+            "Bash", command="cd /etc; > /dev/null source setup.sh; cat > passwd"
+        )
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+
+    def test_compound_body_writers_stay_recognized(self, tmp_path):
+        """`{ touch /x; }` and `if touch /x; then :; fi` RUN their
+        writers — the { opener and condition reserved words are command
+        positions and must anchor recognition."""
+        for cmd in (
+            "{ touch /tmp_probe/x; }",
+            "if touch /tmp_probe/x; then :; fi",
+        ):
+            p = payload("Bash", command=cmd)
+            p["cwd"] = str(tmp_path)
+            allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+            assert not allow, cmd
+
+    def test_prefixed_writer_invocations_stay_recognized(self, tmp_path):
+        """`!`, `env VAR=x`, and unflagged wrappers run the writer with
+        the same argv — the command-position anchor must accept them (a
+        rigid prefix order regressed these statically recognizable
+        absolute writes to unrecognized)."""
+        for cmd in (
+            "! touch /tmp_probe/x",
+            "env MODE=x touch /tmp_probe/x",
+            "sudo touch /tmp_probe/x",
+        ):
+            p = payload("Bash", command=cmd)
+            p["cwd"] = str(tmp_path)
+            allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+            assert not allow, cmd
+
+    def test_flagged_wrapper_prefixes_fail_open(self, tmp_path):
+        """`sudo -u touch /tmp_probe/x` runs /tmp_probe/x AS the user
+        touch — no write happens, and guessing whether a wrapper flag's
+        next word is its argument or the command falsely denied it. A
+        flagged wrapper is ambiguous: unrecognized, fail open."""
+        p = payload("Bash", command="sudo -u touch /tmp_probe/x")
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+
+    def test_reserved_word_conditionals_are_comparisons(self, tmp_path):
+        """`if [[ a > /tmp_probe/x ]]; then :; fi` compares — nothing is
+        written; the reserved word keeps [[ at command position. An `if`
+        that is a plain ARGUMENT opens no span (`echo if [[ ... ]]`
+        really redirects)."""
+        for cmd in (
+            "if [[ a > /tmp_probe/x ]]; then :; fi",
+            "while [[ a > /tmp_probe/x ]]; do :; done",
+        ):
+            p = payload("Bash", command=cmd)
+            p["cwd"] = str(tmp_path)
+            allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+            assert allow, (cmd, reason)
+        p = payload("Bash", command="echo if [[ x > /tmp_probe/x ]]")
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+
+    def test_function_definitions_execute_nothing(self, tmp_path):
+        """`deploy() { echo x > /tmp_probe/x; }` DEFINES — the absolute
+        write in the body never runs at definition time (was falsely
+        denied). A bare brace GROUP executes and keeps denying."""
+        for cmd in (
+            "deploy() { echo x > /tmp_probe/x; }",
+            "function deploy { echo x > /tmp_probe/x; }",
+        ):
+            p = payload("Bash", command=cmd)
+            p["cwd"] = str(tmp_path)
+            allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+            assert allow, (cmd, reason)
+        p = payload("Bash", command="{ echo x > /tmp_probe/x; }")
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+
+    def test_writer_operands_stop_at_newlines(self, tmp_path):
+        """Operand separators are HORIZONTAL: a newline ends the command,
+        and absorbing the next command's words as operands falsely denied
+        writes that never happen (`mkdir\\necho passwd` creates nothing).
+        Same-line operands keep denying."""
+        for cmd in (
+            "cd /etc; mkdir\necho passwd",
+            "cd /etc; dd if=/dev/null\necho of=passwd",
+            f"cd /etc; cp src {tmp_path}/safe\necho passwd",
+        ):
+            p = payload("Bash", command=cmd)
+            p["cwd"] = str(tmp_path)
+            allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+            assert allow, (cmd, reason)
+        p = payload("Bash", command="cd /etc; mkdir passwd\necho x")
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+
+    def test_create_option_semantics_are_per_verb(self, tmp_path):
+        """touch -m is a FLAG (set mtime, no argument) — sharing mkdir's
+        -m exemption let `touch -m /etc/passwd` through unrecognized.
+        mkdir -m still takes an argument and fails open."""
+        p = payload("Bash", command="touch -m /etc/passwd")
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+        p = payload("Bash", command=f"cd /etc; mkdir -m 755 {tmp_path}/safe")
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+
+    def test_copy_verb_is_the_matched_command_not_prefix_text(self, tmp_path):
+        """`X=cp rsync -t src /tmp_probe/out`: the verb is rsync (-t =
+        --times) — finding 'cp' in the assignment prefix applied the
+        target-directory exemption and let the real destination
+        through."""
+        p = payload("Bash", command="X=cp rsync -t src /tmp_probe/out")
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+
+    def test_escaped_backslash_newline_is_a_real_boundary(self, tmp_path):
+        """`echo \\\\<nl>cd /etc; cat > passwd`: the first backslash
+        escapes the second, so the newline is a REAL command boundary and
+        the cd runs — joining unconditionally glued the next line into
+        echo's argument and missed the out-of-tree write."""
+        p = payload("Bash", command="echo \\\\\ncd /etc; cat > passwd")
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+
+    def test_dangling_substitution_openers_reject_the_input(self, tmp_path):
+        """An unclosed backtick or ( hits EOF: bash rejects the whole
+        input and executes NOTHING — the still-scannable absolute
+        redirect was a false deny (same rule as unterminated quotes and
+        unbalanced arithmetic)."""
+        for cmd in (
+            "echo `ls; printf x > /tmp_probe/out",
+            "(echo x; printf x > /tmp_probe/out",
+        ):
+            p = payload("Bash", command=cmd)
+            p["cwd"] = str(tmp_path)
+            allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+            assert allow, (cmd, reason)
+
+    def test_rsync_dash_t_is_times_not_target_directory(self, tmp_path):
+        """rsync -t preserves TIMES — the last operand is still the
+        destination and must keep denying (the cp/mv/install -t
+        exemption over-applied and let the out-of-tree dest through)."""
+        p = payload("Bash", command="rsync -t src /tmp_probe/out")
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+
+    def test_option_arguments_are_not_operands(self, tmp_path):
+        """`mkdir -m 755 <root>/safe` consumes 755 as -m's argument — the
+        only write is in-root, and resolving 755 against /etc falsely
+        denied it. Arg-taking option shapes fail open; plain flags keep
+        denying."""
+        for cmd in (
+            f"cd /etc; mkdir -m 755 {tmp_path}/safe",
+            f"cd /etc; touch -r ref {tmp_path}/safe",
+        ):
+            p = payload("Bash", command=cmd)
+            p["cwd"] = str(tmp_path)
+            allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+            assert allow, (cmd, reason)
+        p = payload("Bash", command="cd /etc; mkdir -p passwd")
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+
+    def test_multi_operand_writers_check_every_operand(self, tmp_path):
+        """tee/mkdir/touch take multiple operands — checking only the
+        first let `cd /etc; tee <root>/ok passwd` open /etc/passwd
+        unrecognized. All-in-root operand lists still pass."""
+        for cmd in (
+            f"cd /etc; tee {tmp_path}/ok passwd",
+            f"cd /etc; touch {tmp_path}/ok passwd",
+            f"cd /etc; mkdir {tmp_path}/ok passwd",
+        ):
+            p = payload("Bash", command=cmd)
+            p["cwd"] = str(tmp_path)
+            allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+            assert not allow, cmd
+        p = payload("Bash", command=f"tee {tmp_path}/a {tmp_path}/b")
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+
+    def test_redirect_ampersand_does_not_anchor_command_words(self, tmp_path):
+        """`echo hi >& tee /tmp_probe/x` redirects to a FILE named tee —
+        /tmp_probe/x is just an echo argument; matching _TEE at the
+        redirect's & falsely denied it."""
+        p = payload("Bash", command="echo hi >& tee /tmp_probe/x")
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+
+    def test_target_directory_copies_fail_open(self, tmp_path):
+        """`cp -t <root>/dest hosts` writes INTO dest — the last operand
+        is a SOURCE, and resolving it as the destination falsely denied
+        it as /etc/hosts. Unrecognized, fail open; plain copies keep
+        denying."""
+        (tmp_path / "dest").mkdir()
+        p = payload("Bash", command=f"cd /etc; cp -t {tmp_path}/dest hosts")
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+        p = payload("Bash", command="cd /etc; cp x passwd")
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+
+    def test_unterminated_quote_is_a_syntax_error_not_a_write(self, tmp_path):
+        """`echo " > /tmp_probe/out` hits EOF inside the quote: bash
+        rejects the whole input and writes NOTHING — the exposed redirect
+        was a false deny. The unterminated span is data to EOF (same rule
+        as unbalanced arithmetic)."""
+        for cmd in ('echo " > /tmp_probe/out', "echo ' > /tmp_probe/out"):
+            p = payload("Bash", command=cmd)
+            p["cwd"] = str(tmp_path)
+            allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+            assert allow, (cmd, reason)
+
+    def test_brace_group_anchor_requires_trailing_whitespace(self, tmp_path):
+        """`echo foo{[[ x > /tmp_probe/out ]]` is a plain word plus a
+        REAL redirect — bash's brace-group reserved word needs whitespace
+        after {, and anchoring a comparison span on the mid-word { masked
+        the write. A real group-open `{ [[ ... ]]` still masks its
+        comparison (no false deny)."""
+        p = payload("Bash", command="echo foo{[[ x > /tmp_probe/out ]]")
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+        p = payload("Bash", command="cd /etc; { [[ x > passwd ]]; }; echo done")
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+
+    def test_command_word_patterns_require_command_position(self, tmp_path):
+        """`echo mkdir passwd` PRINTS words — matching the argument
+        resolved a phantom target against the tracked /etc (false deny).
+        Real command-position forms, wrapper- and pipe-prefixed included,
+        keep denying."""
+        for cmd in (
+            "cd /etc; echo mkdir passwd",
+            "cd /etc; echo cp x passwd",
+        ):
+            p = payload("Bash", command=cmd)
+            p["cwd"] = str(tmp_path)
+            allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+            assert allow, (cmd, reason)
+        for cmd in (
+            "cd /etc; mkdir passwd",
+            "cd /etc; sudo mkdir passwd",
+            "echo x | tee /tmp_probe/t",
+        ):
+            p = payload("Bash", command=cmd)
+            p["cwd"] = str(tmp_path)
+            allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+            assert not allow, cmd
+
+    def test_escaped_redirect_operator_is_an_argument(self, tmp_path):
+        """`test x \\> passwd` passes a LITERAL > — reporting passwd as a
+        write falsely denied it against the tracked /etc; the unescaped
+        form is a real redirect and keeps denying."""
+        p = payload("Bash", command="cd /etc; test x \\> passwd")
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+        p = payload("Bash", command="cd /etc; test x > passwd")
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+
+    def test_negated_comparison_contexts_are_still_comparisons(self, tmp_path):
+        """`! [[ x > passwd ]]` and `! (( x > passwd ))` negate a
+        COMPARISON — nothing is written; the `!` reserved word keeps
+        command position and the phantom redirects were false denies."""
+        for cmd in (
+            "cd /etc; ! [[ x > passwd ]]; echo done",
+            "cd /etc; ! (( x > passwd )); echo done",
+        ):
+            p = payload("Bash", command=cmd)
+            p["cwd"] = str(tmp_path)
+            allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+            assert allow, (cmd, reason)
+
+    def test_concatenated_quoted_delimiter_reaches_the_wall(self, tmp_path):
+        """bash's delimiter for <<'EOF'x is the CONCATENATED word EOFx —
+        matching the quoted prefix let an in-body EOF line terminate the
+        heredoc early and falsely denied the never-executed redirect.
+        Unsupported concatenations reach the residual-<< wall."""
+        cmd = "cat <<'EOF'x\nEOF\ncat > /tmp_probe/not-executed\nEOFx"
+        p = payload("Bash", command=cmd)
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+
+    def test_cond_open_requires_a_live_anchor(self, tmp_path):
+        """`echo \\; [[ x > /tmp_probe/out ]]` anchors on word data: the
+        [[ is an ARGUMENT and the > a REAL out-of-tree redirect — masking
+        it as a comparison hid the write."""
+        p = payload("Bash", command="echo \\; [[ x > /tmp_probe/out ]]")
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+
+    def test_escaped_pipe_never_forms_a_two_char_operator(self, tmp_path):
+        """`\\|&` is word data + a real background `&` (not |&), and
+        `\\||` is word data + a real pipe (not ||): each misread either
+        kept a stale cwd (false deny) or voided a known one (miss).
+        Prev-char exemptions apply only when the prev char is itself
+        unescaped."""
+        # the & backgrounds the list; cat writes in the ORIGINAL cwd
+        p = payload("Bash", command="cd /etc && echo \\|& cat > out.txt")
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+        for cmd in (
+            # real pipeline RHS: source is subshell-scoped, /etc keeps denying
+            "cd /etc; echo \\|| source env.sh; cat > passwd",
+            # foreground cd after the backgrounded echo: /etc applies
+            "echo \\|& cd /etc; cat > passwd",
+        ):
+            p = payload("Bash", command=cmd)
+            p["cwd"] = str(tmp_path)
+            allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+            assert not allow, cmd
+
+    def test_dashdash_makes_target_slot_dash_n_an_operand(self, tmp_path):
+        """`pushd -- -n` enters a directory NAMED -n (the -- terminator
+        ends options) — reading it as the no-chdir option kept a stale
+        cwd and falsely denied the in-root scratch write; the dash-target
+        branch fails open instead. A real `pushd -n` (option) still
+        keeps the cwd tracked (and denying)."""
+        p = payload("Bash", command="pushd -- -n; cat > ../.omater/scratch/x")
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+        p = payload("Bash", command="cd /etc; pushd -n; cat > passwd")
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+
+    def test_span_containment_lookups_stay_subquadratic(self, tmp_path):
+        """Target filtering, the residual-<< wall skip, and the
+        arithmetic cd checks each rescanned the full span list per item —
+        O(N^2) in the synchronous hook for generated scripts mixing
+        arithmetic, redirects, cds, and unsupported heredoc markers. The
+        bisect span lookup keeps them logarithmic."""
+        import time
+
+        cmd = "".join(
+            f"echo $(({i}+1)) > f{i}; cd .; echo <<@{i}\n" for i in range(5000)
+        )
+        p = payload("Bash", command=cmd)
+        p["cwd"] = str(tmp_path)
+        started = time.monotonic()
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert time.monotonic() - started < 1.5
+        assert allow, reason  # in-root targets, then walls (fail open)
+
+    def test_unbalanced_arithmetic_is_a_syntax_error_not_a_write(self, tmp_path):
+        """`(( x > /tmp_probe/out` never closes: bash reads to EOF hunting
+        for )) and rejects the whole input — nothing executes, so the
+        exposed `>` was a false deny. The unmatched remainder is data."""
+        for cmd in (
+            "(( x > /tmp_probe/out",
+            "echo $(( x > /tmp_probe/out",
+        ):
+            p = payload("Bash", command=cmd)
+            p["cwd"] = str(tmp_path)
+            allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+            assert allow, (cmd, reason)
+
+    def test_conditional_comparison_is_not_a_redirect(self, tmp_path):
+        """`[[ x > passwd ]]` compares strings — nothing is written, and
+        the phantom target was falsely denied against the kept /etc cwd.
+        A real redirect after ]] still denies."""
+        p = payload("Bash", command="cd /etc; [[ x > passwd ]]; echo done")
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+        p = payload("Bash", command="cd /etc; [[ x > y ]] > passwd")
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+
+    def test_redirect_operand_cd_keeps_tracking(self, tmp_path):
+        """`< cd` reads FROM a file named cd — no chdir runs, so the
+        known /etc must stay tracked and the recognized write denied
+        (voiding on the operand token hid it)."""
+        p = payload("Bash", command="cd /etc; < cd; cat > passwd")
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+
+    def test_pipeline_scoped_state_changes_keep_the_parent_cwd(self, tmp_path):
+        """source/eval, an expanded command word, and set -P inside a
+        pipeline run in the pipeline's subshell — the parent's cwd and
+        options are untouched (same rule as pipeline cds). Voiding them
+        hid the recognized /etc write."""
+        for cmd in (
+            "cd /etc; true | source env.sh; cat > passwd",
+            "cd /etc; source env.sh | true; cat > passwd",
+            "cd /etc; true | $CMD; cat > passwd",
+            "cd /etc; true | set -P; cd ..; cat > passwd",
+        ):
+            p = payload("Bash", command=cmd)
+            p["cwd"] = str(tmp_path)
+            allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+            assert not allow, cmd
+
+    def test_prefix_of_unsupported_delimiter_is_not_the_delimiter(self, tmp_path):
+        """bash's delimiter for <<END@MARK is the WHOLE word — capturing
+        the END prefix let an in-body `END` line terminate the heredoc
+        early and exposed the never-executed redirect (false deny).
+        Unsupported delimiter words must reach the residual-<< wall."""
+        cmd = "cat <<END@MARK\nEND\ncat > /tmp_probe/not-executed\nEND@MARK"
+        p = payload("Bash", command=cmd)
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+
+    def test_subshell_function_definition_body_never_executes(self, tmp_path):
+        """`deploy() (cd /etc; cat > shadow)` only DEFINES deploy —
+        applying the body's cd falsely denied shadow under a cwd the
+        shell never entered. Same hard opacity as the `name() { ... }`
+        brace form. An INVOKED subshell still executes: its write keeps
+        denying."""
+        p = payload(
+            "Bash", command="deploy() (cd /etc; cat > shadow); cat > out.txt"
+        )
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+        p = payload("Bash", command="(cd /etc; cat > shadow)")
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+
+    def test_heredoc_data_filter_is_linear_in_span_count(self, tmp_path):
+        """The heredoc pre-pass rescanned every data span per match —
+        quadratic on generated scripts full of quoted lines and heredocs
+        in the synchronous hook. Sorted spans + a cursor keep it linear."""
+        import time
+
+        cmd = "".join(
+            f'cat <<EOF > f{i}\n"line a" x\n"line b" y\nEOF\n' for i in range(4000)
+        )
+        p = payload("Bash", command=cmd)
+        p["cwd"] = str(tmp_path)
+        started = time.monotonic()
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert time.monotonic() - started < 1.5
+        assert allow, reason  # every f{i} is a relative in-root write
+
+    def test_cd_fallback_scan_is_linear_in_cd_count(self, tmp_path):
+        """The _CD_WORD fallback rescanned every matched verb span per
+        token — O(N^2) in the cd count inside the synchronous hook. A
+        start-position set keeps it linear."""
+        import time
+
+        cmd = "; ".join(["cd ."] * 10000) + "; cat > out.txt"
+        p = payload("Bash", command=cmd)
+        p["cwd"] = str(tmp_path)
+        started = time.monotonic()
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert time.monotonic() - started < 1.5
+        assert allow, reason  # 'cd .' chains stay in-root
+
+    def test_arithmetic_comparison_is_not_a_redirect(self, tmp_path):
+        """`(( x > passwd ))` compares — nothing is written, and the
+        phantom target was falsely denied against the (correctly) kept
+        /etc cwd. A real redirect AFTER the closing )) still denies."""
+        p = payload("Bash", command="cd /etc; (( x > passwd )); echo done")
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+        p = payload("Bash", command="cd /etc; (( x > 2 )) > passwd; echo done")
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+
+    def test_escaped_whitespace_in_prefix_words_stays_one_word(self, tmp_path):
+        """`MODE=a\\ b cd <dir>` is one assignment word and the cd RUNS —
+        str.split() shattered it, the stray fragment read as a command
+        word, and the un-voided stale /etc falsely denied the in-root
+        scratch write. An escaped BACKSLASH before the blank
+        (`MODE=a\\\\ b`) really ends the word: b is the command and its
+        argument cd must leave tracking alone."""
+        (tmp_path / "server").mkdir()
+        cmd = f"cd /etc; MODE=a\\ b cd {tmp_path}/server; cat > ../.omater/scratch/x"
+        p = payload("Bash", command=cmd)
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+        p = payload("Bash", command="cd /etc; MODE=a\\\\ b cd; cat > passwd")
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+
+    def test_spaced_redirect_prefix_keeps_cd_at_command_position(self, tmp_path):
+        """`> /dev/null cd <dir>` redirects and then RUNS cd — checking
+        the spaced operand as an independent command word rejected the
+        prefix, kept the stale /etc cwd, and falsely denied the in-root
+        write. The unmatched cd now voids (fail open), never goes stale;
+        a cd as a plain argument (`echo x 2>&1 cd`) still leaves tracking
+        alone."""
+        p = payload(
+            "Bash", command=f"cd /etc; > /dev/null cd {tmp_path}; cat > out.txt"
+        )
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+        p = payload("Bash", command="cd /etc; echo x 2>&1 cd; cat > passwd")
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+
+    def test_redirect_ampersand_is_not_a_command_anchor(self, tmp_path):
+        """`echo hi >& cd /etc` redirects to a FILE named cd — no chdir.
+        Anchoring the chdir match on the redirect's & applied /etc and
+        falsely denied the in-root write; the unmatched-cd back-scan
+        honors the same rule so a tracked cwd is not voided either."""
+        p = payload("Bash", command="echo hi >& cd /etc; cat > out.txt")
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+        p = payload("Bash", command="cd /etc; echo hi >& cd; cat > passwd")
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+
+    def test_tilde_after_home_assignment_fails_open(self, tmp_path):
+        """An in-command HOME assignment changes what `~` means; the
+        hook's expanduser reads its own stale HOME. `HOME=<root>;
+        echo > ~/f` and `HOME=<root>; cd ~` land IN-root — resolving
+        through the old HOME falsely denied both. Without a HOME
+        assignment, `~` still resolves (and denies)."""
+        for cmd in (
+            f"HOME={tmp_path}; echo hi > ~/out.txt",
+            f"HOME={tmp_path}; cd ~; cat > out.txt",
+        ):
+            p = payload("Bash", command=cmd)
+            p["cwd"] = str(tmp_path)
+            allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+            assert allow, (cmd, reason)
+        p = payload("Bash", command="echo hi > ~/omater-tilde-probe2.txt")
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+
+    def test_identifiers_inside_arithmetic_are_not_builtins(self, tmp_path):
+        """`((cd /etc))` evaluates the arithmetic expression `cd / etc` —
+        no chdir happens, and applying the target falsely denied the
+        in-root write. A cd token inside arithmetic must not void
+        tracking either: `cd /etc; ((cd /tmp))` keeps /etc and the later
+        relative write stays recognized."""
+        p = payload("Bash", command="((cd /etc)); cat > passwd")
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+        p = payload("Bash", command="cd /etc; ((cd /tmp)); cat > passwd")
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+
+    def test_escaped_separators_are_not_command_anchors_anywhere(self, tmp_path):
+        """The parity rule applies at EVERY command-position scan: an
+        escaped `;`/`|` is word data, so the word after it is an ARGUMENT
+        (`echo \\; source x` runs no source) — anchoring opacity there
+        cleared a known /etc and hid the recognized write. One shape per
+        affected scanner: shell-exec, compound, glued, ||, &&-list-end,
+        set -P."""
+        for cmd in (
+            "cd /etc && echo \\; source x && cat > passwd",
+            "cd /etc && echo \\; if x && cat > passwd",
+            "cd /etc && echo \\; $CMD && cat > passwd",
+            "cd /etc && echo \\|| true && cat > passwd",
+            "true && cd /etc && echo \\; && cat > passwd",
+            "cd /etc && echo \\; set -P && cd .. && cat > passwd",
+        ):
+            p = payload("Bash", command=cmd)
+            p["cwd"] = str(tmp_path)
+            allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+            assert not allow, cmd
+
+    def test_quotes_inside_nested_substitution_never_falsely_deny(self, tmp_path):
+        """Bash gives $(...) its own quote context inside double quotes:
+        in `echo "$(echo "> /tmp_probe/x")"` the `>` is quoted argument
+        data — pairing the outer quote with the nested one left it
+        scannable and falsely denied the command. Recursive parsing is
+        frozen out, so the misparse SHAPE (unclosed opener or backtick in
+        the scanned content) classifies the remainder as unrecognized:
+        fail open. Balanced substitutions keep exact pairing and their
+        real redirects keep denying."""
+        for cmd in (
+            'echo "$(echo "> /tmp_probe/x")"',
+            # the space keeps the exposed target un-glued from the next
+            # placeholder — the target-grammar backstop alone missed this
+            'echo "$(echo "> /tmp_probe/x ")"',
+            'echo "${X:-"> /tmp_probe/x "}"',
+        ):
+            p = payload("Bash", command=cmd)
+            p["cwd"] = str(tmp_path)
+            allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+            assert allow, (cmd, reason)
+        p = payload("Bash", command='echo "$(hostname)" > /tmp_probe/x')
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+
+    def test_negated_cd_voids_tracking_never_goes_stale(self, tmp_path):
+        """`! cd server` runs cd in the CURRENT shell (status negation) —
+        rejecting the `!` prefix kept the stale pre-cd cwd and falsely
+        denied the in-root scratch write. Untrackable (fail open), not
+        stale."""
+        (tmp_path / "server").mkdir()
+        cmd = f"! cd {tmp_path}/server; cat > ../.omater/scratch/x"
+        p = payload("Bash", command=cmd)
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+
+    def test_unresolved_target_constructs_fail_open_by_grammar(self, tmp_path):
+        """THE conservative target grammar (ratified fence contract:
+        seatbelt, not a security boundary): any construct the resolver has
+        not FULLY resolved classifies the write as UNRECOGNIZED -> fail
+        open. One grammar, one rule per construct CLASS — never new
+        per-construct bash semantics."""
+        for cmd in (
+            'echo x > "$OUT"/f',  # quoted span (placeholder)
+            "echo x > $OUT/f",  # parameter expansion
+            "echo x > $(dirname a)/f",  # command substitution
+            "echo x > `dirname a`/f",  # backtick substitution
+            "echo x > f\\ g.txt",  # escape
+            "echo x > proj?/f",  # glob
+            "echo x > proj[12]/f",  # glob class
+            "echo x > {a,b}/f",  # brace expansion
+            "echo x > ~-/f",  # directory-stack tilde
+            "echo x > ~nosuchuser8_/f",  # unresolvable user tilde
+        ):
+            resolutions = hooks.resolved_bash_targets(cmd, tmp_path)
+            assert resolutions, cmd  # the shape IS seen — and fails open
+            for _, resolved in resolutions:
+                assert resolved is None, (cmd, resolved)
+
+    def test_invalid_builtin_flags_never_apply_the_target(self, tmp_path):
+        """bash rejects `pushd -P /etc` and `cd -Z /etc` (invalid option)
+        WITHOUT moving — applying the target tracked a cwd the shell never
+        entered and falsely denied the in-root write. Valid flags still
+        track (and deny)."""
+        for cmd in (
+            "pushd -P /etc; cat > out.txt",
+            "cd -Z /etc; cat > out.txt",
+        ):
+            p = payload("Bash", command=cmd)
+            p["cwd"] = str(tmp_path)
+            allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+            assert allow, (cmd, reason)
+        p = payload("Bash", command="cd -L /etc; cat > passwd")
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+
+    def test_comment_after_line_continuation_is_a_comment(self, tmp_path):
+        """bash removes `\\<newline>` BEFORE recognizing comments:
+        `echo ok \\<nl># ignored > /tmp_probe/x` joins to a comment whose
+        redirect never runs (scanning it falsely denied), while
+        `echo x\\<nl>#y` joins into the WORD `x#y` (not a comment — its
+        real redirect must stay recognized)."""
+        p = payload("Bash", command="echo ok \\\n# ignored > /tmp_probe/x")
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+        p = payload("Bash", command="cd /etc; echo x\\\n#y > passwd")
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+
+    def test_directory_stack_tilde_write_targets_fail_open(self, tmp_path):
+        """`cd /etc && echo x > ~-/out.txt` writes under $OLDPWD (in-root
+        here) — resolving the literal `~-` against /etc falsely denied it.
+        Same rule as cd targets: a tilde surviving expanduser is runtime
+        state, fail open. A plain `~/` target still resolves (and
+        denies)."""
+        p = payload("Bash", command="cd /etc && echo x > ~-/out.txt")
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+        [(_, resolved)] = hooks.resolved_bash_targets(
+            "cd /etc && echo x > ~-/out.txt", tmp_path
+        )
+        assert resolved is None
+        p = payload("Bash", command="echo x > ~/omater-tilde-probe.txt")
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+
+    def test_cd_as_an_argument_does_not_void_tracking(self, tmp_path):
+        """`echo cd` is an argument, not a command — the fallback voiding
+        a known /etc there hid the recognized write behind the fail-open
+        path. Current-shell wrappers (`command cd`) still void."""
+        p = payload("Bash", command="cd /etc; echo cd; cat > passwd")
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+        # `command cd` DOES move the current shell's cwd: still unmodeled,
+        # still voids (fail open)
+        p = payload("Bash", command=f"cd /etc; command cd {tmp_path}; cat > passwd")
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+
+    def test_assignment_only_segment_keeps_the_tracked_cwd(self, tmp_path):
+        """`HOME=$HOME` runs no command word — the cwd genuinely stays
+        put, and reading it as an unnameable command hid the recognized
+        /etc write. `HOME=x $CMD` still voids: $CMD can expand to `cd`,
+        which runs in the CURRENT shell."""
+        p = payload("Bash", command="cd /etc; HOME=$HOME; cat > passwd")
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+        p = payload("Bash", command="cd /etc; HOME=x $CMD; cat > passwd")
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+
+    def test_bitwise_and_in_arithmetic_is_not_backgrounding(self, tmp_path):
+        """`$((x & 1))` is a bitwise AND — reading it as a background `&`
+        voided the tracked /etc and hid the recognized write."""
+        p = payload("Bash", command="cd /etc; echo $((x & 1)); cat > passwd")
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+
+    def test_pipeline_cd_keeps_the_parent_cwd(self, tmp_path):
+        """A cd in a pipeline (either side) runs in a subshell that moves
+        NOTHING: the parent's tracked cwd stays valid — voiding it turned
+        the known /etc into unknown and hid the recognized write."""
+        for cmd in (
+            "cd /etc; true | cd /tmp; cat > passwd",
+            "cd /etc; cd /tmp | true; cat > passwd",
+        ):
+            p = payload("Bash", command=cmd)
+            p["cwd"] = str(tmp_path)
+            allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+            assert not allow, cmd
+
+    def test_set_physical_makes_flagless_cd_mode_unknowable(self, tmp_path):
+        """`set -P` flips every later flagless cd to physical `..`
+        resolution: through an in-root symlink to an outside dir,
+        `cd link && cd ..` physically lands OUTSIDE while logical stepping
+        lands back in-root — tracking the logical answer misresolved the
+        write. After a physical-option toggle the mode is unknowable:
+        relative hops fail open. P-irrelevant `set` flags must not
+        disturb tracking."""
+        outside = tmp_path.parent / (tmp_path.name + "_target")
+        outside.mkdir()
+        (tmp_path / "link").symlink_to(outside)
+        cmd = "set -P; cd link && cd .. && cat > out.txt"
+        [(_, resolved)] = hooks.resolved_bash_targets(cmd, tmp_path)
+        assert resolved is None
+        p = payload("Bash", command="set -x; cd /etc; cat > passwd")
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+
+    def test_arith_scan_is_linear_in_command_size(self, tmp_path):
+        """The fence runs synchronously in PreToolUse — rescanning the
+        data-span list per character made the arithmetic scan quadratic
+        (spans x chars), so a generated heredoc full of quoted lines
+        stalled the hook for tens of seconds."""
+        import time
+
+        body = "\n".join(f'echo "line {i}" >> /tmp_probe/x' for i in range(2000))
+        cmd = f"cat <<EOF > out.txt\n{body}\nEOF"
+        p = payload("Bash", command=cmd)
+        p["cwd"] = str(tmp_path)
+        started = time.monotonic()
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert time.monotonic() - started < 2.0
+        assert allow, reason  # the body is heredoc DATA, never executed
+
+    def test_escaped_separator_in_cd_segment_never_falsely_denies(self, tmp_path):
+        """`cd /etc \\; cat > out.txt` is ONE command: bash opens the
+        redirect against the PRE-cd cwd (in-root) and then rejects the
+        multi-arg cd ("too many arguments") without moving. A boundary at
+        the escaped `;` applied /etc and denied ./out.txt as /etc/out.txt
+        — and the never-run cd must not poison later segments either."""
+        p = payload("Bash", command="cd /etc \\; cat > out.txt; cat > two.txt")
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+        # a REAL separator there still tracks the cd and denies
+        p = payload("Bash", command="cd /etc ; cat > out.txt")
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+
+    def test_ansi_c_quoting_allows_escaped_quotes(self, tmp_path):
+        """$'text \\' more' is ONE argument (ANSI-C quoting) — ending the
+        span at the escaped quote exposed its text as a redirect target."""
+        cmd = "printf '%s' $'text \\' > /tmp_probe/data' > out.txt"
+        p = payload("Bash", command=cmd)
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+
+    def test_unsupported_heredoc_shapes_are_a_wall(self, tmp_path):
+        """Delimiters beyond the supported grammar (END@MARK, <<\\EOF) leave
+        their bodies scannable — but body text is DATA: neither its cds nor
+        its redirects (absolute included) execute. Everything after the
+        introducer line fails open."""
+        for cmd in (
+            "cat <<END@MARK\ncd /etc\nEND@MARK\ncat > out.txt",
+            "cat <<\\EOF\ncd /etc\nEOF\ncat > out.txt",
+            "cat <<END@MARK\necho > /tmp_probe/not-executed\nEND@MARK",
+        ):
+            p = payload("Bash", command=cmd)
+            p["cwd"] = str(tmp_path)
+            allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+            assert allow, (cmd, reason)
+
+    def test_line_continuation_joins_token_fragments(self, tmp_path):
+        """`c\\<newline>d <dir>` is the word `cd` — spacing the fragments
+        apart left the tracked cwd stale and falsely denied the write."""
+        (tmp_path / "server").mkdir()
+        cmd = f"cd /etc; c\\\nd {tmp_path}/server && cat > ../.omater/scratch/x"
+        p = payload("Bash", command=cmd)
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+
+    def test_indented_terminator_does_not_end_a_heredoc(self, tmp_path):
+        """Bash requires an exact column-zero terminator for << — an
+        indented ` EOF` body line must not end the heredoc and expose the
+        rest of the body (its absolute redirect never executes)."""
+        cmd = "cat <<EOF\n EOF\ncat > /tmp_probe/not-executed\nEOF\necho done"
+        p = payload("Bash", command=cmd)
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+
+    def test_backtick_escaping_is_parity_based(self, tmp_path):
+        """`\\\\\\`` after an even backslash run OPENS a substitution — the
+        single-char check missed it, and a backtick inside a later real
+        comment then ended the phantom span early, exposing a redirect bash
+        ignores."""
+        cmd = "echo \\\\`true` # tail with ` and > /tmp_probe/x"
+        p = payload("Bash", command=cmd)
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+
+    def test_escaped_paren_is_word_data_not_group_close(self, tmp_path):
+        """`echo \\)#suffix > /tmp_probe/out`: the escaped paren keeps
+        #suffix in the word, so the redirect EXECUTES — classifying it as a
+        group close comment-stripped the redirect away (a miss)."""
+        p = payload("Bash", command="echo \\)#suffix > /tmp_probe/out")
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+
+    def test_quoted_heredoc_delimiter_with_spaces(self, tmp_path):
+        """`<<'END MARK'` is a valid heredoc — its body (containing a cd) is
+        data, and scanning it falsely denied the later in-root write."""
+        cmd = "cat <<'END MARK'\ncd /etc\nEND MARK\ncat > out.txt"
+        p = payload("Bash", command=cmd)
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+
+    def test_even_backslash_run_before_quote_still_opens_the_span(self, tmp_path):
+        """Escapes are parity-based: `\\\\\"` is an escaped backslash + a REAL
+        quote — the span must mask, or a genuinely quoted `>` gets falsely
+        denied."""
+        p = payload("Bash", command='echo \\\\"quoted > /tmp_probe/out"')
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+
+    def test_heredoc_delimiters_beyond_word_chars(self, tmp_path):
+        """`<<END-MARK` is a valid heredoc — an unrecognized delimiter left
+        the body scannable and its cd falsely denied the later write."""
+        cmd = "cat <<END-MARK\ncd /etc\nEND-MARK\ncat > out.txt"
+        p = payload("Bash", command=cmd)
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+
+    def test_runtime_tilde_and_brace_cd_targets_are_untrackable(self, tmp_path):
+        """`cd ~-` returns to $OLDPWD (runtime state), `~nobody`-style names
+        stay literal to expanduser, and one-value brace expansions resolve
+        away from their literal braces — all unknown, fail open."""
+        for cmd in (
+            "cd /etc; cd ~-; cat > out.txt",
+            "cd ~no_such_user_xyz/dir && cat > out.txt",
+            "cd {a,b}/dir && cat > out.txt",
+        ):
+            p = payload("Bash", command=cmd)
+            p["cwd"] = str(tmp_path)
+            allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+            assert allow, (cmd, reason)
+
+    def test_pipe_ampersand_is_a_pipeline_not_background(self, tmp_path):
+        """`|&` pipes stderr. Its `&` must not read as backgrounding (that
+        spuriously cleared a tracked /etc and missed the later write), and a
+        cd on its right side runs in the pipeline subshell (applying it
+        falsely denied an in-root write)."""
+        p = payload("Bash", command="cd /etc; echo x |& cat; cat > passwd")
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+        p = payload("Bash", command="true |& cd /etc; cat > out.txt")
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+
+    def test_backslash_and_expansion_command_words_void_tracking(self, tmp_path):
+        """Bash removes backslashes and expands parameters in command words:
+        `c\\d server` RUNS cd — missing it kept a stale cwd that falsely
+        denied the in-root scratch write. `$CMD ...` is equally unnameable."""
+        (tmp_path / "server").mkdir()
+        for cmd in (
+            f"c\\d {tmp_path}/server && cat > ../.omater/scratch/x",
+            f"$GOTO {tmp_path}/server && cat > ../.omater/scratch/x",
+        ):
+            p = payload("Bash", command=cmd)
+            p["cwd"] = str(tmp_path)
+            allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+            assert allow, (cmd, reason)
+
+    def test_glob_cd_targets_are_untrackable(self, tmp_path):
+        """`cd ../proj*` expands at runtime and can land right back in-root
+        — tracking the literal nonexistent `../proj*` falsely denied the
+        write."""
+        p = payload("Bash", command="cd ../proj* && cat > out.txt")
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+
+    def test_escaped_double_quote_does_not_end_the_quoted_span(self, tmp_path):
+        """`echo "x\\" # still quoted" > /tmp_probe/out`: the \\" stays
+        inside the argument, so the absolute redirect EXECUTES — ending the
+        mask at the escape turned the rest into a comment and hid it."""
+        p = payload("Bash", command='echo "x\\" # still quoted" > /tmp_probe/out')
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+
+    def test_escaped_space_before_hash_is_not_a_comment_boundary(self, tmp_path):
+        """`echo foo\\ #bar > /tmp_probe/out`: the escaped space keeps #bar
+        inside the word, so the absolute redirect EXECUTES — blanking from
+        the # hid a recognizable out-of-tree write."""
+        p = payload("Bash", command="echo foo\\ #bar > /tmp_probe/out")
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+        # an unescaped space before # is still a comment
+        p = payload("Bash", command="echo foo #bar > /tmp_probe/out")
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+
+    def test_non_literal_targets_fail_open_even_under_a_tracked_cwd(self, tmp_path):
+        """A quoted or expansion-bearing target is not a literal filename:
+        resolving the placeholder against a tracked /etc cwd falsely denied
+        `cd /etc && echo x > "<root>/out.txt"` (an in-root write)."""
+        for cmd in (
+            f'cd /etc && echo x > "{tmp_path}/out.txt"',
+            "cd /etc && echo x > $PROJECT_ROOT/out.txt",
+        ):
+            p = payload("Bash", command=cmd)
+            p["cwd"] = str(tmp_path)
+            allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+            assert allow, (cmd, reason)
+        # literal targets under the tracked cwd keep full deny power
+        p = payload("Bash", command="cd /etc && echo x > out.txt")
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+
+    def test_dash_p_realpaths_before_lexical_normalization(self, tmp_path):
+        """`cd link && cd -P ..` lands in the link TARGET's parent —
+        normalizing `..` away first erased the symlink hop and let the
+        out-of-tree write pass."""
+        outside = tmp_path / "outside-tree"
+        (outside / "child").mkdir(parents=True)
+        root = tmp_path / "project"
+        root.mkdir()
+        (root / "link").symlink_to(outside / "child")
+        p = payload("Bash", command="cd link && cd -P .. && cat > out.txt")
+        p["cwd"] = str(root)
+        allow, _ = hooks.evaluate_pre_tool_use(p, root)
+        assert not allow
+
+    def test_popd_n_does_not_move_the_cwd(self, tmp_path):
+        """popd -n edits the stack only — discarding a known cwd there made
+        the fence miss a still-in-/etc relative write."""
+        p = payload("Bash", command="cd /etc; popd -n; cat > passwd")
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+
+    def test_assignment_prefixed_source_voids_tracking(self, tmp_path):
+        """`MODE=x source env.sh` is valid bash and the sourced code can cd
+        anywhere — missing the prefix form kept a stale cwd that falsely
+        denied a legitimate relative write."""
+        (tmp_path / "server").mkdir()
+        cmd = (
+            f"cd {tmp_path}/server && MODE=x source setup.sh && "
+            "cat > ../../might-be-fine.txt"
+        )
+        p = payload("Bash", command=cmd)
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+
+    def test_command_opacity_lands_after_its_own_redirects(self, tmp_path):
+        """Redirects attached to a command open BEFORE it runs: after
+        `cd /etc`, `source env.sh > audit.log` writes /etc/audit.log — the
+        source's opacity must not clear tracking before that target
+        resolves (and denies). Same for an unmatched-cd command's redirect
+        resolving against the pre-command cwd."""
+        p = payload("Bash", command="cd /etc && source env.sh > audit.log")
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+        p = payload("Bash", command="command cd /etc > ../escape.txt")
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow  # ../escape.txt opens against the PRE-command cwd
+
+    def test_comments_inside_backtick_substitutions_are_blanked(self, tmp_path):
+        """A comment inside a substitution is a real comment — its text
+        (`# > /tmp_probe/never`) must not stay scannable as a write."""
+        cmd = "echo `printf x # > /tmp_probe/never\n` > out.txt"
+        p = payload("Bash", command=cmd)
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+
+    def test_prefix_whitespace_does_not_swallow_newlines(self, tmp_path):
+        """`false && MODE=x\\ncd /etc; cat > passwd`: two separate commands —
+        the unconditional cd DOES run, so the /etc/passwd write must stay a
+        recognized deny (merging the lines guarded the wrong cd and let it
+        pass). And `cd -P\\ncat > out` must not parse `cat` as the directory."""
+        p = payload("Bash", command="false && MODE=x\ncd /etc; cat > passwd")
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+        p = payload("Bash", command="cd -P\ncat > out.txt")
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason  # leftover -P target -> unknown, fail open
+
+    def test_expansion_braces_are_not_compound_bodies(self, tmp_path):
+        """`${HOME}` and `file{1,2}` are expansions — treating their braces
+        as hard opacity killed tracking and let a real /etc write pass."""
+        for cmd in (
+            "echo ${HOME}; cd /etc && cat > passwd",
+            "echo file{1,2}; cd /etc && cat > passwd",
+        ):
+            p = payload("Bash", command=cmd)
+            p["cwd"] = str(tmp_path)
+            allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+            assert not allow, cmd
+
+    def test_line_continuation_is_not_a_boundary(self, tmp_path):
+        """`false && \\<newline> cd /etc; cat > out.txt` is ONE guarded list
+        — the cd never runs; parsing the newline as a boundary made it an
+        unconditional cd and falsely denied out.txt."""
+        p = payload("Bash", command="false && \\\n cd /etc; cat > out.txt")
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+        # joined lists keep deny power: the continuation glues one && list
+        p = payload("Bash", command="cd /etc && \\\n cat > passwd")
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+
+    def test_cdpath_searches_dot_hidden_names_too(self, tmp_path):
+        """Bash bypasses CDPATH only for ./.. and ./-anchored paths —
+        `.hidden` IS CDPATH-searched and can land anywhere on the search
+        path, so it must be untrackable when a CDPATH is active."""
+        (tmp_path / ".hidden").mkdir()
+        env = {"CDPATH": "/tmp_probe"}
+        p = payload("Bash", command="cd .hidden && cat > ../../evil.txt")
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path, env=env)
+        assert allow, reason  # untrackable -> fail open, never guess-deny
+
+    def test_quote_spliced_cd_voids_tracking(self, tmp_path):
+        """Bash concatenates quoted spans: `c""d server` and `"cd" server`
+        both RUN cd, invisibly to the scanner — a stale cwd then falsely
+        denied the in-root scratch write. An unnameable command-position
+        word voids tracking instead."""
+        (tmp_path / "server").mkdir()
+        for cmd in (
+            'c""d server && cat > ../.omater/scratch/x',
+            '"cd" server && cat > out.txt',
+        ):
+            p = payload("Bash", command=cmd)
+            p["cwd"] = str(tmp_path)
+            allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+            assert allow, (cmd, reason)
+
+    def test_no_cd_recovery_inside_compound_bodies(self, tmp_path):
+        """`if false; then cd /etc; cat > shadow; fi` executes neither the
+        cd nor the write — an absolute cd inside an unmodeled compound body
+        must not recover tracking and falsely deny the redirect."""
+        p = payload("Bash", command="if false; then cd /etc; cat > shadow; fi")
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+
+    def test_quote_placeholder_keeps_word_adjacency(self, tmp_path):
+        """`echo "x"#suffix > /tmp_probe/out`: bash executes the redirect —
+        the space-padded placeholder invented a word boundary that turned
+        #suffix into a comment and ERASED the recognizable absolute write."""
+        p = payload("Bash", command='echo "x"#suffix > /tmp_probe/out')
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+
+    def test_comment_after_a_grouping_paren_is_a_comment(self, tmp_path):
+        """`(echo ok)# ignored > /tmp_probe/x`: after a GROUP-closing `)` the
+        `#` starts a comment — bash never executes that redirect, so keeping
+        it scannable falsely denied the command."""
+        p = payload("Bash", command="(echo ok)# ignored > /tmp_probe/x")
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+
+    def test_hash_after_command_substitution_is_not_a_comment(self, tmp_path):
+        """`$(printf x)#suffix` continues the word — a `)` ends a
+        substitution whose result can be word-glued, so it must not count
+        as a comment boundary (that erased the absolute write after it)."""
+        p = payload("Bash", command="echo $(printf x)#suffix > /tmp_probe/out")
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+
+    def test_or_after_an_applied_cd_voids_the_tracked_cwd(self, tmp_path):
+        """`cd /definitely-missing && true || cat > out.txt`: the || branch
+        runs because the cd FAILED, so cat writes in the original cwd — the
+        success-assumed /definitely-missing must not deny it."""
+        p = payload(
+            "Bash", command="cd /definitely-missing && true || cat > out.txt"
+        )
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+        # a || in a LATER list says nothing about an earlier list's cd:
+        # deny power is kept across the `;`
+        p = payload("Bash", command="cd /etc; true || false; cat > passwd")
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+
+    def test_eval_source_and_dot_void_tracking(self, tmp_path):
+        """eval/source/. execute current-shell code the scanner cannot see
+        (`eval 'cd <root>/server'` really moves the cwd) — after them the
+        cwd is unknowable, so relative targets fail open. An absolute cd
+        afterwards recovers tracking (and denying)."""
+        (tmp_path / "server").mkdir()
+        for cmd in (
+            f"eval 'cd {tmp_path}/server' && cat > ../.omater/scratch/x",
+            "source env.sh && cat > out.txt",
+            ". ./env.sh && cat > out.txt",
+        ):
+            p = payload("Bash", command=cmd)
+            p["cwd"] = str(tmp_path)
+            allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+            assert allow, (cmd, reason)
+        p = payload("Bash", command="eval 'x'; cd /etc && cat > passwd")
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+
+    def test_cd_is_logical_by_default(self, tmp_path):
+        """Bash cds logically (-L): `cd link && cd ..` returns to the LINK's
+        parent, not the symlink target's parent. Realpathing every hop
+        falsely denied the in-root write; -P opts into physical semantics."""
+        outside = tmp_path / "outside-tree"
+        (outside / "child").mkdir(parents=True)
+        root = tmp_path / "project"
+        root.mkdir()
+        (root / "link").symlink_to(outside / "child")
+        p = payload("Bash", command="cd link && cd .. && cat > out.txt")
+        p["cwd"] = str(root)
+        allow, reason = hooks.evaluate_pre_tool_use(p, root)
+        assert allow, reason  # logical: back in <root>, write is in-tree
+        # writes THROUGH the link still canonicalize at resolution: denied
+        p = payload("Bash", command="cd link && cat > x")
+        p["cwd"] = str(root)
+        allow, _ = hooks.evaluate_pre_tool_use(p, root)
+        assert not allow
+        # -P selects physical semantics: `cd ..` lands in the OUTSIDE parent
+        p = payload("Bash", command="cd -P link && cd .. && cat > out.txt")
+        p["cwd"] = str(root)
+        allow, _ = hooks.evaluate_pre_tool_use(p, root)
+        assert not allow
+
+    def test_cd_inside_compound_control_flow_fails_open(self, tmp_path):
+        """A cd inside `if false; then … fi`, a function body, or a
+        zero-iteration loop may never execute — applying it guess-denied a
+        write that lands in the original cwd. Compound keywords make the
+        tracked cwd opaque; absolute targets still enforce."""
+        for cmd in (
+            "if false; then\n cd /etc\nfi\ncat > out.txt",
+            "while false; do cd /etc; done; cat > out.txt",
+            "deploy() { cd /etc; }; cat > out.txt",
+        ):
+            p = payload("Bash", command=cmd)
+            p["cwd"] = str(tmp_path)
+            allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+            assert allow, (cmd, reason)
+        p = payload("Bash", command="if true; then cat > /tmp_probe/x; fi")
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+
+    def test_guarded_cd_applies_within_its_list_and_voids_after_it(self, tmp_path):
+        """`A && cd /x` is conditional: within the same && list every later
+        member ran only if the cd succeeded (apply), but past the `;` the
+        guard's outcome is unknowable — `false && cd /etc; cat > out.txt`
+        writes in the ORIGINAL cwd and was falsely denied."""
+        p = payload("Bash", command="false && cd /etc; cat > out.txt")
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+        # within the guarded list the cd is sound and still denies
+        p = payload("Bash", command="true && cd /etc && cat > shadow")
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+
+    def test_non_literal_cd_targets_fail_open(self, tmp_path):
+        """Backslash-escaped whitespace truncates the scanned token (`cd
+        a\\ b/c` reads as `a\\`), and pushd +N/-N rotates the directory
+        stack — neither names a knowable path, so relative targets after
+        them must fail open, never resolve against a wrong guess."""
+        for cmd in (
+            "cd a\\ b/c && cat > ../../.omater/scratch/x",
+            "pushd +1 && cat > out.txt",
+            "pushd -2 && cat > out.txt",
+        ):
+            p = payload("Bash", command=cmd)
+            p["cwd"] = str(tmp_path)
+            allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+            assert allow, (cmd, reason)
+
+    def test_fd_duplication_ampersand_is_not_a_control_operator(self, tmp_path):
+        """`cd /etc >/dev/null 2>&1 && cat > passwd`: the `&` in `2>&1` is
+        fd duplication, not backgrounding — the cd still applies at the &&
+        and the /etc write is a recognized deny. Same for the `&>` shorthand."""
+        for cmd in (
+            "cd /etc >/dev/null 2>&1 && cat > passwd",
+            "cd /etc &> cd.log && cat > passwd",
+        ):
+            p = payload("Bash", command=cmd)
+            p["cwd"] = str(tmp_path)
+            allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+            assert not allow, cmd
+
+    def test_bare_ampersand_backgrounds_the_whole_list(self, tmp_path):
+        """`cd /etc && true & cat > out.txt`: the trailing `&` backgrounds
+        the ENTIRE `cd && true` list in a subshell, so cat writes under the
+        original cwd — was falsely denied as /etc/out.txt."""
+        p = payload("Bash", command="cd /etc && true & cat > out.txt")
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+
+    def test_double_dash_option_terminator_is_not_the_directory(self, tmp_path):
+        """`cd -- /etc && cat > passwd`: parsing `--` as the target pinned
+        the cwd to <root>/-- and let the /etc/passwd write through."""
+        p = payload("Bash", command="cd -- /etc && cat > passwd")
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+
+    def test_cd_mentioned_in_prose_does_not_move_the_cwd(self, tmp_path):
+        """Only cd at a command position counts: `echo cd /etc` is prose."""
+        p = payload("Bash", command="echo cd /etc; cat > out.txt")
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+
     def test_writes_inside_quoted_interpreter_code_pass_by_design(self, tmp_path):
         """CHARACTERIZATION, not a bug (report rough edge #7, measured in the
         sandbox proof): the fence is a redirector for tool-shaped writes, not
