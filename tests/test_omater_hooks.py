@@ -553,6 +553,22 @@ class TestBashFence:
             allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
             assert allow, (cmd, reason)
 
+    def test_stray_paren_rejects_direct_redirects_too(self, tmp_path):
+        """`) > /tmp_probe/x` is a syntax error: bash rejects the whole
+        input before opening the redirect — reporting the target
+        recreated the stray-paren false deny. Case-arm redirects keep
+        denying."""
+        p = payload("Bash", command=") > /tmp_probe/x")
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+        p = payload(
+            "Bash", command="case x in a) echo hi > /tmp_probe/x;; esac"
+        )
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+
     def test_void_at_a_separator_applies_before_the_snapshot(self, tmp_path):
         """`false && cd /etc; true & cat > out.txt`: the &&-guard's void
         at the `;` belongs to the ENDING list — snapshotting first froze

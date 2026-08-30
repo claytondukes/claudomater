@@ -1004,6 +1004,12 @@ def _positioned_write_targets(scannable: str) -> list[tuple[int, str]]:
     if open_in is not None:
         case_live.append((open_in, len(scannable)))
     _in_case = _span_lookup(case_live)
+    if any(not _in_case(k) for k in unmatched_close):
+        # a stray ) outside any live case arm is a syntax error: bash
+        # rejects the WHOLE input before opening any redirect (`) >
+        # /tmp_probe/x` writes nothing) — reporting targets recreated
+        # the false deny the case-arm rule exists to avoid
+        return []
 
     def anchored_on_syntax(m: re.Match) -> bool:
         first = scannable[m.start()]
