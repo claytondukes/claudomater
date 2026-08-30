@@ -457,23 +457,48 @@ def _strip_heredocs(command: str, in_data: Callable[[int], bool]) -> str:
             out.append(command[pos : m.end()])
             pos = m.end()
             continue
-        delim = m.group(3) if m.group(3) is not None else m.group(4)
         eol = command.find("\n", m.end())
         if eol == -1:
             out.append(command[pos:])
             break  # no body can follow: residual << (wall)
-        candidates = (dedent if m.group(1) else exact).get(delim, [])
-        t = bisect.bisect_right(candidates, eol)
-        if t >= len(candidates):
+        # bash QUEUES every heredoc on the line (`cat <<A <<B`): their
+        # bodies follow in shell order — processing only the first left
+        # <<B as a residual wall that hid the real command after both
+        intros = [m]
+        scan = m.end()
+        while True:
+            sib = _HEREDOC_INTRO.search(command, scan, eol)
+            if not sib:
+                break
+            scan = sib.end()
+            if not in_data(sib.start()):
+                intros.append(sib)
+        resolved_all = True
+        search_from = eol
+        term_end = eol
+        for im in intros:
+            delim = im.group(3) if im.group(3) is not None else im.group(4)
+            candidates = (dedent if im.group(1) else exact).get(delim, [])
+            t = bisect.bisect_right(candidates, search_from)
+            if t >= len(candidates):
+                resolved_all = False
+                break
+            term_start = candidates[t]
+            term_end = command.find("\n", term_start)
+            term_end = len(command) if term_end == -1 else term_end
+            search_from = term_end
+        if not resolved_all:
             out.append(command[pos : m.end()])
             pos = m.end()
-            continue  # unterminated: residual << (wall)
-        term_start = candidates[t]
-        term_end = command.find("\n", term_start)
-        term_end = len(command) if term_end == -1 else term_end
+            continue  # some body unterminated: residual << (wall)
+        # emit the intro line with every live marker blanked; drop all
+        # bodies + terminator lines
+        line = list(command[m.start() : eol + 1])
+        for im in intros:
+            for k in range(im.start() - m.start(), im.end() - m.start()):
+                line[k] = " "
         out.append(command[pos : m.start()])
-        out.append(" " * (m.end() - m.start()))  # blank the <<delim marker
-        out.append(command[m.end() : eol + 1])  # intro remainder + newline
+        out.append("".join(line))
         pos = min(term_end + 1, len(command))
     return "".join(out)
 def _mask_data(text: str) -> str:
@@ -1143,8 +1168,15 @@ def resolved_bash_targets(
         alternation = "|".join(
             re.escape(n) for n in sorted(func_names, key=len, reverse=True)
         )
+        # assignment words and condition/body reserved words keep the
+        # invocation in the current shell (`MODE=x f` and `if f; then`
+        # both run f) — missing them kept a stale cwd (false deny).
+        # `command f` bypasses functions and stays excluded.
         for im in re.finditer(
-            r"(?:^|[\n;&|({])\s*(?:![ \t]+)*(?:"
+            r"(?:^|[\n;&|({])\s*"
+            r"(?:(?:if|elif|while|until|then|else|do)[ \t]+)*"
+            r"(?:![ \t]+)*"
+            r"(?:[A-Za-z_][A-Za-z0-9_]*=[^\s;|&<>()]*[ \t]+)*(?:"
             + alternation
             + r")(?![^\s;&|)<>\n])",
             scannable,

@@ -553,6 +553,38 @@ class TestBashFence:
             allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
             assert allow, (cmd, reason)
 
+    def test_sibling_heredocs_consume_in_order(self, tmp_path):
+        """`cat <<A <<B` queues BOTH bodies — after their terminators the
+        next command executes, and the leftover <<B walled the real write
+        into fail-open (miss). A sibling with a MISSING terminator still
+        walls: everything after is data."""
+        p = payload("Bash", command="cat <<A <<B\nA\nB\ncat > /tmp_probe/real")
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+        p = payload(
+            "Bash", command="cat <<A <<B\nA\ncat > /tmp_probe/not-executed\nEOF"
+        )
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+
+    def test_prefixed_function_invocations_void_tracking(self, tmp_path):
+        """`MODE=x f` (and `if f; then`) invoke f in the CURRENT shell —
+        missing the prefixes kept a stale /etc and falsely denied the
+        in-root write. An undefined prefixed word leaves tracking alone."""
+        cmd = f"f() {{ cd {tmp_path}; }}; cd /etc; MODE=x f; cat > out.txt"
+        p = payload("Bash", command=cmd)
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+        p = payload(
+            "Bash", command="g() { :; }; cd /etc; MODE=x h; cat > passwd"
+        )
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+
     def test_case_arm_writers_stay_recognized(self, tmp_path):
         """`case x in x) touch /tmp_probe/x;; esac` RUNS its writer when
         the arm matches — the arm's unmatched `)` is a command position.
