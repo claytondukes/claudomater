@@ -553,6 +553,31 @@ class TestBashFence:
             allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
             assert allow, (cmd, reason)
 
+    def test_backtick_cd_targets_are_not_literal(self, tmp_path):
+        """a cd target containing backticks expands at RUNTIME — an
+        ABSOLUTE fabricated path (`cd /\\`x\\`/sub`) overwrote the
+        backticks' own opacity and resolved later writes against a
+        directory bash never entered. Same rule as \\$()/globs: unknown,
+        fail open."""
+        [(_, resolved)] = hooks.resolved_bash_targets(
+            "cd /`pwd`/sub; cat > out.txt", tmp_path
+        )
+        assert resolved is None
+
+    def test_unterminated_heredoc_scan_is_linear(self, tmp_path):
+        """Every unterminated introducer made the DOTALL body search
+        rescan the remaining command — quadratic in the synchronous hook
+        (4.2s at 9000 introducers). The indexed forward pass is linear."""
+        import time
+
+        cmd = "".join(f"cat <<D{i} x\n" for i in range(9000))
+        p = payload("Bash", command=cmd)
+        p["cwd"] = str(tmp_path)
+        started = time.monotonic()
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert time.monotonic() - started < 1.5
+        assert allow, reason  # walls: everything fails open
+
     def test_invoking_a_defined_function_voids_tracking(self, tmp_path):
         """`f() { cd <root>; }; cd /etc; f; cat > out.txt` writes IN-root
         (the invocation runs the body's cd) — keeping /etc falsely denied

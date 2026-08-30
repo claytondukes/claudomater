@@ -412,13 +412,65 @@ def _cond_spans(text: str) -> list[tuple[int, int]]:
 # quoted prefix let an in-body 'EOF' line terminate early — exposing body
 # text bash never executes (false deny), same shape as the bare-prefix
 # case.
-_HEREDOC = re.compile(
-    r"((?<!<)<<(-)?(?!<)[ \t]*"
-    r"(?:(['\"])((?:(?!\3)[^\n])+)\3(?=[\s;&|<>()]|$)"
-    r"|([\w.+-]+)(?=[\s;&|<>()]|$))[^\n]*\n)"
-    r".*?^(?(2)\t*)(?:\4|\5)$",
-    re.DOTALL | re.MULTILINE,
+# Introducer only — bodies are matched by an INDEXED forward pass in
+# _strip_heredocs: the old single DOTALL regex rescanned the whole
+# remaining command for every introducer without a terminator, which was
+# quadratic on generated/malformed scripts in the synchronous hook.
+_HEREDOC_INTRO = re.compile(
+    r"(?<!<)<<(-)?(?!<)[ \t]*"
+    r"(?:(['\"])((?:(?!\2)[^\n])+)\2(?=[\s;&|<>()]|$)"
+    r"|([\w.+-]+)(?=[\s;&|<>()]|$))"
 )
+
+
+def _strip_heredocs(command: str, in_data: Callable[[int], bool]) -> str:
+    """Drop heredoc bodies (+ their exact terminator lines), blanking each
+    recognized `<<delim` marker while keeping the rest of its intro line
+    scannable (`cat <<EOF > /etc/x` carries its redirect there). Any `<<`
+    SURVIVING — unterminated, unsupported delimiter, inside data — is the
+    resolver's residual-wall signal, unchanged. Terminators are EXACT
+    lines: column zero for <<, leading TABS only for <<- (bash grammar).
+    One line index + bisect per introducer keeps the pass linear."""
+    exact: dict[str, list[int]] = {}
+    dedent: dict[str, list[int]] = {}
+    off = 0
+    for line in command.split("\n"):
+        exact.setdefault(line, []).append(off)
+        dedent.setdefault(line.lstrip("\t"), []).append(off)
+        off += len(line) + 1
+    out: list[str] = []
+    pos = 0
+    while True:
+        m = _HEREDOC_INTRO.search(command, pos)
+        if not m:
+            out.append(command[pos:])
+            break
+        if in_data(m.start()):
+            # a << inside a comment, quoted span, or arithmetic expansion
+            # is DATA (a string starts no heredoc; in arithmetic << is a
+            # SHIFT) — eating the following lines hid real commands
+            out.append(command[pos : m.end()])
+            pos = m.end()
+            continue
+        delim = m.group(3) if m.group(3) is not None else m.group(4)
+        eol = command.find("\n", m.end())
+        if eol == -1:
+            out.append(command[pos:])
+            break  # no body can follow: residual << (wall)
+        candidates = (dedent if m.group(1) else exact).get(delim, [])
+        t = bisect.bisect_right(candidates, eol)
+        if t >= len(candidates):
+            out.append(command[pos : m.end()])
+            pos = m.end()
+            continue  # unterminated: residual << (wall)
+        term_start = candidates[t]
+        term_end = command.find("\n", term_start)
+        term_end = len(command) if term_end == -1 else term_end
+        out.append(command[pos : m.start()])
+        out.append(" " * (m.end() - m.start()))  # blank the <<delim marker
+        out.append(command[m.end() : eol + 1])  # intro remainder + newline
+        pos = min(term_end + 1, len(command))
+    return "".join(out)
 def _mask_data(text: str) -> str:
     """Render the scan text from _lex_spans: quoted spans become the
     placeholder TOKEN (a bare space also erased argument structure —
@@ -757,37 +809,10 @@ def _scannable(command: str) -> str:
     # copy-target regex no longer saw the out-of-tree write. A quoted
     # redirect TARGET ('> "/x y"') reads as the placeholder, which the
     # resolver treats as non-literal and fails OPEN on (deny-on-recognized).
-    def _heredoc_repl(m: re.Match) -> str:
-        # keep the intro line scannable (its redirect is real) but blank the
-        # `<<delim` marker: any << SURVIVING this pass is a heredoc shape the
-        # pattern does not support, which the resolver treats as hard opacity
-        intro = m.group(1)
-        delim_end = m.end(4) if m.group(4) is not None else m.end(5)
-        if m.group(3):
-            delim_end += 1  # closing quote
-        cut = delim_end - m.start(1)
-        return " " * cut + intro[cut:]
-
     data = _data_spans(command)
-    data = sorted(data + _arith_spans(command, data))
-    di = 0
-
-    def _outside_data(m: re.Match) -> str:
-        # a << inside a comment, quoted span, or arithmetic expansion is
-        # DATA (a comment/string starts no heredoc; in arithmetic << is a
-        # SHIFT) — eating the following lines as a body hid real commands.
-        # Cursor lookup: re.sub fires callbacks in source order and the
-        # spans are sorted, so each span is visited once — the per-match
-        # rescan was quadratic on generated scripts full of quoted lines
-        # and heredocs (synchronous hook).
-        nonlocal di
-        while di < len(data) and data[di][1] <= m.start(1):
-            di += 1
-        if di < len(data) and data[di][0] <= m.start(1):
-            return m.group(0)
-        return _heredoc_repl(m)
-
-    scannable = _HEREDOC.sub(_outside_data, command)
+    scannable = _strip_heredocs(
+        command, _span_lookup(data + _arith_spans(command, data))
+    )
     # No padding around the placeholder: quotes glued to other characters
     # (`echo "x"#suffix`, `cp x"a b"y t`) must keep their word intact — a
     # space-padded placeholder invented a word boundary that turned #suffix
@@ -1416,7 +1441,7 @@ def resolved_bash_targets(
             continue
         if (
             "\\" in target
-            or any(ch in target for ch in "*?[{")
+            or any(ch in target for ch in "*?[{`")
             or (verb == "pushd" and re.fullmatch(r"[+-]\d+", target))
         ):
             # Not a literal path: a backslash means the token was truncated
