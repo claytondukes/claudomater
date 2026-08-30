@@ -1227,6 +1227,17 @@ def resolved_bash_targets(
             events.append((m.start(), "hard", None))
     dead_spans: list[tuple[int, int]] = []
     func_defined_at: dict[str, int] = {}
+    # prefix paren depth, ONE pass (a per-definition walk was quadratic
+    # against many definitions in the synchronous hook)
+    _paren_depth_at: list[int] = [0] * (len(scannable) + 1)
+    _pd = 0
+    for _k, _ch in enumerate(scannable):
+        _paren_depth_at[_k] = _pd
+        if _ch == "(" and _escape_parity(scannable, _k) == 0:
+            _pd += 1
+        elif _ch == ")" and _pd and _escape_parity(scannable, _k) == 0:
+            _pd -= 1
+    _paren_depth_at[len(scannable)] = _pd
     for m in _FUNC_DEF.finditer(scannable):
         # definitions execute nothing (see _FUNC_DEF): a bounded body is
         # a dead span; an unmatchable one falls back to the wall
@@ -1242,7 +1253,25 @@ def resolved_bash_targets(
             opener = kw_body.start(1) if kw_body else None
             name_m = re.match(r"[ \t]*([A-Za-z_][A-Za-z0-9_]*)", scannable[m.end() :])
         end = _func_body_end(scannable, opener) if opener is not None else None
-        if name_m:
+        # a definition registers its name only when the PARENT shell sees
+        # it: one inside another body, a subshell, a pipeline, or a
+        # backgrounded list defines nothing here (`(f() { :; }); f` runs
+        # an undefined f — voiding on it hid a recognized write). The
+        # body still dead-spans regardless.
+        parent_scope = not any(s <= def_start < e for s, e in dead_spans)
+        if parent_scope and _pipeline_scoped(m):
+            parent_scope = False
+        if parent_scope and _paren_depth_at[def_start]:
+            parent_scope = False
+        if parent_scope and end is not None:
+            b = _segment_boundary(scannable, end)
+            if (
+                b < len(scannable)
+                and scannable[b] == "&"
+                and not scannable.startswith("&&", b)
+            ):
+                parent_scope = False
+        if name_m and parent_scope:
             # a name is a FUNCTION only from its definition's completion
             # onward — `f; cat > passwd; f() { :; }` runs an undefined f
             # first, and voiding on that call hid the recognized write

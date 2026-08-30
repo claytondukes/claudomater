@@ -553,6 +553,18 @@ class TestBashFence:
             allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
             assert allow, (cmd, reason)
 
+    def test_subshell_definitions_do_not_register_names(self, tmp_path):
+        """`(f() { :; }); cd /etc; f; cat > passwd` runs an UNDEFINED f —
+        the subshell definition never reaches the parent, and voiding on
+        the later call hid the recognized write. Parent-scope
+        definitions still void on invocation (existing test)."""
+        p = payload(
+            "Bash", command="(f() { :; }); cd /etc; f; cat > passwd"
+        )
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+
     def test_stray_paren_rejects_direct_redirects_too(self, tmp_path):
         """`) > /tmp_probe/x` is a syntax error: bash rejects the whole
         input before opening the redirect — reporting the target
