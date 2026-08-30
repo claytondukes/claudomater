@@ -949,6 +949,12 @@ _CREATE_OPT_WITH_ARG = {
 }
 
 
+def _before_ddash(text: str) -> str:
+    """Text before the first standalone `--` (option parsing ends there —
+    later dash tokens are operands, not options)."""
+    return re.split(r"(?:^|\s)--(?=\s|$)", text, maxsplit=1)[0]
+
+
 def _positioned_write_targets(scannable: str) -> list[tuple[int, str]]:
     targets: list[tuple[int, str]] = []
 
@@ -997,9 +1003,12 @@ def _positioned_write_targets(scannable: str) -> list[tuple[int, str]]:
         for m in pattern.finditer(scannable):
             if anchored_on_syntax(m):
                 continue
+            # option checks stop at the first `--`: dash tokens after it
+            # are OPERANDS (`touch -- -r /f` writes -r and /f — reading
+            # -r as an option skipped the recognized write)
             if pattern is _CREATE and _CREATE_OPT_WITH_ARG[
                 m.group("cmd")
-            ].search(m.group(0)):
+            ].search(_before_ddash(m.group(0))):
                 continue  # an arg-taking option consumes an operand: fail open
             seen_ddash = False
             for operand in re.finditer(r"[^\s;|&<>()]+", m.group("ops")):
@@ -1018,7 +1027,9 @@ def _positioned_write_targets(scannable: str) -> list[tuple[int, str]]:
     for m in _COPY.finditer(scannable):
         if anchored_on_syntax(m):
             continue
-        if m.group("cmd") != "rsync" and _TARGET_DIR_OPT.search(m.group(0)):
+        if m.group("cmd") != "rsync" and _TARGET_DIR_OPT.search(
+            _before_ddash(m.group(0))
+        ):
             continue
         keep(m.start("dest"), m.group("dest"))
     return targets

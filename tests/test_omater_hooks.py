@@ -553,6 +553,24 @@ class TestBashFence:
             allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
             assert allow, (cmd, reason)
 
+    def test_option_checks_stop_at_the_terminator(self, tmp_path):
+        """Dash tokens after `--` are OPERANDS: `touch -- -r /f` writes
+        both, and `cp -- -t src /f` copies to /f — reading them as
+        options skipped the recognized writes. Real pre-terminator
+        options still fail open."""
+        for cmd in (
+            "touch -- -r /tmp_probe/out",
+            "cp -- -t /tmp_probe/out",
+        ):
+            p = payload("Bash", command=cmd)
+            p["cwd"] = str(tmp_path)
+            allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+            assert not allow, cmd
+        p = payload("Bash", command=f"cd /etc; mkdir -m 755 {tmp_path}/safe")
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+
     def test_path_qualified_writers_stay_recognized(self, tmp_path):
         """`/bin/touch`, `/usr/bin/tee`, and `./tools/cp` are the same
         statically identifiable writers — requiring bare names regressed
