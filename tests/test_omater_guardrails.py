@@ -1109,3 +1109,226 @@ class TestParseLimits:
                 {"limits": [{"kind": "weekly_scoped", "percent": 5, "scope": scope}]}
             )
             assert out["scoped_model"] is None, scope
+
+
+# ---- Phase 1 parity findings F5/F6 (first live parity run) -----------------
+
+
+from claudomater.guardrails import (
+    ParkWake,
+    baseline_account_from_log,
+    make_guardrail_check,
+    wait_for_unpark,
+)
+from claudomater.runlog import RunLog
+
+
+def guardrail_event(account, action="ok"):
+    """The exact shape PhaseRunner._gate writes: decision.as_dict()."""
+    return {
+        "event": "guardrail-check",
+        "phase": "dev",
+        "detail": Decision(action=action, snapshot=snapshot(account=account)).as_dict(),
+    }
+
+
+class TestBaselineFromLog:
+    """Parity finding F5: the account baseline lived in process memory, so a
+    park/resume boundary (fresh process) started empty and the live account
+    switch was handled safely but recorded as rebaselined=False."""
+
+    def test_seeds_from_the_last_positive_reading(self):
+        events = [
+            guardrail_event({"uuid": "acct-a"}),
+            guardrail_event({"uuid": "acct-b"}),
+        ]
+        assert baseline_account_from_log(events) == {"uuid": "acct-b"}
+
+    def test_placeholder_and_malformed_readings_cannot_anchor_a_switch(self):
+        events = [
+            guardrail_event({"uuid": "acct-a"}),
+            guardrail_event({"unknown": "true"}),  # placeholder: nobody
+            {"event": "guardrail-check", "detail": {"usage": None}},  # pause, no snap
+            {"event": "guardrail-check", "detail": "garbage"},
+        ]
+        assert baseline_account_from_log(events) == {"uuid": "acct-a"}
+
+    def test_no_guardrail_history_reads_as_no_baseline(self):
+        assert baseline_account_from_log([]) is None
+        assert baseline_account_from_log([{"event": "phase-spawn"}]) is None
+
+
+class TestMakeGuardrailCheck:
+    def test_switch_across_a_process_boundary_is_reported(self, tmp_path):
+        """The live F5 shape: the run's log recorded account A before the
+        park; the fresh process's first reading is account B. The seeded
+        baseline makes the switch visible (rebaselined=True) exactly once."""
+        log = RunLog.create(tmp_path)
+        log.event("dev", "guardrail-check", guardrail_event({"uuid": "acct-a"})["detail"])
+        check = make_guardrail_check(
+            UserConfig(), runlog=log, read=lambda: snapshot(account={"uuid": "acct-b"})
+        )
+        first = check()
+        assert first.rebaselined
+        assert "acct-a" in first.reasons[0] and "acct-b" in first.reasons[0]
+        # the baseline advanced: the same account again is not a switch
+        assert not check().rebaselined
+
+    def test_without_a_run_log_the_first_reading_is_the_baseline(self):
+        check = make_guardrail_check(
+            UserConfig(), read=lambda: snapshot(account={"uuid": "acct-b"})
+        )
+        assert not check().rebaselined
+
+    def test_unavailable_reading_is_handed_to_evaluate_not_raised(self):
+        def read():
+            raise UsageUnavailable("no creds")
+
+        check = make_guardrail_check(UserConfig(), read=read)
+        decision = check()
+        assert decision.action == "pause"
+        assert "failing closed" in decision.reasons[0]
+
+    def test_placeholder_reading_never_becomes_the_baseline(self):
+        readings = [
+            snapshot(account={"uuid": "acct-a"}),
+            snapshot(account={"unknown": "true"}),
+            snapshot(account={"uuid": "acct-b"}),
+        ]
+        check = make_guardrail_check(UserConfig(), read=lambda: readings.pop(0))
+        assert not check().rebaselined  # seeds acct-a
+        assert not check().rebaselined  # placeholder: no switch, no advance
+        third = check()
+        assert third.rebaselined  # acct-a -> acct-b, anchored past the gap
+        assert "acct-a" in third.reasons[0]
+
+
+class TestWaitForUnpark:
+    """Parity finding F6: park-recovery was clock-or-human — the operator
+    had already switched accounts and still had to ping manually. The wait
+    loop polls the spawn gate and the control channel."""
+
+    def _parked(self, tmp_path):
+        log = RunLog.create(tmp_path)
+        log.park("5h window at 100%")
+        return log
+
+    def test_wakes_on_capacity_and_logs_the_wake(self, tmp_path):
+        log = self._parked(tmp_path)
+        decisions = [
+            Decision(action="pause"),
+            Decision(action="pause"),
+            Decision(action="ok", rebaselined=True),
+        ]
+        sleeps = []
+        wake = wait_for_unpark(
+            log,
+            lambda: decisions.pop(0),
+            poll_interval_s=300,
+            sleep=sleeps.append,
+            clock=lambda: float(len(sleeps)),
+        )
+        assert wake.outcome == "capacity" and wake.polls == 3
+        assert wake.decision.action == "ok"
+        assert sleeps == [300, 300]
+        wakes = [e for e in log.events() if e["event"] == "park-wake"]
+        assert wakes[-1]["detail"]["source"] == "capacity"
+        assert wakes[-1]["detail"]["rebaselined"] is True
+        # entry was write-ahead
+        names = [e["event"] for e in log.events()]
+        assert names.index("park-wait") < names.index("park-wake")
+
+    def test_first_poll_is_immediate(self, tmp_path):
+        """The live park was resumable the moment waiting would have begun
+        (the operator had already switched accounts) — no initial sleep."""
+        log = self._parked(tmp_path)
+        sleeps = []
+        wake = wait_for_unpark(
+            log, lambda: Decision(action="ok"), sleep=sleeps.append
+        )
+        assert wake.outcome == "capacity" and wake.polls == 1 and sleeps == []
+
+    def test_operator_resume_wakes_between_polls(self, tmp_path):
+        log = self._parked(tmp_path)
+
+        def sleep(_s):
+            log.write_control("resume")
+
+        wake = wait_for_unpark(log, lambda: Decision(action="pause"), sleep=sleep)
+        assert wake.outcome == "resume"
+        assert wake.control["action"] == "resume"
+
+    def test_abort_dominates_resume(self, tmp_path):
+        log = self._parked(tmp_path)
+        log.write_control("resume")
+        log.write_control("abort")
+        wake = wait_for_unpark(log, lambda: Decision(action="pause"), sleep=lambda s: None)
+        assert wake.outcome == "abort"
+
+    def test_controls_from_before_the_park_are_not_consumed(
+        self, tmp_path, monkeypatch
+    ):
+        """A resume answered to an EARLIER state must not wake a later park:
+        only commands at-or-after the park are pending. Timestamps have 1s
+        resolution, so the clock is faked to tick per write instead of
+        sleeping the suite past a real second boundary."""
+        import itertools
+
+        ticker = itertools.count()
+
+        def fake_now():
+            t = next(ticker)
+            return f"2026-08-30T00:{t // 60:02d}:{t % 60:02d}Z"
+
+        monkeypatch.setattr("claudomater.runlog._utc_now", fake_now)
+        log = RunLog.create(tmp_path)
+        log.write_control("resume")
+        log.park("5h window at 100%")
+        decisions = [Decision(action="pause"), Decision(action="ok")]
+        wake = wait_for_unpark(log, lambda: decisions.pop(0), sleep=lambda s: None)
+        assert wake.outcome == "capacity"
+
+    def test_unparked_run_is_refused(self, tmp_path):
+        """With no run-parked event an empty park timestamp would make EVERY
+        stale control eligible — a leftover abort would kill a run that was
+        never parked. Fail loudly instead."""
+        from claudomater.runlog import RunError
+
+        log = RunLog.create(tmp_path)
+        log.write_control("abort")  # stale command lying in wait
+        with pytest.raises(RunError, match="no run-parked event"):
+            wait_for_unpark(log, lambda: Decision(action="ok"), sleep=lambda s: None)
+
+    def test_timeout_honors_max_wait_with_a_final_deadline_poll(self, tmp_path):
+        """The documented max wait is the max wait: the loop must not cut
+        the last interval short (max=1000/poll=300 used to time out at
+        ~900s), and the deadline itself gets a final poll + control read —
+        so polls land at 0, 300, 600, 900, and 1000."""
+        log = self._parked(tmp_path)
+        clock_box = [0.0]
+        sleeps = []
+
+        def sleep(s):
+            sleeps.append(s)
+            clock_box[0] += s
+
+        wake = wait_for_unpark(
+            log,
+            lambda: Decision(action="pause"),
+            poll_interval_s=300,
+            max_wait_s=1000,
+            sleep=sleep,
+            clock=lambda: clock_box[0],
+        )
+        assert wake.outcome == "timeout"
+        assert wake.waited_s == 1000
+        assert wake.polls == 5
+        assert sleeps == [300, 300, 300, 100]
+        names = [e["event"] for e in log.events()]
+        assert "park-wait-timeout" in names
+        # still parked: completing it must be refused, aborting allowed
+        from claudomater.runlog import RunError
+
+        with pytest.raises(RunError, match="parked"):
+            log.finish("run-complete")
+        assert log.is_live()

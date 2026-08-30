@@ -55,11 +55,13 @@ REFRESH_TTL_S = 60
 HttpFn = Callable[[str, dict[str, str], float], bytes]
 
 
-def _positive_identity(account: Any) -> bool:
+def positive_identity(account: Any) -> bool:
     """A placeholder identity ({'unknown': 'true'}) identifies NOBODY:
     equality between two unknowns is not proof a cache belongs to the active
     account, so the stale carve-out requires a positively resolved identity
-    on both sides."""
+    on both sides. Public because the guardrail baseline (F5) applies the
+    same rule: only a positively-identified reading may seed or advance the
+    account baseline."""
     return isinstance(account, dict) and bool(account) and "unknown" not in account
 
 
@@ -363,14 +365,14 @@ def read_usage(
             fetch_account if fetch_account is not None else account_identity(env=env)
         )
         stale_snapshot = None
-        if _positive_identity(provenance) and provenance == current:
+        if positive_identity(provenance) and provenance == current:
             stale_snapshot = UsageSnapshot(
                 **parse_limits(payload),
                 account=provenance,
                 fetched_at=mtime,
                 source="stale",
             )
-        elif isinstance(provenance, dict) and not _positive_identity(provenance):
+        elif isinstance(provenance, dict) and not positive_identity(provenance):
             message += (
                 "; stale reading's recorded provenance is an unknown-identity "
                 "placeholder — unverifiable, not usable"

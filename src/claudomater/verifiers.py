@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import subprocess
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePath
 from typing import Any, Callable
 
 
@@ -111,7 +111,9 @@ def result_field(name: str, expected: Any = ...) -> Verifier:
     return check
 
 
-def result_file_exists(name: str) -> Verifier:
+def result_file_exists(
+    name: str, artifact_roots: str | list[str] | tuple[str, ...] = ()
+) -> Verifier:
     """The file the agent NAMED in result field `name` exists inside the
     project root — the result-aware companion to `files_exist`. `files_exist`
     checks a glob the spec author guessed in advance; this checks the path
@@ -119,7 +121,44 @@ def result_file_exists(name: str) -> Verifier:
     written (or landed outside the project) fails on its own words.
     Containment is part of the check: a path resolving outside the project
     root fails even if it exists — an out-of-tree artifact is a fence
-    escape, not a deliverable."""
+    escape, not a deliverable.
+
+    `artifact_roots` is the declared exception (parity finding F1): an
+    in-tree directory that is deliberately a symlink to another checkout
+    (ui3's `_bmad-output` is a separate git repo) resolves outside the
+    project root and failed containment for a legitimate artifact — a $12
+    live failure. Each entry names an in-tree RELATIVE path whose resolved
+    location is trusted; a claimed path resolving under one passes
+    containment. The declaration is narrow by construction: an absolute or
+    `..`-carrying entry is refused (the policy is "this in-tree directory
+    may point elsewhere", never "also allow that other location"), and
+    nothing outside the declared roots gains anything."""
+    # str | list | tuple ONLY: any other iterable (a dict from a YAML
+    # misdeclaration would silently become its KEYS, a set would reorder)
+    # is refused outright — containment exceptions must be legible.
+    if isinstance(artifact_roots, str):
+        roots = [artifact_roots]
+    elif isinstance(artifact_roots, (list, tuple)):
+        roots = list(artifact_roots)
+    else:
+        raise VerifierError(
+            "artifact_roots must be a string, or a list/tuple of strings, "
+            f"got {type(artifact_roots).__name__}"
+        )
+    for ar in roots:
+        # A misdeclared spec must fail closed at build time, not silently
+        # widen containment: run_verifiers turns this raise into a failed
+        # verifier-error verdict.
+        if not isinstance(ar, str) or not ar:
+            raise VerifierError(
+                f"artifact root must be a non-empty string, got {ar!r}"
+            )
+        parts = PurePath(ar).parts
+        if PurePath(ar).is_absolute() or ".." in parts:
+            raise VerifierError(
+                f"artifact root {ar!r} must be a relative in-tree path "
+                "without '..'"
+            )
 
     def check(ctx: VerifierContext) -> Verdict:
         if name not in ctx.result:
@@ -139,11 +178,28 @@ def result_file_exists(name: str) -> Verifier:
             path = (root / value).resolve()
         except (OSError, RuntimeError) as exc:  # symlink loops included
             return Verdict("result_file_exists", False, f"{value!r}: {exc}")
-        if path != root and root not in path.parents:
+        allowed = [root]
+        for ar in roots:
+            try:
+                allowed.append((root / ar).resolve())
+            except (OSError, RuntimeError) as exc:
+                # Silently skipping the root would fail closed but LIE about
+                # why (the containment message would blame the artifact
+                # path) — and a misleading verifier message is itself a
+                # hazard (F3). Name the actual problem.
+                return Verdict(
+                    "result_file_exists",
+                    False,
+                    f"declared artifact root {ar!r} cannot be resolved: {exc}",
+                )
+        if not any(path == base or base in path.parents for base in allowed):
+            where = "the project root"
+            if roots:
+                where += f" and declared artifact roots {roots}"
             return Verdict(
                 "result_file_exists",
                 False,
-                f"result[{name!r}] = {value!r} resolves outside the project root",
+                f"result[{name!r}] = {value!r} resolves outside {where}",
             )
         # is_file, not exists: naming a directory (".", the project root...)
         # would let an agent pass without producing any artifact at all

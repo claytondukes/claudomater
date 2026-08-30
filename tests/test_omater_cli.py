@@ -254,6 +254,35 @@ class TestStartCommand:
         progress = (log.run_dir / "progress.log").read_text()
         assert "claude-fable-5" in progress and "NOTE" in progress
 
+    def test_start_records_the_worktree_baseline(self, tmp_path, omater_on_path):
+        """Parity finding F2: paths dirty at run START are the operator's
+        deliberately-uncommitted state; the run log records them so salvage
+        can exclude them (and adoption inherits the ORIGINAL baseline)."""
+        import subprocess
+
+        def git(*args):
+            subprocess.run(
+                ["git", "-C", str(tmp_path), *args], check=True, capture_output=True
+            )
+
+        git("init", "-q")
+        git("config", "user.email", "t@t")
+        git("config", "user.name", "t")
+        main(["init", str(tmp_path)])
+        (tmp_path / "committed.txt").write_text("x", encoding="utf-8")
+        git("add", "-A")
+        git("commit", "-q", "-m", "init")
+        (tmp_path / "pre-dirt.txt").write_text("operator state", encoding="utf-8")
+        assert main(["start", str(tmp_path)]) == EXIT_OK
+        log = RunLog.adopt(tmp_path)
+        (baseline,) = [
+            e for e in log.events() if e["event"] == "worktree-baseline"
+        ]
+        # `.claude/` rides along on purpose: the fence was armed moments
+        # before the capture, and its settings dirt is run scaffolding, not
+        # phase work — it must never ride a salvage commit either.
+        assert baseline["detail"]["paths"] == [".claude/", "pre-dirt.txt"]
+
     def test_start_refuses_provisioning_drift(self, tmp_path, capsys):
         (tmp_path / ".omater.yaml").write_text("project: demo\n", encoding="utf-8")
         assert main(["start", str(tmp_path)]) == EXIT_ERROR

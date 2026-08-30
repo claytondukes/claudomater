@@ -42,7 +42,13 @@ Phase 0 skeleton — the pieces every pipeline run stands on:
   never act on stale data. Per-window `pause | degrade` behavior, a
   scoped-quota degrade path, and account-switch re-baselining come from user
   config. A fake-usage injection path (`OMATER_FAKE_USAGE`) makes every
-  guardrail branch testable in CI.
+  guardrail branch testable in CI. Park recovery is first-class:
+  `guardrails.make_guardrail_check` builds the spawn-gate callable with its
+  account baseline seeded from the run log (so a park/resume boundary keeps
+  account-switch detection), and `guardrails.wait_for_unpark` is the resume
+  loop a driver calls on a paused outcome — it polls the gate and watches
+  the control channel, so a parked run wakes on capacity, an account
+  switch, or an operator `resume`/`abort`, not just clock-or-human.
 - **Slack notifications** — `PAUSED-QUOTA`, `DEGRADED`, `ESCALATED`,
   `RUN-COMPLETE`, `PROMPT-BLOCKED`, sent the moment the state changes so an
   overnight run never saves its bad news for the morning.
@@ -54,7 +60,9 @@ Phase 0 skeleton — the pieces every pipeline run stands on:
   self-disarms (allows) for any session not carrying the `OMATER_PHASE_AGENT`
   marker the phase executor injects — a project-level hook fires in EVERY
   Claude session in the repo, and the fence contains spawned agents, never
-  the human (parity finding P1-1). `omater init --verify` is the
+  the human (parity finding P1-1). Driver contract: a driver that started a
+  run ends it with `omater teardown` after the terminal event — between
+  runs the fence must not exist. `omater init --verify` is the
   between-runs drift check. The fence is a redirector for tool-shaped
   writes, **not a jail**: writes constructed inside quoted interpreter code
   (`python -c`, tempfile) pass the Bash scan by design; the measured

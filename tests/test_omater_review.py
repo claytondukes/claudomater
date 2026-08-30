@@ -140,11 +140,19 @@ class TestBlockPathInjection:
         # cycle 1: the injected finding sits AT the internal-tier floor
         gate1 = review_gate([injected, finding("NOTE")], "MUST-FIX")
         assert not gate1.passed
-        assert gate1.as_event_detail() == {
+        detail = gate1.as_event_detail()
+        # F7: a blocking gate's event detail carries the reason STRINGS, not
+        # counts alone — the finding text must survive in the run log, not
+        # only in a transcript. (A passing gate omits the key; see
+        # test_empty_findings_pass.)
+        assert detail["blocking_reasons"] == gate1.blocking_reasons()
+        assert "unvalidated filter" in detail["blocking_reasons"][0]
+        assert detail == {
             "floor": "MUST-FIX",
             "findings": 2,
             "blocking": 1,
             "gate": "block",
+            "blocking_reasons": gate1.blocking_reasons(),
         }
         # the block feeds the dev re-drive through the real prompt seam
         (reason,) = gate1.blocking_reasons()
