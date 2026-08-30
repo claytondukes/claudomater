@@ -399,11 +399,17 @@ class RunLog:
           abort it."""
         with self._append_lock():
             events = self._repaired_live_events()
-            if event == "run-failed" and _is_parked(events):
+            if event in ("run-failed", "run-complete") and _is_parked(events):
+                # A parked run neither failed nor completed: nothing
+                # progressed since the park, so BOTH success and failure
+                # terminals would misrepresent it (failing it recreates the
+                # Epic 9 empty-reasons death; completing it claims success
+                # for work that never resumed). run-aborted stays available
+                # as the intentional operator escape hatch.
                 raise RunError(
-                    f"run {self.run_id} is parked (live-and-waiting), not "
-                    "failed — resume it or abort it; failing a parked run "
-                    "recreates the Epic 9 empty-reasons death"
+                    f"run {self.run_id} is parked (live-and-waiting) — resume "
+                    f"it or abort it; {event!r} on a parked run misrepresents "
+                    "un-progressed state"
                 )
             return self._append_event(phase, event, detail, story_key)
 

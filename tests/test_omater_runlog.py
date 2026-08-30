@@ -565,6 +565,20 @@ class TestPark:
             log.finish("run-failed", {"reason": "double finish"})
         assert [e["event"] for e in log.events()][-1] == "run-complete"
 
+    def test_completing_a_parked_run_is_refused(self, tmp_path):
+        """Round-9 finding (suppressed): only run-failed was refused while
+        parked — run-complete could still terminate a run whose work never
+        resumed, claiming success for un-progressed state. Both terminals
+        are refused while parked; run-aborted stays the operator escape
+        hatch."""
+        log = RunLog.create(tmp_path)
+        log.event("lessons", "phase-spawn", {"model": "m", "attempt": 1})
+        log.park("paused: guardrail", phase="lessons")
+        with pytest.raises(RunError, match="parked"):
+            log.finish("run-complete", {"lessons": 5})
+        assert log.is_live()
+        log.finish("run-aborted", {"reason": "operator decision"})
+
     def test_failing_a_parked_run_is_refused(self, tmp_path):
         """Round-1 finding: the park record alone did not stop a driver from
         calling finish('run-failed') right after — the incident path with a

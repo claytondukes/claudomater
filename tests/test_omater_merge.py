@@ -83,6 +83,18 @@ class TestStaleNumericClaims:
         (msg,) = stale_numeric_claims("suite 1,234", 5)
         assert "5" in msg
 
+    def test_signed_or_alphanumeric_attached_counts_are_not_claims(self):
+        """Round-9 finding: '-1 passed' read as a claim of 1 and '1e3
+        passed' as a claim of 3. Count tokens must not be glued to signs or
+        word characters — while markdown emphasis ('**620 passed**') keeps
+        working, since PR bodies bold their counts."""
+        for text in ("-1 passed", "+5 passed", "1e3 passed",
+                     "x1 tests passed", "suite -1"):
+            assert stale_numeric_claims(text, 999) == [], text
+        assert stale_numeric_claims("**620 passed**", 620) == []
+        (msg,) = stale_numeric_claims("**620 passed**", 621)
+        assert "621" in msg
+
     def test_garbage_counts_fail_loudly(self):
         for bad in (True, -1, "486", None, 4.86):
             with pytest.raises(MergeSeamError):

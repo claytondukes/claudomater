@@ -360,40 +360,35 @@ def read_usage(
             message += "; stale reading has no recorded account provenance — not usable"
         raise UsageUnavailable(message, snapshot=stale_snapshot, age_s=age)
 
-    # Attribution for a cache we did not refresh: recorded provenance first
-    # (a prior omater refresh embedded who fetched it — the numbers describe
-    # THAT account, whoever reads them now), the current login as fallback
-    # for caches without one (statusline-written). Mislabeling a fresh-ish
-    # cache with the reader's identity would hide an account switch from the
-    # guardrail's re-baseline check.
-    if refreshed:
-        account = fetch_account
-    else:
-        provenance = payload.get("fetched_by")
-        if (
-            fetch_account is not None
-            and isinstance(provenance, dict)
-            and provenance != fetch_account
-        ):
-            # A failed refresh POSITIVELY identified the active credential,
-            # and it is not the account this cache describes — quota is
-            # account-global, so serving A's numbers to B's run would let B
-            # proceed on A's quota (the 3900s TTL keeps such caches usable
-            # far longer than the old 300s did). Known-mismatch = fail
-            # closed, at ANY age — the stale branch above applies the same
-            # rule; this closes the younger-than-max window.
-            raise UsageUnavailable(
-                f"account-mismatch: cache at {cache} was fetched by a "
-                "different account than the active credential; refusing its "
-                "numbers"
-                + (f" (refresh failed: {failure})" if failure else "")
-            )
-        account = (
-            provenance if isinstance(provenance, dict) else account_identity(env=env)
+    # Who do the LOADED payload's numbers belong to? Recorded provenance
+    # first (a prior omater refresh embedded who fetched it); an
+    # unprovenanced cache falls back to the logged-in identity under the
+    # module's shared-cache assumption (the statusline refreshes as the
+    # logged-in account and writes no provenance). The owner is derived from
+    # the payload we actually READ — not from `refreshed` — because the
+    # shared statusline can overwrite the cache between our own
+    # refresh_cache() and this read.
+    provenance = payload.get("fetched_by")
+    cache_owner = (
+        provenance if isinstance(provenance, dict) else account_identity(env=env)
+    )
+    if fetch_account is not None and cache_owner != fetch_account:
+        # A refresh attempt POSITIVELY identified the active credential and
+        # it is not the account these numbers describe — quota is
+        # account-global, so serving A's numbers to B's run would let B
+        # proceed on A's quota (the 3900s TTL keeps caches usable far longer
+        # than the old 300s did). Known mismatch = fail closed, at ANY age
+        # and on BOTH branches. (The stale branch above stays stricter: its
+        # carve-out PROCEEDS on old data, so it demands recorded provenance
+        # and never uses the shared-cache assumption.)
+        raise UsageUnavailable(
+            f"account-mismatch: cache at {cache} belongs to a different "
+            "account than the active credential; refusing its numbers"
+            + (f" (refresh failed: {failure})" if failure else "")
         )
     return UsageSnapshot(
         **parse_limits(payload),
-        account=account,
+        account=cache_owner,
         fetched_at=mtime,
         source="live" if refreshed else "cache",
     )

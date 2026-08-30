@@ -640,6 +640,58 @@ class TestStaleProvenance:
         assert excinfo.value.snapshot is None
         assert evaluate(excinfo.value, UserConfig()).action == "pause"
 
+    def test_unprovenanced_cache_with_a_foreign_credential_fails_closed(
+        self, tmp_path
+    ):
+        """Round-9 finding: an unprovenanced (statusline-written) cache
+        bypassed the mismatch check entirely. The cache's owner is now
+        derived from the LOADED payload — recorded provenance, else the
+        logged-in identity under the shared-cache assumption — and a
+        positively-identified foreign credential fails closed either way."""
+        import urllib.error
+
+        from claudomater.credentials import EnvTokenProvider
+
+        cache = self._stale_cache(tmp_path, {"limits": self.LIMITS}, age_s=120)
+
+        def failing_http(url, headers, timeout):
+            raise urllib.error.URLError("429: Too Many Requests")
+
+        # active credential: env-token fingerprint; cache owner: the
+        # logged-in identity (no OMATER_ACCOUNT_ID) — never the same value
+        with pytest.raises(UsageUnavailable, match="account-mismatch"):
+            read_usage(
+                cache_path=cache,
+                providers=[EnvTokenProvider(env={"OMATER_OAUTH_TOKEN": "tok"})],
+                http=failing_http,
+                env={},
+            )
+
+    def test_unprovenanced_cache_with_the_same_identity_still_serves(
+        self, tmp_path
+    ):
+        """The common single-account case must keep working: statusline
+        cache, refresh 429s, but the acquired credential IS the logged-in
+        identity (here both pinned via OMATER_ACCOUNT_ID) — the shared-cache
+        assumption applies and the reading serves."""
+        import urllib.error
+
+        from claudomater.credentials import EnvTokenProvider
+
+        cache = self._stale_cache(tmp_path, {"limits": self.LIMITS}, age_s=120)
+
+        def failing_http(url, headers, timeout):
+            raise urllib.error.URLError("429: Too Many Requests")
+
+        snap = read_usage(
+            cache_path=cache,
+            providers=[EnvTokenProvider(env={"OMATER_OAUTH_TOKEN": "tok"})],
+            http=failing_http,
+            env={"OMATER_ACCOUNT_ID": "acct-a"},
+        )
+        assert snap.source == "cache"
+        assert snap.account == {"id": "acct-a"}
+
     def test_refresh_embeds_provenance_and_fresh_reads_prefer_it(self, tmp_path):
         """The write side of the contract: omater's refresh records who
         fetched, and an unrefreshed later read attributes the numbers to the
