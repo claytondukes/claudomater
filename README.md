@@ -31,11 +31,18 @@ Phase 0 skeleton — the pieces every pipeline run stands on:
   Retained transcripts are scrubbed against the project's `secrets_deny` list.
 - **Usage guardrails** — `omater usage` fetches the OAuth usage endpoint via a
   credential-provider chain (env token → macOS keychain → Claude Code
-  credentials file) and **fails closed**: no credentials or a stale cache
-  reads as over-threshold → pause + notify, never run blind. Per-window
-  `pause | degrade` behavior, a scoped-quota degrade path, and account-switch
-  re-baselining come from user config. A fake-usage injection path
-  (`OMATER_FAKE_USAGE`) makes every guardrail branch testable in CI.
+  credentials file) and **fails closed on unknown data**: no credentials, an
+  unreadable cache, or a malformed reading reads as over-threshold → pause +
+  notify, never run blind. A *stale* cache is not unknown: when the last
+  reading's recorded account provenance matches the active account, a pause
+  requires staleness AND a near-limit reading (the reading projected forward
+  at 0.5 pp/min reaching a pause threshold — self-capping, so old readings
+  eventually pause anyway); a stale reading that is nowhere near a limit
+  proceeds at degraded confidence instead of pausing a healthy run. Degrades
+  never act on stale data. Per-window `pause | degrade` behavior, a
+  scoped-quota degrade path, and account-switch re-baselining come from user
+  config. A fake-usage injection path (`OMATER_FAKE_USAGE`) makes every
+  guardrail branch testable in CI.
 - **Slack notifications** — `PAUSED-QUOTA`, `DEGRADED`, `ESCALATED`,
   `RUN-COMPLETE`, `PROMPT-BLOCKED`, sent the moment the state changes so an
   overnight run never saves its bad news for the morning.

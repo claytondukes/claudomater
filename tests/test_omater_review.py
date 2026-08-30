@@ -113,3 +113,46 @@ class TestReviewGate:
         must never drift apart."""
         for dtype, policy in DEPLOYMENT_POLICY.items():
             assert policy["review_floor"] in SEVERITY_RANK, dtype
+
+
+class TestBlockPathInjection:
+    """Epic 9 honest-ledger item, closed: after four straight gate passes
+    across two stories, '0 blocking' was still zero evidence the BLOCK path
+    works (lesson `gate-blocking-path-never-exercised`). This injects a
+    floor-level finding and drives the full block -> retry-feedback -> pass
+    cycle through the SAME core seams the drivers use — review_gate for the
+    verdict, blocking_reasons for the feedback, amend_prompt_with_failures
+    for the re-drive prompt."""
+
+    def test_injected_floor_level_finding_blocks_then_clears(self):
+        from claudomater.phases import (
+            RETRY_FEEDBACK_HEADER,
+            amend_prompt_with_failures,
+        )
+
+        injected = {
+            "severity": "MUST-FIX",
+            "file": "server/app.py",
+            "line": 42,
+            "finding": "route binds an unvalidated filter",
+            "why": "equality-binds whatever arrives",
+        }
+        # cycle 1: the injected finding sits AT the internal-tier floor
+        gate1 = review_gate([injected, finding("NOTE")], "MUST-FIX")
+        assert not gate1.passed
+        assert gate1.as_event_detail() == {
+            "floor": "MUST-FIX",
+            "findings": 2,
+            "blocking": 1,
+            "gate": "block",
+        }
+        # the block feeds the dev re-drive through the real prompt seam
+        (reason,) = gate1.blocking_reasons()
+        prompt2 = amend_prompt_with_failures("## Phase: dev\ndo the story", [reason])
+        assert RETRY_FEEDBACK_HEADER in prompt2
+        assert "server/app.py:42" in prompt2
+        assert "unvalidated filter" in prompt2
+        # cycle 2: the reviewer no longer reports the finding -> gate passes
+        gate2 = review_gate([finding("NOTE")], "MUST-FIX")
+        assert gate2.passed
+        assert gate2.as_event_detail()["gate"] == "pass"

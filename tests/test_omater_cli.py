@@ -46,11 +46,25 @@ class TestUsageCommand:
         write_fake_usage(tmp_path, monkeypatch, {"five_hour": 10, "seven_day": 10, "scoped": 85})
         assert main(["usage", "--user-config", no_user_config]) == EXIT_DEGRADE
 
-    def test_stale_fake_pauses_fail_closed(self, tmp_path, monkeypatch, no_user_config):
+    def test_stale_near_limit_fake_pauses_fail_closed(
+        self, tmp_path, monkeypatch, no_user_config
+    ):
+        """Staleness pauses only together with a near-limit last reading
+        (2026-08-30 rule); 96% stale beyond the TTL trips it."""
         write_fake_usage(
-            tmp_path, monkeypatch, {"five_hour": 1, "seven_day": 1, "scoped": 1}, age_s=900
+            tmp_path, monkeypatch, {"five_hour": 96, "seven_day": 1, "scoped": 1}, age_s=4000
         )
         assert main(["usage", "--user-config", no_user_config]) == EXIT_PAUSE
+
+    def test_stale_low_fake_proceeds_at_degraded_confidence(
+        self, tmp_path, monkeypatch, no_user_config
+    ):
+        """The Epic 9 incident shape end-to-end: a low reading whose only
+        problem is staleness must NOT pause the pipeline."""
+        write_fake_usage(
+            tmp_path, monkeypatch, {"five_hour": 1, "seven_day": 1, "scoped": 1}, age_s=4000
+        )
+        assert main(["usage", "--user-config", no_user_config]) == EXIT_OK
 
     def test_missing_window_prints_and_pauses_without_crashing(
         self, tmp_path, monkeypatch, capsys, no_user_config
@@ -165,7 +179,10 @@ class TestControlCommand:
 
     def test_symlinked_run_dir_is_rejected(self, tmp_path, capsys):
         """A symlink planted at .omater/runs/<id> must not carry control
-        writes outside the runs directory."""
+        writes outside the runs directory. (Round 8 strengthened the rule:
+        named runs reject ALL symlinks — an in-tree alias would stamp a
+        false run_id into the target's history — so the outside case is
+        refused before it even resolves.)"""
         from claudomater.runlog import runs_root
 
         RunLog.create(tmp_path, run_id="real-run")
@@ -174,7 +191,7 @@ class TestControlCommand:
         (runs_root(tmp_path) / "evil-link").symlink_to(outside)
         rc = main(["control", "resume", "--root", str(tmp_path), "--run", "evil-link"])
         assert rc == EXIT_ERROR
-        assert "resolves outside" in capsys.readouterr().err
+        assert "is a symlink" in capsys.readouterr().err
         assert not (outside / "control.jsonl").exists()
 
     def test_run_path_traversal_is_rejected(self, tmp_path, capsys):

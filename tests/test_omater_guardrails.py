@@ -7,6 +7,7 @@ from __future__ import annotations
 import json
 import os
 import time
+from datetime import datetime, timezone
 
 import pytest
 
@@ -47,6 +48,12 @@ def snapshot(five=10.0, seven=10.0, scoped=10.0, account=None, **kw):
         fetched_at=time.time(),
         source="fake",
         **kw,
+    )
+
+
+def iso_utc(epoch):
+    return datetime.fromtimestamp(epoch, tz=timezone.utc).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
     )
 
 
@@ -289,18 +296,19 @@ class TestFakeUsageInjection:
         d = evaluate(read_usage(), UserConfig())
         assert d.action == "pause"
 
-    def test_stale_fake_fails_closed(self, tmp_path, monkeypatch):
-        """AC: guardrails fail CLOSED on a stale usage cache."""
+    def test_stale_fake_still_raises_and_carries_the_last_reading(self, tmp_path, monkeypatch):
+        """AC (revised 2026-08-30): staleness still raises, but the raise
+        carries the parsed last reading so the guardrail can apply the
+        staleness-AND-near-limit rule instead of pausing blind."""
         write_fake(
-            tmp_path, monkeypatch, {"five_hour": 1, "seven_day": 1, "scoped": 1}, age_s=600
+            tmp_path, monkeypatch, {"five_hour": 1, "seven_day": 1, "scoped": 1}, age_s=4000
         )
-        with pytest.raises(UsageUnavailable, match="stale-cache"):
+        with pytest.raises(UsageUnavailable, match="stale-cache") as excinfo:
             read_usage()
-        # and evaluate() turns that into a pause:
-        try:
-            read_usage()
-        except UsageUnavailable as exc:
-            assert evaluate(exc, UserConfig()).action == "pause"
+        exc = excinfo.value
+        assert exc.snapshot is not None and exc.snapshot.source == "stale"
+        assert exc.snapshot.five_hour == 1
+        assert exc.age_s is not None and exc.age_s > 3900
 
     def test_unreadable_fake_fails_closed(self, tmp_path, monkeypatch):
         monkeypatch.setenv(FAKE_USAGE_ENV, str(tmp_path / "missing.json"))
@@ -322,6 +330,478 @@ class TestFakeUsageInjection:
             read_usage(cache_path=cache, providers=[])
 
 
+class TestStaleTtlAndNearLimitRule:
+    """Epic 9 rough edge #4: the 300s TTL was shorter than a typical phase,
+    so every spawn gate forced a live fetch, the endpoint 429'd, and the run
+    paused at 17% real usage. Two fixes, both pinned here: the TTL exceeds
+    the longest phase, and a pause past the TTL requires staleness AND a
+    near-limit last reading (projected at STALE_DRIFT_PP_PER_MIN)."""
+
+    def test_stale_ttl_exceeds_the_longest_phase_timeout(self):
+        """A reading taken at one spawn gate must survive to the next gate
+        even if every refresh between them fails. Cross-module pin: nobody
+        gets to grow a phase timeout past the TTL (or shrink the TTL) without
+        this test naming the invariant they broke."""
+        from claudomater.phases import DEFAULT_TIMEOUT_S
+        from claudomater.usage import DEFAULT_MAX_STALE_S
+
+        assert DEFAULT_MAX_STALE_S > DEFAULT_TIMEOUT_S
+
+    def test_reading_older_than_the_old_300s_ttl_is_no_longer_stale(
+        self, tmp_path, monkeypatch
+    ):
+        """The Epic 9 incident's exact shape: a 346s-old reading (fresh by
+        any phase-length standard) must read fine, not raise."""
+        write_fake(
+            tmp_path, monkeypatch, {"five_hour": 17, "seven_day": 2, "scoped": 4}, age_s=346
+        )
+        snap = read_usage()
+        assert snap.five_hour == 17
+
+    def _stale_exc(self, tmp_path, monkeypatch, data, age_s):
+        write_fake(tmp_path, monkeypatch, data, age_s=age_s)
+        with pytest.raises(UsageUnavailable) as excinfo:
+            read_usage()
+        return excinfo.value
+
+    def test_stale_low_reading_proceeds_at_degraded_confidence(
+        self, tmp_path, monkeypatch
+    ):
+        """Staleness alone is not evidence of exhaustion: a 17%-style last
+        reading far from every threshold proceeds, with the degraded
+        confidence named in the decision's reasons."""
+        exc = self._stale_exc(
+            tmp_path, monkeypatch,
+            {"five_hour": 1, "seven_day": 1, "scoped": 1}, age_s=4000,
+        )
+        d = evaluate(exc, UserConfig())
+        assert d.action == "ok"
+        assert "degraded confidence" in d.reasons[0] and "stale" in d.reasons[0]
+        assert d.snapshot is not None  # the reading rides into the run event
+
+    def test_stale_near_limit_reading_pauses(self, tmp_path, monkeypatch):
+        """The AND's other arm: stale + a reading that projects to a pause
+        threshold pauses, naming the projection."""
+        exc = self._stale_exc(
+            tmp_path, monkeypatch,
+            {"five_hour": 90, "seven_day": 1, "scoped": 1}, age_s=4000,
+        )
+        d = evaluate(exc, UserConfig())
+        assert d.action == "pause" and d.window == "five_hour"
+        assert "near-limit" in d.reasons[0] and "projects" in d.reasons[0]
+
+    def test_pre_reset_reading_rebases_projection_at_the_reset(self):
+        """Round-13 finding: the projection drifted the PRE-RESET percentage
+        forward when the window reset during the stale interval — a 90%
+        reading paused a window that had already restarted (the false-deny
+        class the staleness-AND-near-limit rule exists to avoid). The reset
+        is a known zero point strictly better than the expired reading:
+        projection rebases from 0% at the reset."""
+        now = time.time()
+        snap = snapshot(five=90.0)
+        snap.fetched_at = now - 4000  # stale past the TTL
+        snap.five_hour_resets_at = iso_utc(now - 600)  # reset 10 min ago
+        exc = UsageUnavailable("stale-cache", snapshot=snap, age_s=4000.0)
+        d = evaluate(exc, UserConfig())
+        assert d.action == "ok"
+        assert any("rebased from 0%" in r for r in d.reasons)
+        # a reset grants no free pass: drift from the reset's zero point
+        # still self-caps once enough stale time passes
+        snap.fetched_at = now - 200000
+        snap.five_hour_resets_at = iso_utc(now - 190000)
+        exc = UsageUnavailable("stale-cache", snapshot=snap, age_s=200000.0)
+        d = evaluate(exc, UserConfig())
+        assert d.action == "pause" and d.window == "five_hour"
+        assert "rebased from 0%" in d.reasons[0]
+
+    def test_reading_taken_after_the_reset_is_not_rebased(self):
+        """Round-14 finding: rebasing keyed only on `reset <= now`, so a
+        resets_at OLDER than the reading itself (incoherent cache, an API
+        reporting the LAST reset) discarded a valid 90% reading for a lower
+        from-zero projection — fail OPEN. Rebasing requires the reset
+        strictly inside the stale interval (fetched_at < reset <= now); a
+        reading taken after the reset already belongs to the current window
+        and projects normally."""
+        now = time.time()
+        for reset_offset in (5000, 4000):  # before the reading; exactly at it
+            snap = snapshot(five=90.0)
+            snap.fetched_at = now - 4000
+            snap.five_hour_resets_at = iso_utc(now - reset_offset)
+            exc = UsageUnavailable("stale-cache", snapshot=snap, age_s=4000.0)
+            d = evaluate(exc, UserConfig())
+            assert d.action == "pause" and d.window == "five_hour"
+            assert "rebased" not in d.reasons[0]
+
+    def test_unparseable_reset_keeps_the_conservative_projection(self):
+        """Garbage resets_at maps to 'cannot detect a reset' (the
+        usage._num_or_none choke-point discipline): the old reading drifts
+        forward, which can only pause EARLIER — never a crash mid-guardrail,
+        never a local-time guess at a naive timestamp."""
+        now = time.time()
+        for bad in ("soon", "2026-08-30 12:00:00", None):  # naive incl.
+            snap = snapshot(five=90.0)
+            snap.fetched_at = now - 4000
+            snap.five_hour_resets_at = bad
+            exc = UsageUnavailable("stale-cache", snapshot=snap, age_s=4000.0)
+            d = evaluate(exc, UserConfig())
+            assert d.action == "pause", bad  # 90% + drift >= 95, no rebase
+
+    def test_projection_caps_unbounded_staleness(self, tmp_path, monkeypatch):
+        """Self-capping: even a near-zero reading pauses once it has been
+        stale long enough to have plausibly burned to the threshold
+        (0.5 pp/min drift) — 'proceed on stale' can never hold forever."""
+        exc = self._stale_exc(
+            tmp_path, monkeypatch,
+            {"five_hour": 1, "seven_day": 1, "scoped": 1}, age_s=12000,
+        )
+        assert evaluate(exc, UserConfig()).action == "pause"
+
+    def test_stale_reading_missing_a_window_fails_closed(
+        self, tmp_path, monkeypatch
+    ):
+        """A stale snapshot missing a pause window is unknown, not stale."""
+        exc = self._stale_exc(
+            tmp_path, monkeypatch, {"five_hour": 1, "scoped": 1}, age_s=4000
+        )
+        d = evaluate(exc, UserConfig())
+        assert d.action == "pause" and "failing closed" in d.reasons[0]
+
+    def test_unavailable_without_a_reading_still_fails_closed(self):
+        """No carve-out for genuinely unknown usage: an UsageUnavailable
+        that carries no snapshot (no creds, unreadable cache) pauses."""
+        d = evaluate(UsageUnavailable("no-credentials: nothing configured"), UserConfig())
+        assert d.action == "pause" and "failing closed" in d.reasons[0]
+
+    def test_stale_projection_over_a_degrade_threshold_reports_but_proceeds(
+        self, tmp_path, monkeypatch
+    ):
+        """Round-5 finding: the stale path hard-paused every projected
+        crossing, including windows the user configured as `degrade` —
+        harder than the fresh-path contract for a soft threshold. A
+        degrade-configured crossing on stale data is OBSERVED in the
+        reasons, never acted on (degrades need fresh numbers); only
+        pause-configured windows trigger the stale pause."""
+        from claudomater.config import UsageConfig
+
+        cfg = UserConfig(
+            usage=UsageConfig(
+                on_threshold={"five_hour": "pause", "seven_day": "degrade"}
+            )
+        )
+        exc = self._stale_exc(
+            tmp_path, monkeypatch,
+            {"five_hour": 1, "seven_day": 90, "scoped": 1}, age_s=4000,
+        )
+        d = evaluate(exc, cfg)
+        assert d.action == "ok"
+        assert any("degrade-configured" in r for r in d.reasons)
+        # the same crossing on a pause-configured window still pauses
+        assert evaluate(exc, UserConfig()).action == "pause"
+
+    def test_stale_hard_stop_when_no_pause_window_exists(self, tmp_path, monkeypatch):
+        """Round-8 finding: with BOTH windows degrade-configured (valid
+        config), the observe-don't-act rule returned OK forever — no pause
+        window existed to self-cap. A crossing that can neither degrade
+        (stale) nor ever pause is the stale hard stop."""
+        from claudomater.config import UsageConfig
+
+        cfg = UserConfig(
+            usage=UsageConfig(
+                on_threshold={"five_hour": "degrade", "seven_day": "degrade"}
+            )
+        )
+        exc = self._stale_exc(
+            tmp_path, monkeypatch,
+            {"five_hour": 90, "seven_day": 1, "scoped": 1}, age_s=4000,
+        )
+        d = evaluate(exc, cfg)
+        assert d.action == "pause"
+        assert "hard stop" in d.reasons[0]
+        # below every threshold, both-degrade config still proceeds
+        exc2 = self._stale_exc(
+            tmp_path, monkeypatch,
+            {"five_hour": 1, "seven_day": 1, "scoped": 1}, age_s=4000,
+        )
+        assert evaluate(exc2, cfg).action == "ok"
+
+    def test_degrade_never_acts_on_stale_data(self, tmp_path, monkeypatch):
+        """A stale scoped reading past degrade_scoped_at does NOT degrade:
+        degrading is a positive step that needs fresh numbers. Worst case is
+        running top-tier slightly past the soft threshold until a refresh
+        succeeds — the pause windows above stay the hard stop."""
+        exc = self._stale_exc(
+            tmp_path, monkeypatch,
+            {"five_hour": 1, "seven_day": 1, "scoped": 95}, age_s=4000,
+        )
+        assert evaluate(exc, UserConfig()).action == "ok"
+
+    def test_stale_path_rebaselines_account_switches(self, tmp_path, monkeypatch):
+        """Round-3 finding: the stale path skipped the account-switch
+        re-baselining the fresh path performs — a run baselined to account A
+        could proceed on B's stale reading with rebaselined=False and no
+        recorded switch reason."""
+        exc = self._stale_exc(
+            tmp_path, monkeypatch,
+            {"five_hour": 1, "seven_day": 1, "scoped": 1,
+             "account": {"uuid": "acct-b"}},
+            age_s=4000,
+        )
+        d = evaluate(exc, UserConfig(), baseline_account={"uuid": "acct-a"})
+        assert d.action == "ok" and d.rebaselined
+        assert "account switch detected" in d.reasons[0]
+        # same baseline, no switch: flag stays down
+        d2 = evaluate(exc, UserConfig(), baseline_account={"uuid": "acct-b"})
+        assert d2.action == "ok" and not d2.rebaselined
+
+    def test_malformed_readings_fail_closed_not_open(self, tmp_path, monkeypatch):
+        """json.loads accepts NaN, and NaN sails past every `>= threshold`
+        comparison as False — so a malformed reading would otherwise walk the
+        projection loop straight to OK. All non-finite/negative values map to
+        unknown at the single parse choke point, which is a pause on the
+        pause windows — stale AND fresh alike."""
+        for bad in (float("nan"), float("inf"), -5):
+            # stale path: the carve-out must not accept a malformed reading
+            exc = self._stale_exc(
+                tmp_path, monkeypatch,
+                {"five_hour": bad, "seven_day": 1, "scoped": 1}, age_s=4000,
+            )
+            d = evaluate(exc, UserConfig())
+            assert d.action == "pause", bad
+            assert "failing closed" in d.reasons[0], bad
+            # fresh path: same hole, same fix
+            write_fake(
+                tmp_path, monkeypatch,
+                {"five_hour": bad, "seven_day": 1, "scoped": 1},
+            )
+            assert evaluate(read_usage(), UserConfig()).action == "pause", bad
+
+    def test_over_100_percent_is_a_real_reading_not_malformed(
+        self, tmp_path, monkeypatch
+    ):
+        """Over quota is a real state: 120% must trip the thresholds like any
+        high reading, never be discarded as garbage."""
+        write_fake(
+            tmp_path, monkeypatch, {"five_hour": 120, "seven_day": 1, "scoped": 1}
+        )
+        assert evaluate(read_usage(), UserConfig()).action == "pause"
+
+
+class TestStaleProvenance:
+    """Round-1 finding on the carve-out: quota is account-global, so account
+    A's low cache must never pass as account B's stale reading. omater's own
+    refreshes record who fetched (`fetched_by`, inside the payload — atomic
+    with the numbers); the carve-out requires a match with the active
+    account, and a cache without provenance (statusline-written) is
+    unverifiable = fail closed."""
+
+    def _stale_cache(self, tmp_path, payload, age_s=4000):
+        cache = tmp_path / "cache.json"
+        cache.write_text(json.dumps(payload), encoding="utf-8")
+        old = time.time() - age_s
+        os.utime(cache, (old, old))
+        return cache
+
+    LIMITS = [{"kind": "session", "percent": 1, "resets_at": None},
+              {"kind": "weekly_all", "percent": 1, "resets_at": None}]
+
+    def test_matching_provenance_gets_the_carve_out(self, tmp_path):
+        cache = self._stale_cache(
+            tmp_path, {"limits": self.LIMITS, "fetched_by": {"id": "acct-a"}}
+        )
+        with pytest.raises(UsageUnavailable) as excinfo:
+            read_usage(
+                cache_path=cache, providers=[], env={"OMATER_ACCOUNT_ID": "acct-a"}
+            )
+        exc = excinfo.value
+        assert exc.snapshot is not None and exc.snapshot.account == {"id": "acct-a"}
+        assert evaluate(exc, UserConfig()).action == "ok"
+
+    def test_foreign_provenance_fails_closed(self, tmp_path):
+        """The multi-account hole: A's low reading, B's session."""
+        cache = self._stale_cache(
+            tmp_path, {"limits": self.LIMITS, "fetched_by": {"id": "acct-a"}}
+        )
+        with pytest.raises(UsageUnavailable, match="different account") as excinfo:
+            read_usage(
+                cache_path=cache, providers=[], env={"OMATER_ACCOUNT_ID": "acct-b"}
+            )
+        assert excinfo.value.snapshot is None
+        assert evaluate(excinfo.value, UserConfig()).action == "pause"
+
+    def test_unrecorded_provenance_fails_closed(self, tmp_path):
+        """A statusline-written cache carries no fetched_by: unverifiable."""
+        cache = self._stale_cache(tmp_path, {"limits": self.LIMITS})
+        with pytest.raises(UsageUnavailable, match="no recorded account") as excinfo:
+            read_usage(
+                cache_path=cache, providers=[], env={"OMATER_ACCOUNT_ID": "acct-a"}
+            )
+        assert excinfo.value.snapshot is None
+        assert evaluate(excinfo.value, UserConfig()).action == "pause"
+
+    def test_env_token_identity_survives_a_failed_refresh(self, tmp_path):
+        """Round-2 finding: the carve-out compared provenance against a bare
+        account_identity(env=...) recomputation, which cannot reproduce an
+        env token's fingerprint (it has no token) — locking env-token users
+        out of the carve-out forever. The active identity is the credential
+        the failed refresh actually ACQUIRED."""
+        import urllib.error
+
+        from claudomater.credentials import EnvTokenProvider
+        from claudomater.usage import refresh_cache
+
+        provider = EnvTokenProvider(env={"OMATER_OAUTH_TOKEN": "tok"})
+        cache = tmp_path / "cache.json"
+        ok, _, account = refresh_cache(
+            cache,
+            providers=[provider],
+            http=lambda url, headers, timeout: json.dumps(
+                {"limits": self.LIMITS}
+            ).encode(),
+            env={},
+        )
+        assert ok is True
+        old = time.time() - 4000
+        os.utime(cache, (old, old))
+
+        def failing_http(url, headers, timeout):
+            raise urllib.error.URLError("429: Too Many Requests")
+
+        with pytest.raises(UsageUnavailable) as excinfo:
+            read_usage(cache_path=cache, providers=[provider], http=failing_http, env={})
+        exc = excinfo.value
+        assert exc.snapshot is not None  # fingerprint matched fingerprint
+        assert exc.snapshot.account == account
+        assert evaluate(exc, UserConfig()).action == "ok"
+
+    def test_fresh_ish_cache_from_another_account_fails_closed(self, tmp_path):
+        """Round-8 finding: the provenance gate lived only in the stale
+        branch — a YOUNGER-than-TTL cache from account A was still served
+        while the active credential was B, letting B proceed on A's quota
+        (and the 3900s TTL keeps such caches usable far longer than 300s
+        did). A failed refresh that positively identifies a different
+        account than the cache provenance fails closed at ANY age."""
+        import urllib.error
+
+        from claudomater.credentials import EnvTokenProvider
+
+        cache = self._stale_cache(
+            tmp_path,
+            {"limits": self.LIMITS, "fetched_by": {"id": "acct-a"}},
+            age_s=120,  # younger than max_stale, old enough to attempt refresh
+        )
+
+        def failing_http(url, headers, timeout):
+            raise urllib.error.URLError("429: Too Many Requests")
+
+        with pytest.raises(UsageUnavailable, match="account-mismatch") as excinfo:
+            read_usage(
+                cache_path=cache,
+                providers=[EnvTokenProvider(env={"OMATER_OAUTH_TOKEN": "tok"})],
+                http=failing_http,
+                env={},
+            )
+        assert excinfo.value.snapshot is None
+        assert evaluate(excinfo.value, UserConfig()).action == "pause"
+
+    def test_unknown_to_unknown_identity_gets_no_carve_out(
+        self, tmp_path, monkeypatch
+    ):
+        """Round-11 finding: on a headless box with no resolvable account,
+        both sides of the provenance equality can be the {'unknown': 'true'}
+        placeholder — and unknown == unknown is not proof the cache belongs
+        to the active account. The carve-out requires a POSITIVE identity."""
+        monkeypatch.setattr(
+            "claudomater.usage.account_identity",
+            lambda **kw: {"unknown": "true"},
+        )
+        cache = self._stale_cache(
+            tmp_path,
+            {"limits": self.LIMITS, "fetched_by": {"unknown": "true"}},
+            age_s=4000,
+        )
+        with pytest.raises(UsageUnavailable, match="unknown-identity") as excinfo:
+            read_usage(cache_path=cache, providers=[], env={})
+        assert excinfo.value.snapshot is None
+        assert evaluate(excinfo.value, UserConfig()).action == "pause"
+
+    def test_unprovenanced_cache_with_a_foreign_credential_fails_closed(
+        self, tmp_path
+    ):
+        """Round-9 finding: an unprovenanced (statusline-written) cache
+        bypassed the mismatch check entirely. The cache's owner is now
+        derived from the LOADED payload — recorded provenance, else the
+        logged-in identity under the shared-cache assumption — and a
+        positively-identified foreign credential fails closed either way."""
+        import urllib.error
+
+        from claudomater.credentials import EnvTokenProvider
+
+        cache = self._stale_cache(tmp_path, {"limits": self.LIMITS}, age_s=120)
+
+        def failing_http(url, headers, timeout):
+            raise urllib.error.URLError("429: Too Many Requests")
+
+        # active credential: env-token fingerprint; cache owner: the
+        # logged-in identity (no OMATER_ACCOUNT_ID) — never the same value
+        with pytest.raises(UsageUnavailable, match="account-mismatch"):
+            read_usage(
+                cache_path=cache,
+                providers=[EnvTokenProvider(env={"OMATER_OAUTH_TOKEN": "tok"})],
+                http=failing_http,
+                env={},
+            )
+
+    def test_unprovenanced_cache_with_the_same_identity_still_serves(
+        self, tmp_path
+    ):
+        """The common single-account case must keep working: statusline
+        cache, refresh 429s, but the acquired credential IS the logged-in
+        identity (here both pinned via OMATER_ACCOUNT_ID) — the shared-cache
+        assumption applies and the reading serves."""
+        import urllib.error
+
+        from claudomater.credentials import EnvTokenProvider
+
+        cache = self._stale_cache(tmp_path, {"limits": self.LIMITS}, age_s=120)
+
+        def failing_http(url, headers, timeout):
+            raise urllib.error.URLError("429: Too Many Requests")
+
+        snap = read_usage(
+            cache_path=cache,
+            providers=[EnvTokenProvider(env={"OMATER_OAUTH_TOKEN": "tok"})],
+            http=failing_http,
+            env={"OMATER_ACCOUNT_ID": "acct-a"},
+        )
+        assert snap.source == "cache"
+        assert snap.account == {"id": "acct-a"}
+
+    def test_refresh_embeds_provenance_and_fresh_reads_prefer_it(self, tmp_path):
+        """The write side of the contract: omater's refresh records who
+        fetched, and an unrefreshed later read attributes the numbers to the
+        recorded account — not to whoever happens to be reading (which would
+        hide an account switch from the re-baseline check)."""
+        from claudomater.credentials import EnvTokenProvider
+        from claudomater.usage import refresh_cache
+
+        cache = tmp_path / "cache.json"
+        ok, reason, account = refresh_cache(
+            cache,
+            providers=[EnvTokenProvider(env={"OMATER_OAUTH_TOKEN": "tok"})],
+            http=lambda url, headers, timeout: json.dumps(
+                {"limits": self.LIMITS}
+            ).encode(),
+            env={"OMATER_ACCOUNT_ID": "acct-a"},
+        )
+        assert ok is True
+        assert json.loads(cache.read_text())["fetched_by"] == account
+        snap = read_usage(
+            cache_path=cache, providers=[], env={"OMATER_ACCOUNT_ID": "acct-b"}
+        )
+        assert snap.source == "cache"
+        assert snap.account == account  # recorded provenance, not the reader
+
+
 class TestRealPathFailClosed:
     def test_no_credentials_and_no_cache_fails_closed(self, tmp_path, monkeypatch):
         monkeypatch.delenv(FAKE_USAGE_ENV, raising=False)
@@ -332,13 +812,17 @@ class TestRealPathFailClosed:
             )
 
     def test_stale_cache_with_failed_refresh_fails_closed(self, tmp_path, monkeypatch):
+        """Stale beyond the TTL still raises; a payload with no readable
+        windows gives the near-limit rule nothing to project, so evaluate()
+        stays fail-closed."""
         monkeypatch.delenv(FAKE_USAGE_ENV, raising=False)
         cache = tmp_path / "cache.json"
         cache.write_text(json.dumps({"limits": []}), encoding="utf-8")
-        old = time.time() - 3600
+        old = time.time() - 4000
         os.utime(cache, (old, old))
-        with pytest.raises(UsageUnavailable, match="stale-cache"):
+        with pytest.raises(UsageUnavailable, match="stale-cache") as excinfo:
             read_usage(cache_path=cache, providers=[])
+        assert evaluate(excinfo.value, UserConfig()).action == "pause"
 
     def test_fresh_cache_without_creds_still_reads(self, tmp_path, monkeypatch):
         """A fresh cache (e.g. the statusline just refreshed it) is usable

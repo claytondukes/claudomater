@@ -14,15 +14,17 @@ Two invariants from the design:
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import re
 import secrets
 import shutil
 import time
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 OMATER_DIR = ".omater"
 RUNS_DIR = "runs"
@@ -37,11 +39,38 @@ CREATE_LOCK_STALE_S = 60
 # Events that end a run; a run whose last event is none of these is live.
 TERMINAL_EVENTS = {"run-complete", "run-aborted", "run-failed"}
 
+# Parked state is a lifecycle fact, not "the literal last event": adoption,
+# attach bookkeeping, notification failures, and sibling evidence appends say
+# nothing about the run progressing, so none of them may unpark it. Only an
+# explicit progress signal clears a park — a new phase spawn or an operator
+# resume.
+_PARK_CLEARING_EVENTS = {"phase-spawn", "control-resume"}
+
+
+def _is_parked(events: list[dict[str, Any]]) -> bool:
+    """Walk back to the nearest park-vs-progress signal. run-parked with no
+    later progress = parked; anything else = not parked."""
+    for ev in reversed(events):
+        name = ev.get("event")
+        if name == "run-parked":
+            return True
+        if name in _PARK_CLEARING_EVENTS:
+            return False
+    return False
+
 CONTROL_ACTIONS = ("resume", "abort", "approve")
 
 
 class RunError(Exception):
     pass
+
+
+class RunEndedError(RunError):
+    """The run's last event is terminal — the ONE condition callers may
+    translate into their own 'already ended' message. Everything else a
+    liveness check raises (corrupt middle history above all) is damage
+    that must propagate unchanged: rebranding it as 'ended' tells the
+    operator to start a new run instead of diagnosing the damage."""
 
 
 def _utc_now() -> str:
@@ -97,6 +126,9 @@ def _detail_summary(detail: Any) -> str:
     if isinstance(detail, str):
         return detail
     return json.dumps(detail, sort_keys=True, ensure_ascii=False)
+
+
+EVENTS_LOCK = ".events.lock"
 
 
 class RunLog:
@@ -205,7 +237,7 @@ class RunLog:
             # A finished (or never-committed) run must stay that way —
             # "adopting" it would flip it live again and wedge one-live-run
             # enforcement (is_live() says the same thing to create()).
-            raise RunError(
+            raise RunEndedError(
                 f"run {log.run_id} already ended; start a new run instead"
             )
         has_phase_activity = any(
@@ -213,6 +245,51 @@ class RunLog:
         )
         verb = "run-adopted" if has_phase_activity else "run-attached"
         log.event("run", verb, {"pid": os.getpid()})
+        return log
+
+    @classmethod
+    def attach(cls, project_root: Path | str, run_id: str | None = None) -> "RunLog":
+        """Attach to a live run WITHOUT writing any bookkeeping event —
+        the seam for sibling processes that append events to a run they do
+        not own (a merge-phase driver logging per-round evidence, the control
+        CLI). Epic 9's merge driver had to call `adopt()` once per event and
+        stamped a `run-adopted` (dead-orchestrator recovery) event each time
+        — noise that misdescribes what happened. Orchestrator takeover, with
+        its recorded verb, stays `adopt()`.
+
+        `run_id` names a specific run (same containment rule as the current
+        link: it must resolve to an immediate child of the runs root);
+        default is the current run.
+
+        Raises RunError when the run is missing or already ended — appending
+        to a closed run would forge post-mortem history. Liveness is also
+        re-checked at EVERY append, for every handle, under the append lock:
+        a check-at-attach alone would be a race the owner's `finish()` could
+        slip through."""
+        root = runs_root(project_root)
+        if run_id is not None and run_id != CURRENT_LINK:
+            run_dir = root / validate_run_id(run_id)
+            if run_dir.is_symlink():
+                # Only the dedicated `current` link is ever followed. An
+                # in-tree alias (run-b -> run-a) would open run A while the
+                # handle carries run_id "run-b", stamping a FALSE run_id
+                # into A's history.
+                raise RunError(
+                    f"run {run_id!r} is a symlink; named runs must be real "
+                    "directories (only the 'current' link is followed)"
+                )
+            if not run_dir.is_dir():
+                raise RunError(f"no run {run_id!r} under {root}")
+            log = cls(run_dir, run_id)
+        else:
+            log = cls._attach(root / CURRENT_LINK)
+            if log is None:
+                raise RunError(f"no current run under {root / CURRENT_LINK}")
+        events = log.events()
+        if not events or events[-1]["event"] in TERMINAL_EVENTS:
+            raise RunEndedError(
+                f"run {log.run_id} already ended; nothing to attach to"
+            )
         return log
 
     @classmethod
@@ -254,6 +331,62 @@ class RunLog:
 
     # ---- events ----------------------------------------------------------
 
+    def _repair_torn_tail(
+        self, filename: str = EVENTS_JSONL, required_key: str = "event"
+    ) -> int:
+        """Truncate a torn FINAL line of an append-only jsonl log before
+        appending to it (call under the append lock). The torn tail is a
+        crash artifact the write-ahead discipline already treats as
+        never-happened on read — but an append landing AFTER it would weld
+        the fragment to the new record, turning recoverable tail damage into
+        corrupt MIDDLE history that fails every later read. Serves both the
+        event log and control.jsonl (which write_control appends to under
+        the same lock). Returns the count of discarded bytes (0 = nothing to
+        repair). Middle corruption is damage, not a crash artifact, and
+        still raises on read."""
+        path = self.run_dir / filename
+        try:
+            raw = path.read_bytes()
+        except OSError:
+            return 0
+        stripped = raw.rstrip(b" \t\r\n")
+        if not stripped:
+            return 0
+        start = stripped.rfind(b"\n") + 1
+        last = stripped[start:]
+        try:
+            obj = json.loads(last.decode("utf-8"))
+            if isinstance(obj, dict) and required_key in obj:
+                if not raw.endswith(b"\n"):
+                    # A crash can land exactly between the JSON bytes and
+                    # their newline: the record is complete and readable, but
+                    # a plain append would concatenate onto it and corrupt
+                    # BOTH records. Normalize the delimiter — nothing is
+                    # discarded, so no repair event.
+                    with open(path, "ab") as fh:
+                        fh.write(b"\n")
+                return 0
+        except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
+            pass
+        # ftruncate to the line start: a single syscall, so a concurrent
+        # unlocked reader sees a complete valid prefix, never a rewrite in
+        # flight.
+        with open(path, "rb+") as fh:
+            fh.truncate(start)
+        return len(raw) - start
+
+    @contextmanager
+    def _append_lock(self) -> Iterator[None]:
+        """Exclusive inter-process lock over event appends. Serializes
+        concurrent appenders (owner + attached siblings) and makes
+        check-then-append sequences atomic — without it, attach()'s liveness
+        check and the parked-run rule below would both be check-once races
+        the owner's finish() could slip through."""
+        with open(self.run_dir / EVENTS_LOCK, "w") as fh:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+            # closing the fd releases the flock
+            yield
+
     def event(
         self,
         phase: str,
@@ -262,7 +395,67 @@ class RunLog:
         story_key: str | None = None,
     ) -> dict[str, Any]:
         """Append one event (jsonl + progress line), flushed to disk before
-        returning — call this BEFORE performing the action it describes."""
+        returning — call this BEFORE performing the action it describes.
+
+        Two rules are enforced HERE, under the append lock, because they
+        are only sound when checked atomically with the append:
+        - NO handle may append to a run that has ended — owner, adopted, or
+          attached alike. Ownership does not make post-mortem history safe:
+          any append after the terminal record grows closed history and
+          flips `is_live()` back on. (This also makes a double `finish()` a
+          loud error.)
+        - `run-failed` is refused while the run is parked (`_is_parked`:
+          a run-parked with no later progress signal — bookkeeping like
+          run-adopted and sibling evidence appends do NOT unpark): a parked
+          run is live-and-waiting, and failing it is exactly the Epic 9
+          empty-reasons death. Resume it (phase-spawn / control-resume) or
+          abort it."""
+        with self._append_lock():
+            events = self._repaired_live_events()
+            if event in ("run-failed", "run-complete") and _is_parked(events):
+                # A parked run neither failed nor completed: nothing
+                # progressed since the park, so BOTH success and failure
+                # terminals would misrepresent it (failing it recreates the
+                # Epic 9 empty-reasons death; completing it claims success
+                # for work that never resumed). run-aborted stays available
+                # as the intentional operator escape hatch.
+                raise RunError(
+                    f"run {self.run_id} is parked (live-and-waiting) — resume "
+                    f"it or abort it; {event!r} on a parked run misrepresents "
+                    "un-progressed state"
+                )
+            return self._append_event(phase, event, detail, story_key)
+
+    def _repaired_live_events(self) -> list[dict[str, Any]]:
+        """Call under the append lock: repair the torn tail, validate the
+        REPAIRED prefix is live, and only then record the repair marker.
+        Order matters — the marker is itself an append, and recording it
+        before the terminal check let a torn fragment AFTER a terminal
+        record smuggle the marker in as the new last event, reopening
+        post-mortem history. On an ended run the truncation still happens
+        (restoring disk to what reads already said) but nothing is recorded
+        and the append is refused."""
+        discarded = self._repair_torn_tail()
+        events = self.events()
+        if events and events[-1]["event"] in TERMINAL_EVENTS:
+            raise RunEndedError(
+                f"run {self.run_id} has ended; no further events can be "
+                "appended — post-mortem history must not grow"
+            )
+        if discarded:
+            # the repair is itself history: a crash artifact was here
+            self._append_event(
+                "run", "torn-tail-repaired", {"discarded_bytes": discarded}
+            )
+        return events
+
+    def _append_event(
+        self,
+        phase: str,
+        event: str,
+        detail: Any = None,
+        story_key: str | None = None,
+    ) -> dict[str, Any]:
         record = {
             "ts": _utc_now(),
             "run_id": self.run_id,
@@ -344,6 +537,28 @@ class RunLog:
             raise RunError(f"not a terminal event: {status}")
         self.event("run", status, detail)
 
+    def park(
+        self,
+        reason: str,
+        phase: str = "run",
+        story_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Record that the run is deliberately LIVE-AND-WAITING (guardrail
+        pause, quota window, operator hold). Non-terminal by design: a parked
+        run stays adoptable via `adopt`/`attach`. This is the core-owned fix
+        for the Epic 9 incident where a driver terminated a paused run as
+        `run-failed` with empty reasons — the runner parks, and whoever reads
+        the log sees the run is waiting, not dead. Parking an ended run
+        raises: that would misrepresent a closed run as waiting. The check
+        lives in `event()`'s locked section — a pre-check here would race a
+        concurrent terminal append (the same TOCTOU attach() had)."""
+        return self.event(
+            phase,
+            "run-parked",
+            {"reason": reason, "note": "run left live/adoptable on purpose"},
+            story_key=story_key,
+        )
+
     # ---- paths -----------------------------------------------------------
 
     def transcript_path(
@@ -383,11 +598,45 @@ class RunLog:
         record = {"ts": _utc_now(), "action": action}
         if detail is not None:
             record["detail"] = detail
-        with open(self.run_dir / CONTROL_JSONL, "a", encoding="utf-8") as fh:
-            fh.write(json.dumps(record, sort_keys=True) + "\n")
-            fh.flush()
-            os.fsync(fh.fileno())
-        self.event("control", f"control-{action}", detail)
+        # An ended run accepts no control: resume/abort/approve have nothing
+        # to act on, and the control-* event would land after the terminal
+        # record and flip is_live() back on. The terminal check and BOTH
+        # writes (command channel + event) share one critical section — an
+        # unlocked check could pass, the owner finish, and a dead command
+        # still land in control.jsonl even though the event append raised.
+        # _append_event, not event(): flock does not re-enter in-process.
+        with self._append_lock():
+            try:
+                self._repaired_live_events()
+            except RunEndedError:
+                # ONLY the ended signal is translated — a RunError from
+                # corrupt middle history propagates unchanged (misreporting
+                # damage as an ended run tells the operator to start a new
+                # run for the wrong reason).
+                raise RunEndedError(
+                    f"run {self.run_id} already ended; control {action!r} has "
+                    "nothing to act on — start a new run instead"
+                ) from None
+            # read_controls() tolerates a torn FINAL command (never issued),
+            # but appending right after the fragment would weld it to this
+            # record and corrupt BOTH — repair the control tail under this
+            # same lock, exactly like the event log's append path. Then
+            # validate the REPAIRED prefix before recording anything
+            # (events-log discipline): a command accepted into unreadable
+            # history would be unusable — every later read_controls() would
+            # raise — so corrupt middle damage refuses the command loudly,
+            # naming the damaged line. The repair is itself history.
+            discarded = self._repair_torn_tail(CONTROL_JSONL, "action")
+            self.read_controls()
+            if discarded:
+                self._append_event(
+                    "run", "control-tail-repaired", {"discarded_bytes": discarded}
+                )
+            with open(self.run_dir / CONTROL_JSONL, "a", encoding="utf-8") as fh:
+                fh.write(json.dumps(record, sort_keys=True) + "\n")
+                fh.flush()
+                os.fsync(fh.fileno())
+            self._append_event("control", f"control-{action}", detail)
         return record
 
     def read_controls(self) -> list[dict[str, Any]]:

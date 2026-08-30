@@ -7,6 +7,7 @@ reviewable and versioned like code. User config carries account facts
 
 from __future__ import annotations
 
+import math
 import os
 import re
 from dataclasses import dataclass, field
@@ -14,6 +15,9 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+
+from claudomater.merge import MergeSeamError, RoundAlarm
+from claudomater.usage import DEFAULT_MAX_STALE_S
 
 PROJECT_CONFIG_NAME = ".omater.yaml"
 USER_CONFIG_PATH = Path("~/.omater/config.yaml")
@@ -205,6 +209,13 @@ class ProjectConfig:
             "qa_board": base["qa_board"],
             "close_pass": base["close_pass"],
             "merge": {"converge": self.merge.converge, "reviewer": self.merge.reviewer},
+            # Resolved gates ride into the run log's policy event so the log
+            # can establish which review-round limit governed a run — a later
+            # config edit must be distinguishable from the original setting.
+            "gates": {
+                **self.gates,
+                "review_round_alarm": RoundAlarm.from_gates(self.gates).limit,
+            },
         }
 
 
@@ -292,6 +303,34 @@ def load_project_config(root: Path | str) -> ProjectConfig:
             f"scope names, got {scopes!r}"
         )
 
+    gates_raw = _require_mapping("gates", data.get("gates"))
+    # Gates are scalar knobs, and the mapping rides verbatim into policy()
+    # — the run-log snapshot json.dumps'es. yaml.safe_load happily produces
+    # dates and other non-JSON types (`board_steps_required: 2026-08-30`),
+    # which would crash start_run AFTER the run directory exists. Fail at
+    # LOAD instead, like every other knob.
+    for key, value in gates_raw.items():
+        if not isinstance(key, str):
+            raise ConfigError(f"{PROJECT_CONFIG_NAME}: gates keys must be strings, got {key!r}")
+        if value is not None and not isinstance(value, (str, int, float, bool)):
+            raise ConfigError(
+                f"{PROJECT_CONFIG_NAME}: gates.{key} must be a scalar "
+                f"(string/number/bool/null), got {type(value).__name__}: {value!r}"
+            )
+        # YAML's `.nan` / `.inf` are floats, but json.dumps emits them as
+        # NaN/Infinity — not valid JSON, and a strict JSONL reader of the
+        # run log would choke on the policy event.
+        if isinstance(value, float) and not math.isfinite(value):
+            raise ConfigError(
+                f"{PROJECT_CONFIG_NAME}: gates.{key} must be finite, got {value!r}"
+            )
+    try:
+        # Validate the alarm knob AT LOAD, like every other knob — a typo'd
+        # value must fail here, not mid-run when policy() first resolves it.
+        RoundAlarm.from_gates(gates_raw)
+    except MergeSeamError as exc:
+        raise ConfigError(f"{PROJECT_CONFIG_NAME}: {exc}") from exc
+
     return ProjectConfig(
         project=project,
         deployment_type=deployment_type,
@@ -306,7 +345,7 @@ def load_project_config(root: Path | str) -> ProjectConfig:
         learning_scopes=list(scopes),
         ci_tier_on_push=ci_raw.get("tier_on_push"),
         ci_tier_on_merge=ci_raw.get("tier_on_merge", "full"),
-        gates=_require_mapping("gates", data.get("gates")),
+        gates=gates_raw,
         root=root,
     )
 
@@ -321,7 +360,10 @@ class UsageConfig:
     )
     degrade_scoped_at: int = 80
     degrade_path: list[str] = field(default_factory=lambda: [MODEL_OPUS, "pause"])
-    max_stale_seconds: int = 300  # fail closed beyond this
+    # One default, defined in usage.py (> the longest phase timeout — see the
+    # comment there); staleness beyond it applies the near-limit rule, not an
+    # automatic pause.
+    max_stale_seconds: int = DEFAULT_MAX_STALE_S
 
 
 def _validate_degrade_path(path: list[str]) -> None:
@@ -407,8 +449,16 @@ def load_user_config(path: Path | str | None = None) -> UserConfig:
             raise ConfigError("usage.degrade_path must be a list")
         usage.degrade_path = list(raw_path)
     usage.max_stale_seconds = _require_int(
-        "usage.max_stale_seconds", usage_raw.get("max_stale_seconds", 300)
+        "usage.max_stale_seconds",
+        usage_raw.get("max_stale_seconds", DEFAULT_MAX_STALE_S),
     )
+    if usage.max_stale_seconds < 1:
+        # 0/negative marks EVERY cache entry stale, and the stale carve-out
+        # would then proceed on any low reading — config garbage silently
+        # weakening the guardrail instead of failing at load.
+        raise ConfigError(
+            f"usage.max_stale_seconds must be >= 1, got {usage.max_stale_seconds}"
+        )
 
     for window, pct in usage.pause_at.items():
         if window not in ("five_hour", "seven_day"):

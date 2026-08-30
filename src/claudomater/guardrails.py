@@ -2,8 +2,14 @@
 
 Rules (from the design, §5):
 
-- Unknown usage (no credentials, fetch failed, stale cache) = over-threshold
-  = PAUSE. Fail closed, never run blind.
+- Unknown usage (no credentials, fetch failed, unreadable cache) =
+  over-threshold = PAUSE. Fail closed, never run blind.
+- STALE usage with a known last reading is not unknown (2026-08-30 order,
+  after the Epic 9 incident): pause requires staleness AND a near-limit
+  reading, where near-limit means the last reading projected forward at
+  `STALE_DRIFT_PP_PER_MIN` reaches a pause threshold. The projection makes
+  the rule self-capping — any reading pauses once it has been stale long
+  enough. Degrades never act on stale data.
 - Window thresholds are account-global: a pause pauses ALL runs on the
   account. Per-window behavior (`pause` | `degrade`) comes from user config.
 - Scoped (top-tier) quota >= `degrade_scoped_at` follows the degrade path:
@@ -18,6 +24,7 @@ Rules (from the design, §5):
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any
 
 from claudomater.config import SKIP, UserConfig, family_rank
@@ -28,6 +35,32 @@ DEGRADE = "degrade"
 OK = "ok"
 
 WINDOW_LABELS = {"five_hour": "5h", "seven_day": "7d", "scoped": "scoped"}
+
+# How fast a window can plausibly climb while the reading is stale, in
+# percentage points per minute. Phase 0.5 measured 83% -> 94% in a 24-minute
+# full-tier story run (~0.46 pp/min); 0.5 rounds up. This is what makes the
+# staleness rule self-capping: even a 0% last reading projects past a 95%
+# threshold after ~190 stale minutes, so "proceed on stale" can never hold
+# forever — no separate hard cap needed.
+STALE_DRIFT_PP_PER_MIN = 0.5
+
+
+def _reset_epoch_or_none(resets_at: str | None) -> float | None:
+    """Epoch seconds of a window's recorded reset, or None when absent,
+    unparseable, or timezone-naive. Same choke-point discipline as
+    usage._num_or_none: garbage maps to None, and None keeps the
+    CONSERVATIVE branch (drift the old reading forward, which can only
+    pause earlier) — never a crash mid-guardrail, never a local-time
+    guess at a naive timestamp."""
+    if not isinstance(resets_at, str):
+        return None
+    try:
+        dt = datetime.fromisoformat(resets_at.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        return None
+    return dt.timestamp()
 
 
 @dataclass
@@ -50,14 +83,165 @@ class Decision:
         }
 
 
+def _stale_decision(
+    exc: UsageUnavailable,
+    cfg: UserConfig,
+    baseline_account: dict[str, str] | None = None,
+) -> Decision:
+    """The staleness-AND-near-limit rule (2026-08-30 order). Staleness alone
+    is not evidence of exhaustion — the Epic 9 run was paused at 17% real
+    usage because the usage endpoint 429'd — so a stale-but-readable last
+    reading pauses only when it PROJECTS to a pause threshold at
+    STALE_DRIFT_PP_PER_MIN. A stale snapshot missing a pause window is
+    unknown, not stale: fail closed. Degrades never act on stale data —
+    degrading is a positive step that needs fresh numbers, so a stale scoped
+    reading is ignored here and the worst case is running the top tier
+    slightly past the soft degrade threshold until a refresh succeeds."""
+    snap, age = exc.snapshot, exc.age_s
+    if snap is None or age is None:
+        return Decision(
+            action=PAUSE,
+            reasons=[f"usage unknown, failing closed: {exc}"],
+        )
+    # The stale path re-baselines exactly like the fresh path — the reading's
+    # provenance IS its account, and a switch detected on a stale reading is
+    # no less a switch. Skipping this let a run baselined to account A ride
+    # account B's stale cache with rebaselined=False and no recorded reason.
+    rebaselined = bool(
+        baseline_account and snap.account and baseline_account != snap.account
+    )
+    prefix: list[str] = []
+    if rebaselined:
+        prefix.append(
+            f"account switch detected ({baseline_account} -> {snap.account}); "
+            "guardrails re-baselined"
+        )
+    drift = STALE_DRIFT_PP_PER_MIN * (age / 60.0)
+    # age was measured against fetched_at when the exception was raised, so
+    # this IS the evaluation clock — no second wall-clock read to disagree.
+    now = snap.fetched_at + age
+    below: list[str] = []
+    degrade_crossings: list[tuple[str, str | None]] = []
+    for window, pct, resets in (
+        ("five_hour", snap.five_hour, snap.five_hour_resets_at),
+        ("seven_day", snap.seven_day, snap.seven_day_resets_at),
+    ):
+        if pct is None:
+            return Decision(
+                action=PAUSE,
+                reasons=prefix
+                + [
+                    "usage unknown, failing closed: "
+                    f"{window} window missing from the stale reading ({exc})"
+                ],
+                rebaselined=rebaselined,
+                snapshot=snap,
+            )
+        threshold = cfg.usage.pause_at[window]
+        reset_epoch = _reset_epoch_or_none(resets)
+        if reset_epoch is not None and snap.fetched_at < reset_epoch <= now:
+            # The reading predates its window's reset: that percentage
+            # belongs to the EXPIRED window, and drifting it forward would
+            # pause a window that has already restarted — a false deny, the
+            # exact class this rule exists to avoid. The reset is a known
+            # zero point strictly better than the pre-reset reading, so the
+            # projection rebases from 0% there. (A stale interval spanning
+            # several reset cycles rebases from the FIRST — over-projecting,
+            # i.e. erring toward pause.) The reset must fall STRICTLY inside
+            # the stale interval: a resets_at at or before fetched_at means
+            # the reading was taken after that reset and is already the
+            # current window's — rebasing on it would discard a valid high
+            # reading for a lower from-zero projection and fail OPEN.
+            projected = STALE_DRIFT_PP_PER_MIN * ((now - reset_epoch) / 60.0)
+            reading = (
+                f"{WINDOW_LABELS[window]} {pct:.0f}% pre-reset (window reset "
+                f"at {resets}; projection rebased from 0% at the reset)"
+            )
+        else:
+            projected = pct + drift
+            reading = f"{WINDOW_LABELS[window]} {pct:.0f}%"
+        if projected >= threshold:
+            if cfg.usage.on_threshold[window] == PAUSE:
+                return Decision(
+                    action=PAUSE,
+                    reasons=prefix
+                    + [
+                        f"stale usage ({int(age)}s old) with a near-limit last "
+                        f"reading: {reading} projects to "
+                        f"{projected:.0f}% (+{STALE_DRIFT_PP_PER_MIN} pp/min) "
+                        f">= {threshold}% -> pause"
+                    ],
+                    window=window,
+                    resets_at=resets,
+                    rebaselined=rebaselined,
+                    snapshot=snap,
+                )
+            # A degrade-configured window's crossing is OBSERVED, never acted
+            # on: degrades need fresh numbers (the rule above), and pausing
+            # here would be harder than the user configured for a soft
+            # threshold — contrary to the fresh-path contract. Worst case is
+            # running the configured tier slightly past the soft threshold
+            # until a refresh succeeds. (Bounded by the hard stop below when
+            # no pause window exists to self-cap.)
+            degrade_crossings.append((window, resets))
+            below.append(
+                f"{reading} projects to "
+                f"{projected:.0f}% >= {threshold}% but the window is "
+                "degrade-configured and degrades never act on stale data"
+            )
+            continue
+        below.append(
+            f"{reading} projects to {projected:.0f}% < {threshold}%"
+        )
+    if degrade_crossings and not any(
+        cfg.usage.on_threshold[w] == PAUSE for w in ("five_hour", "seven_day")
+    ):
+        # The stale HARD STOP: with every window degrade-configured (valid
+        # config), no pause window exists to self-cap — the loop above would
+        # return OK forever on stale data, since degrades never act on it.
+        # A crossing that can neither degrade (stale) nor ever pause (no
+        # pause window) must stop the run here.
+        window, resets = degrade_crossings[0]
+        return Decision(
+            action=PAUSE,
+            reasons=prefix
+            + [
+                f"stale usage ({int(age)}s old) crossed the degrade-configured "
+                f"{WINDOW_LABELS[window]} threshold with NO pause-configured "
+                "window to self-cap; degrades never act on stale data, so this "
+                "is the stale hard stop: " + "; ".join(below)
+            ],
+            window=window,
+            resets_at=resets,
+            rebaselined=rebaselined,
+            snapshot=snap,
+        )
+    return Decision(
+        action=OK,
+        reasons=prefix
+        + [
+            f"usage stale ({int(age)}s old; refresh failing) but the last "
+            "reading is not near any pause threshold: "
+            + "; ".join(below)
+            + " — proceeding at degraded confidence"
+        ],
+        rebaselined=rebaselined,
+        snapshot=snap,
+    )
+
+
 def evaluate(
     snapshot: UsageSnapshot | UsageUnavailable | None,
     cfg: UserConfig,
     baseline_account: dict[str, str] | None = None,
 ) -> Decision:
     """Evaluate one guardrail read. Pass the UsageUnavailable exception (or
-    None) as the snapshot to get the fail-closed pause."""
+    None) as the snapshot to get the fail-closed pause — unless the exception
+    carries a stale-but-readable last reading, which gets the
+    staleness-AND-near-limit rule instead."""
     if snapshot is None or isinstance(snapshot, UsageUnavailable):
+        if isinstance(snapshot, UsageUnavailable) and snapshot.snapshot is not None:
+            return _stale_decision(snapshot, cfg, baseline_account=baseline_account)
         reason = str(snapshot) if snapshot else "no usage data"
         return Decision(
             action=PAUSE,

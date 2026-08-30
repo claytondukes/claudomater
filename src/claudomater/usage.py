@@ -3,8 +3,10 @@
 Extracted from the operator's statusline script and shared with it: same
 endpoint, same cache file, so the statusline benefits from omater's
 refreshes and vice versa. A statusline can afford to render stale numbers;
-a guardrail cannot — every read here is mtime-gated, and stale beyond
-`max_stale` after a refresh attempt = unknown = fail closed.
+a guardrail cannot — every read here is mtime-gated. Stale beyond
+`max_stale` after a refresh attempt raises, but the raise carries the last
+parsed reading so the guardrail can distinguish "stale but comfortably low"
+from "genuinely unknown" (which stays fail-closed).
 
 The fake-usage injection path (`OMATER_FAKE_USAGE` -> path to a JSON file)
 exercises the same parse + staleness gates, which is what makes the
@@ -15,11 +17,12 @@ its mtime, so tests can backdate it with os.utime().
 from __future__ import annotations
 
 import json
+import math
 import os
 import time
 import urllib.error
 import urllib.request
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable
 
@@ -33,7 +36,16 @@ USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 OAUTH_BETA_HEADER = "oauth-2025-04-20"
 DEFAULT_CACHE = Path("~/.cache/claude-statusline/usage.json")
 FAKE_USAGE_ENV = "OMATER_FAKE_USAGE"
-DEFAULT_MAX_STALE_S = 300
+# The staleness TTL must exceed the LONGEST phase timeout
+# (phases.DEFAULT_TIMEOUT_S = 3600, pinned by a cross-module test): a reading
+# taken at one spawn gate must still be usable at the next gate even if every
+# refresh between them fails. At 300s the TTL was shorter than a typical
+# phase, so EVERY gate forced a live fetch and the endpoint's 429s paused a
+# run at 17% real usage (Epic 9 verification run, 2026-08-30). Staleness past
+# this is still not an automatic pause: the raise carries the last reading
+# and guardrails.evaluate pauses only when that reading PROJECTS near a pause
+# threshold (staleness AND near-limit).
+DEFAULT_MAX_STALE_S = 3900
 # Refresh only when the cache is older than this. The statusline refreshes
 # the same cache on its own 60s TTL, and the endpoint rate-limits (429) when
 # hammered — a fresh cache IS the answer, no fetch needed.
@@ -43,9 +55,33 @@ REFRESH_TTL_S = 60
 HttpFn = Callable[[str, dict[str, str], float], bytes]
 
 
+def _positive_identity(account: Any) -> bool:
+    """A placeholder identity ({'unknown': 'true'}) identifies NOBODY:
+    equality between two unknowns is not proof a cache belongs to the active
+    account, so the stale carve-out requires a positively resolved identity
+    on both sides."""
+    return isinstance(account, dict) and bool(account) and "unknown" not in account
+
+
 class UsageUnavailable(Exception):
     """Usage numbers are unknown (no creds, fetch failed, stale cache).
-    Callers must treat this as over-threshold: pause + notify, never run blind."""
+    Callers must treat this as over-threshold: pause + notify, never run
+    blind — with ONE carve-out: when the failure is staleness of an
+    otherwise-readable cache, the parsed last reading rides along as
+    `snapshot` (source='stale') with its age in `age_s`, and
+    guardrails.evaluate applies the staleness-AND-near-limit rule to it
+    instead of pausing on staleness alone. No snapshot = truly unknown =
+    fail closed, unchanged."""
+
+    def __init__(
+        self,
+        message: str,
+        snapshot: "UsageSnapshot | None" = None,
+        age_s: float | None = None,
+    ):
+        super().__init__(message)
+        self.snapshot = snapshot
+        self.age_s = age_s
 
 
 @dataclass
@@ -83,12 +119,21 @@ def _default_http(url: str, headers: dict[str, str], timeout: float) -> bytes:
 
 
 def _num_or_none(value: Any) -> float | None:
-    """Strictly numeric or unknown. Guardrails fail CLOSED on None (a
-    missing window pauses), so an unexpected type must map to None — never
-    crash mid-guardrail with a TypeError, never guess at strings."""
+    """Strictly a plausible percentage or unknown. Guardrails fail CLOSED on
+    None (a missing window pauses), so an unexpected type must map to None —
+    never crash mid-guardrail with a TypeError, never guess at strings.
+    NaN/±inf/negative map to None too: Python's JSON parser accepts `NaN`,
+    and `NaN >= threshold` is False everywhere, so a malformed reading would
+    otherwise sail PAST every threshold comparison and fail open. This is the
+    single choke point every path (API payload, fake file) parses through.
+    Over-100 values are kept — over quota is a real state and trips the
+    thresholds naturally."""
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
-    return float(value)
+    value = float(value)
+    if not math.isfinite(value) or value < 0.0:
+        return None
+    return value
 
 
 def parse_limits(payload: dict[str, Any]) -> dict[str, Any]:
@@ -164,7 +209,15 @@ def refresh_cache(
     try:
         cache_path.parent.mkdir(parents=True, exist_ok=True)
         tmp = cache_path.with_suffix(cache_path.suffix + ".tmp")
-        tmp.write_text(json.dumps(payload), encoding="utf-8")
+        # Provenance rides INSIDE the payload (atomic with the numbers it
+        # describes — a sidecar file could describe a cache the statusline
+        # overwrote since). parse_limits ignores unknown keys and the
+        # statusline reads `.limits`, so the extra key is inert there; a
+        # statusline-written cache simply lacks it, which reads as "unknown
+        # provenance" below.
+        to_cache = dict(payload)
+        to_cache["fetched_by"] = account
+        tmp.write_text(json.dumps(to_cache), encoding="utf-8")
         tmp.replace(cache_path)
     except OSError as exc:
         return False, f"cache-write-failed: {exc}", account
@@ -228,9 +281,15 @@ def read_usage(
 ) -> UsageSnapshot:
     """Refresh + read the usage snapshot, or raise UsageUnavailable.
 
-    Every read is mtime-gated: if the cache is stale beyond `max_stale`
-    after the refresh attempt, the numbers are UNKNOWN and the caller must
-    fail closed. The fake-usage env path goes through the same gate.
+    Every read is mtime-gated. Stale beyond `max_stale` after the refresh
+    attempt raises — but stale is not always unknown: when the cache's
+    recorded account provenance matches the active credential, the raise
+    carries the parsed last reading (`exc.snapshot`, source='stale', with
+    `exc.age_s`). Callers must hand the EXCEPTION to guardrails.evaluate,
+    which applies the staleness-AND-near-limit rule to a carried reading and
+    fails closed (pause) only when the raise carries none — treating every
+    stale raise as unknown would recreate the Epic 9 pause-at-17% incident.
+    The fake-usage env path goes through the same gate.
     """
     env = env if env is not None else os.environ  # type: ignore[assignment]
     now = now if now is not None else time.time()
@@ -241,7 +300,9 @@ def read_usage(
         if now - snap.fetched_at > max_stale:
             raise UsageUnavailable(
                 f"stale-cache: fake usage is {int(now - snap.fetched_at)}s old "
-                f"(max {max_stale}s)"
+                f"(max {max_stale}s)",
+                snapshot=replace(snap, source="stale"),
+                age_s=now - snap.fetched_at,
             )
         return snap
 
@@ -257,9 +318,17 @@ def read_usage(
         )
 
     try:
-        payload = json.loads(cache.read_text(encoding="utf-8"))
-        mtime = cache.stat().st_mtime
-    except (OSError, json.JSONDecodeError, ValueError):
+        # One open descriptor for BOTH the bytes and the mtime: the shared
+        # statusline can replace the cache between two path-based calls, and
+        # a torn pair (old payload, new mtime) would let an arbitrarily old
+        # low reading skip the stale branch and bypass projection entirely.
+        # fstat on the fd we read from keeps payload, provenance, and age
+        # describing the same inode.
+        with open(cache, "rb") as fh:
+            raw = fh.read()
+            mtime = os.fstat(fh.fileno()).st_mtime
+        payload = json.loads(raw.decode("utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError, ValueError):
         raise UsageUnavailable(
             f"no-usage-data: cache unreadable at {cache}"
             + (f" ({failure})" if failure else "")
@@ -272,16 +341,75 @@ def read_usage(
 
     age = now - mtime
     if age > max_stale:
-        raise UsageUnavailable(
-            f"stale-cache: usage data is {int(age)}s old (max {max_stale}s)"
-            + (f"; refresh failed: {failure}" if failure else "")
+        message = f"stale-cache: usage data is {int(age)}s old (max {max_stale}s)" + (
+            f"; refresh failed: {failure}" if failure else ""
         )
+        # The reading is stale, not unknown — hand it to the guardrail so
+        # staleness alone (Epic 9: a 429'd refresh at 17% real usage) cannot
+        # pause a run whose last reading is nowhere near a limit. But ONLY
+        # when its recorded provenance matches the active account: quota is
+        # account-global, and in a multi-account setup account A's low cache
+        # must never pass the carve-out as account B's stale reading. No
+        # recorded provenance (a statusline-written cache) = unverifiable =
+        # no carve-out, fail closed.
+        provenance = payload.get("fetched_by")
+        # The active identity is the credential the refresh just ATTEMPTED
+        # with, when one was acquired: an env-token identity is a token
+        # fingerprint that a bare account_identity(env=env) recomputation
+        # cannot reproduce (it has no token), which would lock env-token
+        # users out of the carve-out forever. Fall back to the resolved
+        # login only when no credential was acquired at all.
+        current = (
+            fetch_account if fetch_account is not None else account_identity(env=env)
+        )
+        stale_snapshot = None
+        if _positive_identity(provenance) and provenance == current:
+            stale_snapshot = UsageSnapshot(
+                **parse_limits(payload),
+                account=provenance,
+                fetched_at=mtime,
+                source="stale",
+            )
+        elif isinstance(provenance, dict) and not _positive_identity(provenance):
+            message += (
+                "; stale reading's recorded provenance is an unknown-identity "
+                "placeholder — unverifiable, not usable"
+            )
+        elif isinstance(provenance, dict):
+            message += "; stale reading belongs to a different account — not usable"
+        else:
+            message += "; stale reading has no recorded account provenance — not usable"
+        raise UsageUnavailable(message, snapshot=stale_snapshot, age_s=age)
 
-    # A cache we did not refresh was written by the logged-in account's own
-    # refresher (statusline or a prior omater call) — attribute accordingly.
+    # Who do the LOADED payload's numbers belong to? Recorded provenance
+    # first (a prior omater refresh embedded who fetched it); an
+    # unprovenanced cache falls back to the logged-in identity under the
+    # module's shared-cache assumption (the statusline refreshes as the
+    # logged-in account and writes no provenance). The owner is derived from
+    # the payload we actually READ — not from `refreshed` — because the
+    # shared statusline can overwrite the cache between our own
+    # refresh_cache() and this read.
+    provenance = payload.get("fetched_by")
+    cache_owner = (
+        provenance if isinstance(provenance, dict) else account_identity(env=env)
+    )
+    if fetch_account is not None and cache_owner != fetch_account:
+        # A refresh attempt POSITIVELY identified the active credential and
+        # it is not the account these numbers describe — quota is
+        # account-global, so serving A's numbers to B's run would let B
+        # proceed on A's quota (the 3900s TTL keeps caches usable far longer
+        # than the old 300s did). Known mismatch = fail closed, at ANY age
+        # and on BOTH branches. (The stale branch above stays stricter: its
+        # carve-out PROCEEDS on old data, so it demands recorded provenance
+        # and never uses the shared-cache assumption.)
+        raise UsageUnavailable(
+            f"account-mismatch: cache at {cache} belongs to a different "
+            "account than the active credential; refusing its numbers"
+            + (f" (refresh failed: {failure})" if failure else "")
+        )
     return UsageSnapshot(
         **parse_limits(payload),
-        account=fetch_account if refreshed else account_identity(env=env),
+        account=cache_owner,
         fetched_at=mtime,
         source="live" if refreshed else "cache",
     )

@@ -118,6 +118,62 @@ class TestProjectConfig:
                 write_project(tmp_path, "project: x\nmerge:\n  converge: maybe\n")
             )
 
+    def test_policy_snapshot_records_the_resolved_round_alarm(self, tmp_path):
+        """Round-3 finding: the policy event start_run logs must establish
+        which review-round limit governed a run — a later config edit has to
+        be distinguishable from the original setting. Defaulted and custom
+        values both resolve into the snapshot; garbage fails at LOAD like
+        every other knob."""
+        from claudomater.merge import DEFAULT_REVIEW_ROUND_ALARM
+
+        default = load_project_config(write_project(tmp_path, "project: x\n"))
+        assert default.policy()["gates"]["review_round_alarm"] == (
+            DEFAULT_REVIEW_ROUND_ALARM
+        )
+        custom = load_project_config(
+            write_project(
+                tmp_path, "project: x\ngates:\n  review_round_alarm: 3\n"
+            )
+        )
+        assert custom.policy()["gates"]["review_round_alarm"] == 3
+        with pytest.raises(ConfigError, match="review_round_alarm"):
+            load_project_config(
+                write_project(
+                    tmp_path, "project: x\ngates:\n  review_round_alarm: soon\n"
+                )
+            )
+
+    def test_non_scalar_gate_values_fail_at_load_and_policy_serializes(
+        self, tmp_path
+    ):
+        """Round-4 finding: gates ride verbatim into policy(), which the run
+        log json.dumps'es — and yaml.safe_load happily produces a date for
+        `board_steps_required: 2026-08-30`, crashing start_run AFTER the run
+        directory exists. Non-scalar gate values are ConfigErrors at load,
+        and a loaded policy must always serialize."""
+        import json as _json
+
+        with pytest.raises(ConfigError, match="gates.board_steps_required"):
+            load_project_config(
+                write_project(
+                    tmp_path,
+                    "project: x\ngates:\n  board_steps_required: 2026-08-30\n",
+                )
+            )
+        # YAML's .nan is a float and would sail through a bare scalar check,
+        # but json.dumps emits it as NaN — invalid JSON for strict JSONL
+        # readers of the run log (round-5 finding).
+        with pytest.raises(ConfigError, match="must be finite"):
+            load_project_config(
+                write_project(tmp_path, "project: x\ngates:\n  weight: .nan\n")
+            )
+        cfg = load_project_config(
+            write_project(
+                tmp_path, "project: x\ngates:\n  board_steps_required: false\n"
+            )
+        )
+        _json.dumps(cfg.policy())  # the run-log snapshot must serialize
+
     def test_policy_changes_visibly_with_deployment_type(self, tmp_path):
         """AC: changing deployment_type visibly changes model chain, review
         floor, and CI tier (this dict is what run start logs)."""
@@ -306,13 +362,28 @@ class TestUserConfig:
             load_user_config(path)
 
     def test_defaults_object_is_valid(self):
-        assert UserConfig().usage.max_stale_seconds == 300
+        from claudomater.usage import DEFAULT_MAX_STALE_S
+
+        # one default, defined in usage.py next to the TTL>longest-phase
+        # invariant — the config layer must not carry its own copy
+        assert UserConfig().usage.max_stale_seconds == DEFAULT_MAX_STALE_S
 
     def test_non_mapping_sections_are_config_errors(self, tmp_path):
         for text in ("usage: [a, b]\n", "notify: just-a-string\n", "learning: 3\n"):
             path = tmp_path / "config.yaml"
             path.write_text(text, encoding="utf-8")
             with pytest.raises(ConfigError, match="must be a mapping"):
+                load_user_config(path)
+
+    def test_non_positive_max_stale_is_a_config_error(self, tmp_path):
+        """Round-7 finding: 0/negative marks EVERY cache entry stale, and
+        the stale carve-out would then proceed on any low reading — config
+        garbage silently weakening the guardrail instead of failing at
+        load."""
+        for bad in (0, -300):
+            path = tmp_path / "config.yaml"
+            path.write_text(f"usage:\n  max_stale_seconds: {bad}\n", encoding="utf-8")
+            with pytest.raises(ConfigError, match="must be >= 1"):
                 load_user_config(path)
 
     def test_non_integer_knobs_are_config_errors(self, tmp_path):

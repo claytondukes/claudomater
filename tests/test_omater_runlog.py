@@ -163,12 +163,19 @@ class TestEvents:
 
     def test_object_missing_event_key_counts_as_corrupt(self, tmp_path):
         """A valid JSON object without 'event' must not reach is_live() as a
-        KeyError — torn tail drops, middle line is a clear RunError."""
+        KeyError — torn tail drops, middle line is a clear RunError. (Both
+        lines written directly: an API append would now REPAIR a damaged
+        tail instead of burying it, so genuine middle damage is the only way
+        this state exists.)"""
         log = RunLog.create(tmp_path)
         with open(log.run_dir / "events.jsonl", "a", encoding="utf-8") as fh:
             fh.write('{"ts": "2026-08-28T23:00:00Z"}\n')
         assert log.is_live()  # tail dropped, no KeyError
-        log.event("dev", "phase-spawn")  # now the damaged line is in the middle
+        with open(log.run_dir / "events.jsonl", "a", encoding="utf-8") as fh:
+            fh.write(
+                '{"ts": "2026-08-28T23:00:01Z", "run_id": "x", '
+                '"phase": "dev", "event": "phase-spawn"}\n'
+            )
         with pytest.raises(RunError, match="corrupt"):
             log.events()
 
@@ -199,11 +206,16 @@ class TestEvents:
             RunLog.create(tmp_path)
 
     def test_corrupt_middle_line_is_a_run_error(self, tmp_path):
+        """Damage in the MIDDLE of history stays a loud error (only a torn
+        FINAL line is recoverable). Written directly — an API append now
+        repairs a damaged tail rather than burying it under new events."""
         log = RunLog.create(tmp_path)
         with open(log.run_dir / "events.jsonl", "a", encoding="utf-8") as fh:
             fh.write("garbage not json\n")
-        log_path_ok = log.event  # appending a valid event after the garbage
-        log_path_ok("dev", "phase-spawn")
+            fh.write(
+                '{"ts": "2026-08-28T23:00:01Z", "run_id": "x", '
+                '"phase": "dev", "event": "phase-spawn"}\n'
+            )
         with pytest.raises(RunError, match="corrupt"):
             log.events()
 
@@ -286,12 +298,92 @@ class TestControl:
         assert [c["action"] for c in log.read_controls()] == ["resume"]
 
     def test_corrupt_middle_control_line_is_a_run_error(self, tmp_path):
+        """Damage in the MIDDLE of control history stays a loud error (only
+        a torn FINAL line is recoverable). Written directly — write_control
+        now repairs a damaged tail rather than welding new commands onto
+        it."""
         log = RunLog.create(tmp_path)
         with open(log.run_dir / "control.jsonl", "a", encoding="utf-8") as fh:
             fh.write("garbage\n")
-        log.write_control("resume")
+            fh.write('{"ts": "2026-08-28T22:00:00Z", "action": "resume"}\n')
         with pytest.raises(RunError, match="corrupt"):
             log.read_controls()
+
+    def test_torn_control_tail_is_repaired_before_append(self, tmp_path):
+        """Round-13 finding: read_controls() tolerates a torn FINAL command
+        (never issued), but write_control appended right after the fragment
+        — welding it to the new record and turning recoverable tail damage
+        into corrupt middle history for every later read. The control tail
+        is repaired under the same lock, event-log discipline, and the
+        repair is recorded as history."""
+        log = RunLog.create(tmp_path)
+        log.write_control("resume")
+        with open(log.run_dir / "control.jsonl", "a", encoding="utf-8") as fh:
+            fh.write('{"ts": "2026-08-28T22:00:00Z", "action": "abo')
+        log.write_control("approve")
+        assert [c["action"] for c in log.read_controls()] == ["resume", "approve"]
+        assert "control-tail-repaired" in [e["event"] for e in log.events()]
+
+    def test_corrupt_middle_control_history_refuses_new_commands(self, tmp_path):
+        """Round-14 finding: the tail repair alone still let write_control
+        append a valid command after corrupt MIDDLE control history —
+        accepted but unusable, since every later read_controls() raises.
+        The repaired prefix is validated under the same lock (events-log
+        discipline): the command is refused loudly, naming the damage, and
+        nothing lands in either channel."""
+        log = RunLog.create(tmp_path)
+        with open(log.run_dir / "control.jsonl", "a", encoding="utf-8") as fh:
+            fh.write("garbage not json\n")  # middle damage, written directly
+            fh.write('{"ts": "2026-08-28T22:00:00Z", "action": "resume"}\n')
+        with pytest.raises(RunError, match="corrupt control.jsonl at line 1"):
+            log.write_control("approve")
+        # the refused command left the event stream untouched too
+        assert "control-approve" not in [e["event"] for e in log.events()]
+
+    def test_corrupt_middle_events_damage_is_not_reported_as_ended(self, tmp_path):
+        """Round-12 finding (suppressed): write_control caught EVERY RunError
+        from the liveness check — including a corrupt middle events.jsonl
+        record — and rebranded it 'already ended; start a new run instead',
+        hiding the loud corruption diagnosis behind the wrong instruction.
+        Only the ended signal (RunEndedError) is translated; damage
+        propagates naming the damaged line."""
+        log = RunLog.create(tmp_path)
+        with open(log.run_dir / "events.jsonl", "a", encoding="utf-8") as fh:
+            fh.write("garbage not json\n")  # middle damage, written directly
+            fh.write(
+                '{"ts": "2026-08-28T23:00:01Z", "run_id": "x", '
+                '"phase": "dev", "event": "phase-spawn"}\n'
+            )
+        with pytest.raises(RunError, match="corrupt events.jsonl at line 2"):
+            log.write_control("resume")
+        # the refused control never lands in the command channel
+        assert log.read_controls() == []
+
+    def test_control_on_an_ended_run_is_refused(self, tmp_path):
+        """Round-3 finding (suppressed): `omater resume|abort|approve` could
+        append control-* after a terminal event and flip is_live() back on.
+        An ended run accepts no control — and the command channel stays
+        clean of dead commands too."""
+        log = RunLog.create(tmp_path)
+        log.finish("run-complete")
+        with pytest.raises(RunError, match="nothing to act on"):
+            log.write_control("resume")
+        assert not log.is_live()
+        assert log.read_controls() == []
+
+    def test_refused_control_leaves_the_command_channel_clean(self, tmp_path):
+        """Round-4 finding: the terminal check, the control.jsonl write, and
+        the event append share ONE _append_lock critical section (which
+        finish() also takes), so 'check passed, owner finished, dead command
+        persisted' can no longer interleave. Contract pin: a refused control
+        leaves control.jsonl untouched."""
+        log = RunLog.create(tmp_path)
+        log.event("dev", "phase-spawn", {"model": "m", "attempt": 1})
+        sibling = RunLog.attach(tmp_path)
+        log.finish("run-complete")
+        with pytest.raises(RunError, match="nothing to act on"):
+            sibling.write_control("resume")
+        assert sibling.read_controls() == []
 
 
 class TestTranscriptPaths:
@@ -354,3 +446,250 @@ class TestAttachVsAdopt:
         # orchestrator dies here; the unanswered spawn is the orphan shape
         adopted = RunLog.adopt(tmp_path)
         assert [e["event"] for e in adopted.events()][-1] == "run-adopted"
+
+
+class TestAttachSeam:
+    """Epic 9 rough edge #3: the merge-phase driver appended events via
+    `adopt()` and stamped a `run-adopted` (crash-recovery) bookkeeping event
+    per invocation. `attach()` is the first-class append seam: same run,
+    zero bookkeeping noise."""
+
+    def test_attach_writes_no_bookkeeping_event(self, tmp_path):
+        log = RunLog.create(tmp_path)
+        log.event("dev", "phase-spawn", {"model": "m", "attempt": 1})
+        before = [e["event"] for e in log.events()]
+        sibling = RunLog.attach(tmp_path)
+        assert [e["event"] for e in sibling.events()] == before
+
+    def test_attached_sibling_appends_into_the_same_run(self, tmp_path):
+        log = RunLog.create(tmp_path)
+        log.event("dev", "phase-spawn", {"model": "m", "attempt": 1})
+        sibling = RunLog.attach(tmp_path)
+        sibling.event("merge", "copilot-round", {"round": 1})
+        assert log.events()[-1]["event"] == "copilot-round"
+        assert sibling.run_id == log.run_id
+
+    def test_attach_refuses_an_ended_run(self, tmp_path):
+        """Appending to a closed run would forge post-mortem history."""
+        log = RunLog.create(tmp_path)
+        log.finish("run-complete")
+        with pytest.raises(RunError, match="already ended"):
+            RunLog.attach(tmp_path)
+
+    def test_attached_sibling_cannot_append_after_the_owner_finishes(self, tmp_path):
+        """Round-1 finding: check-at-attach alone is a race — the owner can
+        finish AFTER the sibling attached, and a late append would land past
+        the terminal record and flip is_live() back on. Liveness is
+        re-verified at every append, under the append lock."""
+        log = RunLog.create(tmp_path)
+        log.event("dev", "phase-spawn", {"model": "m", "attempt": 1})
+        sibling = RunLog.attach(tmp_path)  # valid at attach time
+        log.finish("run-complete")  # owner ends the run afterwards
+        with pytest.raises(RunError, match="has ended"):
+            sibling.event("merge", "copilot-round", {"round": 1})
+        assert not log.is_live()  # the terminal record stayed terminal
+
+    def test_attach_without_a_current_run_raises(self, tmp_path):
+        with pytest.raises(RunError, match="no current run"):
+            RunLog.attach(tmp_path)
+
+    def test_attach_by_run_id_with_the_same_liveness_rules(self, tmp_path):
+        """Named attach serves the control CLI's --run flag: same containment
+        and liveness rules as the current-link path."""
+        log = RunLog.create(tmp_path, run_id="run-a")
+        log.event("dev", "phase-spawn", {"model": "m", "attempt": 1})
+        sibling = RunLog.attach(tmp_path, run_id="run-a")
+        sibling.event("merge", "copilot-round", {"round": 1})
+        log.finish("run-complete")
+        with pytest.raises(RunError, match="already ended"):
+            RunLog.attach(tmp_path, run_id="run-a")
+        with pytest.raises(RunError, match="no run"):
+            RunLog.attach(tmp_path, run_id="run-x")
+
+    def test_named_attach_rejects_symlink_aliases(self, tmp_path):
+        """Round-8 finding: an in-tree alias (run-b -> run-a) passed the
+        containment check, opened run A, and stamped run_id 'run-b' into A's
+        history. Named runs must be real directories; only the dedicated
+        'current' link is followed."""
+        log = RunLog.create(tmp_path, run_id="run-a")
+        log.event("dev", "phase-spawn", {"model": "m", "attempt": 1})
+        (runs_root(tmp_path) / "run-b").symlink_to("run-a")
+        with pytest.raises(RunError, match="symlink"):
+            RunLog.attach(tmp_path, run_id="run-b")
+
+    def test_append_after_a_torn_tail_repairs_instead_of_corrupting(self, tmp_path):
+        """Round-3 finding: events() tolerates a torn FINAL line (crash
+        artifact), but an append landing after it would turn the fragment
+        into corrupt MIDDLE history and every later events() call would
+        raise. Appends now truncate a recoverable torn tail under the append
+        lock and record the repair."""
+        log = RunLog.create(tmp_path)
+        log.event("dev", "phase-spawn", {"model": "m", "attempt": 1})
+        with open(log.run_dir / "events.jsonl", "a", encoding="utf-8") as fh:
+            fh.write('{"ts": "2026-08-30T00:00:00Z", "event": "phase-ver')
+        sibling = RunLog.attach(tmp_path)  # tolerant read: run is live
+        sibling.event("merge", "copilot-round", {"round": 1})
+        names = [e["event"] for e in log.events()]  # raised pre-fix (corrupt)
+        assert "torn-tail-repaired" in names
+        assert names[-1] == "copilot-round"
+        assert "phase-spawn" in names  # intact history untouched
+
+    def test_append_after_a_missing_final_newline_does_not_concatenate(
+        self, tmp_path
+    ):
+        """Round-4 finding (suppressed): a crash can land exactly between a
+        record's JSON bytes and its newline — the record is complete and
+        readable, but a plain append would concatenate onto it, silently
+        merging (and then losing) BOTH records. Appends normalize the
+        delimiter; nothing is discarded, so no repair event either."""
+        log = RunLog.create(tmp_path)
+        with open(log.run_dir / "events.jsonl", "a", encoding="utf-8") as fh:
+            fh.write(
+                '{"ts": "2026-08-30T00:00:00Z", "run_id": "x", '
+                '"phase": "dev", "event": "phase-spawn"}'
+            )  # complete record, missing only its newline
+        log.event("merge", "copilot-round", {"round": 1})
+        names = [e["event"] for e in log.events()]
+        assert names[-2:] == ["phase-spawn", "copilot-round"]
+        assert "torn-tail-repaired" not in names
+
+
+class TestPark:
+    """Epic 9 rough edge #4 (lifecycle half): a pause PARKS the run — live
+    and adoptable — it never ends it. The severity run died as `run-failed`
+    with empty reasons because nothing owned this stance."""
+
+    def test_park_is_non_terminal_and_keeps_the_run_adoptable(self, tmp_path):
+        log = RunLog.create(tmp_path)
+        log.event("lessons", "phase-spawn", {"model": "m", "attempt": 1})
+        record = log.park("paused: guardrail", phase="lessons", story_key="s-1")
+        assert record["event"] == "run-parked"
+        assert log.is_live()
+        adopted = RunLog.adopt(tmp_path)  # a parked run is precisely adoptable
+        assert adopted.run_id == log.run_id
+
+    def test_park_names_its_reason_in_the_event(self, tmp_path):
+        log = RunLog.create(tmp_path)
+        log.park("paused: 'lessons' guardrail spawn gate: stale-cache ...")
+        ev = log.events()[-1]
+        assert ev["detail"]["reason"].startswith("paused:")
+        assert "adoptable" in ev["detail"]["note"]
+
+    def test_parking_an_ended_run_raises(self, tmp_path):
+        """A park on a closed run would misrepresent it as waiting."""
+        log = RunLog.create(tmp_path)
+        log.finish("run-failed", {"reason": "x"})
+        with pytest.raises(RunError, match="ended"):
+            log.park("too late")
+
+    def test_torn_fragment_after_the_terminal_record_cannot_reopen_the_run(
+        self, tmp_path
+    ):
+        """Round-6 finding (thread + suppressed twin): the repair marker is
+        itself an append, and recording it BEFORE the terminal check let a
+        torn fragment after run-complete smuggle the marker in as the new
+        last event — reopening post-mortem history through the very
+        mechanism meant to protect it. Truncate, validate the repaired
+        prefix, only then record."""
+        log = RunLog.create(tmp_path)
+        log.finish("run-complete")
+        with open(log.run_dir / "events.jsonl", "a", encoding="utf-8") as fh:
+            fh.write('{"ts": "2026-08-30T00:00:00Z", "event": "phase-ver')
+        with pytest.raises(RunError, match="post-mortem"):
+            log.event("dev", "phase-spawn", {"model": "m", "attempt": 1})
+        with pytest.raises(RunError, match="nothing to act on"):
+            log.write_control("resume")
+        names = [e["event"] for e in log.events()]
+        assert names[-1] == "run-complete"  # the marker did not reopen it
+        assert not log.is_live()
+        assert log.read_controls() == []
+
+    def test_no_handle_may_append_after_the_run_ends(self, tmp_path):
+        """Round-5 finding: terminal enforcement was scoped to attach()
+        handles, but ownership does not make post-mortem history safe — the
+        owner (or an adopted handle) could event() after finish(), append a
+        non-terminal record, and flip is_live() back on. EVERY handle now
+        refuses, and a double finish() is a loud error instead of a second
+        terminal record."""
+        log = RunLog.create(tmp_path)
+        log.finish("run-complete")
+        with pytest.raises(RunError, match="post-mortem"):
+            log.event("dev", "phase-spawn", {"model": "m", "attempt": 1})
+        with pytest.raises(RunError, match="post-mortem"):
+            log.finish("run-failed", {"reason": "double finish"})
+        assert [e["event"] for e in log.events()][-1] == "run-complete"
+
+    def test_completing_a_parked_run_is_refused(self, tmp_path):
+        """Round-9 finding (suppressed): only run-failed was refused while
+        parked — run-complete could still terminate a run whose work never
+        resumed, claiming success for un-progressed state. Both terminals
+        are refused while parked; run-aborted stays the operator escape
+        hatch."""
+        log = RunLog.create(tmp_path)
+        log.event("lessons", "phase-spawn", {"model": "m", "attempt": 1})
+        log.park("paused: guardrail", phase="lessons")
+        with pytest.raises(RunError, match="parked"):
+            log.finish("run-complete", {"lessons": 5})
+        assert log.is_live()
+        log.finish("run-aborted", {"reason": "operator decision"})
+
+    def test_failing_a_parked_run_is_refused(self, tmp_path):
+        """Round-1 finding: the park record alone did not stop a driver from
+        calling finish('run-failed') right after — the incident path with a
+        nicer log. While the LAST event is run-parked, run-failed is refused;
+        an operator abort stays available."""
+        log = RunLog.create(tmp_path)
+        log.event("lessons", "phase-spawn", {"model": "m", "attempt": 1})
+        log.park("paused: guardrail", phase="lessons")
+        with pytest.raises(RunError, match="parked"):
+            log.finish("run-failed", {"reason": "lessons did not verify"})
+        assert log.is_live()  # still adoptable after the refused finish
+        log.finish("run-aborted", {"reason": "operator decision"})  # allowed
+
+    def test_a_resumed_run_can_fail_again(self, tmp_path):
+        """A progress signal after the park (a re-driven phase spawn) unparks
+        — a phase that then genuinely fails may fail the run."""
+        log = RunLog.create(tmp_path)
+        log.park("paused: guardrail", phase="lessons")
+        log.event("lessons", "phase-spawn", {"model": "m", "attempt": 1})
+        log.finish("run-failed", {"reason": "lessons did not verify: [gate]"})
+        assert not log.is_live()
+
+    def test_bookkeeping_and_sibling_events_do_not_unpark(self, tmp_path):
+        """Round-2 finding: adopt() appends run-adopted, so 'last event is
+        run-parked' stopped holding the moment anyone adopted the parked run
+        — and a sibling's evidence append would unpark it too. Parked is a
+        lifecycle fact: only phase-spawn / control-resume clear it."""
+        log = RunLog.create(tmp_path)
+        log.event("lessons", "phase-spawn", {"model": "m", "attempt": 1})
+        log.park("paused: guardrail", phase="lessons")
+        adopted = RunLog.adopt(tmp_path)  # run-adopted: bookkeeping
+        sibling = RunLog.attach(tmp_path)
+        sibling.event("merge", "copilot-round", {"round": 1})  # evidence
+        with pytest.raises(RunError, match="parked"):
+            adopted.finish("run-failed", {"reason": "x"})
+        assert log.is_live()
+
+    def test_operator_resume_unparks(self, tmp_path):
+        """control-resume is an explicit progress signal — after it, a
+        genuine failure may fail the run."""
+        log = RunLog.create(tmp_path)
+        log.park("paused: guardrail", phase="lessons")
+        log.write_control("resume")
+        log.finish("run-failed", {"reason": "resumed work failed: [gate]"})
+        assert not log.is_live()
+
+    def test_park_racing_a_concurrent_finish_is_refused(self, tmp_path):
+        """Round-2 finding (suppressed): park's ended-check lived OUTSIDE the
+        append lock, so a terminal event landing between check and append let
+        run-parked follow it and flip is_live() back on. The check now runs
+        inside event()'s locked section — this pins the observable contract;
+        the interleaving itself is closed by construction (one critical
+        section)."""
+        log = RunLog.create(tmp_path)
+        log.event("dev", "phase-spawn", {"model": "m", "attempt": 1})
+        sibling = RunLog.attach(tmp_path)
+        log.finish("run-complete")
+        with pytest.raises(RunError):
+            sibling.park("too late")
+        assert not log.is_live()

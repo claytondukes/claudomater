@@ -2620,6 +2620,21 @@ class TestInit:
         assert any("wrote" in a for a in actions)
         assert run_verify(tmp_path) == []
 
+    def test_template_exposes_the_review_round_alarm_knob(self, tmp_path):
+        """Every advertised gate must be discoverable from the generated
+        config — a hard-stop policy nobody starting from the template can
+        find is policy, not code. The template's value must round-trip
+        through the real consumer (RoundAlarm.from_gates)."""
+        import yaml
+
+        from claudomater.merge import DEFAULT_REVIEW_ROUND_ALARM, RoundAlarm
+
+        run_init(tmp_path)
+        data = yaml.safe_load((tmp_path / ".omater.yaml").read_text())
+        gates = data["gates"]
+        assert gates["review_round_alarm"] == DEFAULT_REVIEW_ROUND_ALARM
+        assert RoundAlarm.from_gates(gates).limit == DEFAULT_REVIEW_ROUND_ALARM
+
     def test_init_is_idempotent(self, tmp_path):
         run_init(tmp_path)
         (tmp_path / ".omater.yaml").write_text(

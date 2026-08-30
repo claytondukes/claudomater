@@ -153,23 +153,11 @@ def _cmd_start(args: argparse.Namespace) -> int:
 def _cmd_control(args: argparse.Namespace) -> int:
     root = Path(args.root).resolve()
     try:
-        if args.run and args.run != "current":
-            run_dir = runs_root(root) / validate_run_id(args.run)
-            if not run_dir.is_dir():
-                raise RunError(f"no run {args.run!r} under {runs_root(root)}")
-            # Same containment rule as the current-link check in RunLog:
-            # a symlinked run dir must not carry control writes elsewhere.
-            resolved = run_dir.resolve()
-            if resolved.parent != runs_root(root).resolve():
-                raise RunError(
-                    f"run {args.run!r} resolves outside the runs directory "
-                    f"({resolved}); remove the symlink manually"
-                )
-            log = RunLog(resolved, args.run)
-        else:
-            log = RunLog._attach(runs_root(root) / "current")
-            if log is None:
-                raise RunError(f"no current run under {runs_root(root)}")
+        # attach(): liveness-checked (a finished run accepts no control) and
+        # re-checked atomically at the event append — a bare _attach left
+        # `omater resume|abort|approve` able to append control-* after a
+        # terminal event and flip is_live() back on.
+        log = RunLog.attach(root, run_id=args.run)
         log.write_control(args.action)
     except RunError as exc:
         print(f"error: {exc}", file=sys.stderr)
