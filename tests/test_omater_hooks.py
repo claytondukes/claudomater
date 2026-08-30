@@ -553,6 +553,46 @@ class TestBashFence:
             allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
             assert allow, (cmd, reason)
 
+    def test_double_dash_ends_writer_option_parsing(self, tmp_path):
+        """`touch -- -probe` creates the FILE -probe — skipping every
+        dash token hid the write behind the option filter."""
+        p = payload("Bash", command="cd /etc; touch -- -probe")
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+
+    def test_commands_after_a_bounded_function_body_execute(self, tmp_path):
+        """The definition's dead span ends at its matched close: `f() {
+        :; }; touch /tmp_probe/x` really executes the write (the
+        end-of-command wall hid it), and tracking resumes with the
+        pre-definition cwd."""
+        p = payload("Bash", command="f() { :; }; touch /tmp_probe/x")
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+        p = payload("Bash", command="cd /etc; f() { cd /tmp; }; cat > passwd")
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+
+    def test_cdpath_mention_is_not_an_assignment(self, tmp_path):
+        """`printf CDPATH` changes nothing — the substring check voided
+        cd tracking and hid a recognized relative escape. A real CDPATH
+        assignment still makes relative cds unknowable (fail open)."""
+        (tmp_path / "server").mkdir()
+        p = payload(
+            "Bash", command="printf CDPATH; cd server; touch ../../escape"
+        )
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+        p = payload(
+            "Bash", command="CDPATH=/x cd server && touch ../../escape"
+        )
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+
     def test_reserved_word_arithmetic_is_a_comparison(self, tmp_path):
         """`if (( x > /tmp_probe/out )); then :; fi` is arithmetic —
         nothing is written; the reserved word keeps (( at command

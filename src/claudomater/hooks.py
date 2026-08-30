@@ -679,15 +679,60 @@ _COMPOUND = re.compile(
 )
 # A function DEFINITION executes NOTHING at definition time — not even
 # the absolute writes in its body (`deploy() { echo x > /tmp_probe/x; }`
-# was falsely denied). The body extent is unparseable here, so the
-# opener is a WALL: everything after fails open, a possible same-command
-# invocation included (deny-on-recognized accepts that miss). Flow
-# compounds above stay merely HARD — `if true; then cat > /etc/x; fi`
-# usually DOES run its body, and its absolute writes must keep denying.
+# was falsely denied). When the body's closing delimiter can be
+# confidently matched, the body is a DEAD SPAN (its events dropped) and
+# scanning RESUMES after it — `f() { :; }; touch /tmp_probe/x` really
+# executes its write and must keep denying. An unmatchable body falls
+# back to a WALL to end-of-command. Flow compounds stay merely HARD —
+# `if true; then cat > /etc/x; fi` usually DOES run its body.
+# the dead span starts at the DEFINITION (kw/fn groups), not the anchor
+# separator: a preceding command's effect event lands ON that separator
+# (`cd /etc; f() { ... }` — dropping it lost the applied cd)
 _FUNC_DEF = re.compile(
-    r"(?:^|[\n;&|(])\s*function\b"
-    r"|(?:^|[\n;&|])\s*[A-Za-z_][A-Za-z0-9_]*[ \t]*\([ \t]*\)[ \t]*[({]"
+    r"(?:^|[\n;&|(])\s*(?P<kw>function\b)"
+    r"|(?:^|[\n;&|])\s*(?P<fn>[A-Za-z_][A-Za-z0-9_]*[ \t]*\([ \t]*\)[ \t]*[({])"
 )
+# the body opener of a `function name [()] { ...` form
+_FUNCTION_KW_BODY = re.compile(
+    r"[ \t]*[A-Za-z_][A-Za-z0-9_]*[ \t]*(?:\([ \t]*\))?[ \t]*(\{)(?=[ \t\n])"
+)
+
+
+def _func_body_end(scannable: str, opener: int) -> int | None:
+    """Position just past the body's closing delimiter, or None when it
+    cannot be confidently found (caller falls back to the wall)."""
+    n = len(scannable)
+    if scannable[opener] == "(":
+        depth = 0
+        for k in range(opener, n):
+            c = scannable[k]
+            if c == "(" and _escape_parity(scannable, k) == 0:
+                depth += 1
+            elif c == ")" and _escape_parity(scannable, k) == 0:
+                depth -= 1
+                if depth == 0:
+                    return k + 1
+        return None
+    # brace body: { and } count only as the reserved WORDS (bash
+    # grammar), so ${...} and brace expansions never miscount
+    depth = 0
+    for k in range(opener, n):
+        c = scannable[k]
+        if c == "{":
+            nxt = scannable[k + 1] if k + 1 < n else ""
+            prev = scannable[k - 1] if k else ""
+            if (nxt in " \t\n" or not nxt) and (
+                k == opener or prev in " \t\n;|&("
+            ):
+                depth += 1
+        elif c == "}":
+            nxt = scannable[k + 1] if k + 1 < n else ""
+            prev = scannable[k - 1] if k else ""
+            if prev in " \t\n;|&" and (nxt in " \t\n;|&)<>" or not nxt):
+                depth -= 1
+                if depth == 0:
+                    return k + 1
+    return None
 # eval/source/. run current-shell code the scanner cannot see, but they
 # EXECUTE AND RETURN: top-level flow demonstrably resumes after them, so
 # their opacity is soft (an unconditional absolute cd afterwards recovers) —
@@ -835,9 +880,17 @@ def _positioned_write_targets(scannable: str) -> list[tuple[int, str]]:
                 m.group("cmd")
             ].search(m.group(0)):
                 continue  # an arg-taking option consumes an operand: fail open
+            seen_ddash = False
             for operand in re.finditer(r"[^\s;|&<>()]+", m.group("ops")):
-                if not operand.group().startswith("-"):
-                    keep(m.start("ops") + operand.start(), operand.group())
+                tok = operand.group()
+                if not seen_ddash and tok == "--":
+                    # option parsing ENDS here: `touch -- -probe` creates
+                    # the file -probe (skipping it hid the write)
+                    seen_ddash = True
+                    continue
+                if tok.startswith("-") and not seen_ddash:
+                    continue
+                keep(m.start("ops") + operand.start(), tok)
     for m in _DD_OF.finditer(scannable):
         if not anchored_on_syntax(m):
             keep(m.start(1), m.group(1))
@@ -888,7 +941,11 @@ def resolved_bash_targets(
     # not ./ or ../ anchored) become untrackable. Absolute and dot-anchored
     # targets bypass CDPATH per bash and keep tracking.
     env = env if env is not None else dict(os.environ)
-    cdpath_active = bool(env.get("CDPATH")) or "CDPATH" in scannable
+    # an ASSIGNMENT shape only: a mere mention of CDPATH (`printf CDPATH`)
+    # cannot rewire cd, and voiding on it hid a recognized relative write
+    cdpath_active = bool(env.get("CDPATH")) or bool(
+        re.search(r"(?:^|[\s;&|({])CDPATH=", scannable)
+    )
     # An in-command HOME assignment changes what `~` means to bash, while
     # expanduser reads the HOOK's environment — resolving `~` through the
     # stale HOME falsely denied in-root writes (`HOME=<root>; echo > ~/f`
@@ -999,10 +1056,24 @@ def resolved_bash_targets(
         # flow demonstrably resumes after those.
         if _real_anchor(m):
             events.append((m.start(), "hard", None))
+    dead_spans: list[tuple[int, int]] = []
     for m in _FUNC_DEF.finditer(scannable):
-        # definitions execute nothing: wall, not hard (see _FUNC_DEF)
-        if _real_anchor(m):
-            events.append((m.start(), "wall", None))
+        # definitions execute nothing (see _FUNC_DEF): a bounded body is
+        # a dead span; an unmatchable one falls back to the wall
+        if not _real_anchor(m):
+            continue
+        if m.group("fn") is not None:
+            def_start = m.start("fn")
+            opener: int | None = m.end() - 1
+        else:
+            def_start = m.start("kw")
+            kw_body = _FUNCTION_KW_BODY.match(scannable, m.end())
+            opener = kw_body.start(1) if kw_body else None
+        end = _func_body_end(scannable, opener) if opener is not None else None
+        if end is None:
+            events.append((def_start, "wall", None))
+        else:
+            dead_spans.append((def_start, end))
     for pos in _bare_ampersands(scannable, arith):
         events.append((pos, "opaque", None))
     for m in _SET_PHYSICAL.finditer(scannable):
@@ -1214,6 +1285,11 @@ def resolved_bash_targets(
         "hard": 5,
         "wall": 6,
     }
+    if dead_spans:
+        # events inside a bounded function body never execute at
+        # definition time — targets, cds, and opacity alike are data
+        _in_dead = _span_lookup(dead_spans)
+        events = [e for e in events if not _in_dead(e[0])]
     events.sort(key=lambda e: (e[0], priority[e[1]]))
 
     current: Path | None = cwd
