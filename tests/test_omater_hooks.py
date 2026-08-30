@@ -553,6 +553,50 @@ class TestBashFence:
             allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
             assert allow, (cmd, reason)
 
+    def test_reserved_word_arithmetic_is_a_comparison(self, tmp_path):
+        """`if (( x > /tmp_probe/out )); then :; fi` is arithmetic —
+        nothing is written; the reserved word keeps (( at command
+        position (same rule as [[)."""
+        p = payload(
+            "Bash", command="if (( x > /tmp_probe/out )); then :; fi"
+        )
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+
+    def test_builtin_wrapped_external_writers_fail_open(self, tmp_path):
+        """bash rejects `builtin touch /x` (touch is not a builtin)
+        without running it — recognizing the shape falsely denied a
+        write that never happens."""
+        p = payload("Bash", command="builtin touch /tmp_probe/x")
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+
+    def test_redirect_prefixed_source_voids_tracking(self, tmp_path):
+        """`> /dev/null source setup.sh` runs source in the CURRENT
+        shell — missing the redirect prefix left a stale /etc that
+        falsely denied the later relative write."""
+        p = payload(
+            "Bash", command="cd /etc; > /dev/null source setup.sh; cat > passwd"
+        )
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+
+    def test_compound_body_writers_stay_recognized(self, tmp_path):
+        """`{ touch /x; }` and `if touch /x; then :; fi` RUN their
+        writers — the { opener and condition reserved words are command
+        positions and must anchor recognition."""
+        for cmd in (
+            "{ touch /tmp_probe/x; }",
+            "if touch /tmp_probe/x; then :; fi",
+        ):
+            p = payload("Bash", command=cmd)
+            p["cwd"] = str(tmp_path)
+            allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+            assert not allow, cmd
+
     def test_prefixed_writer_invocations_stay_recognized(self, tmp_path):
         """`!`, `env VAR=x`, and unflagged wrappers run the writer with
         the same argv — the command-position anchor must accept them (a

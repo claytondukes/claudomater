@@ -292,20 +292,24 @@ def _arith_spans(
             # bare (( is arithmetic only as a COMMAND, not mid-word
             # (`( (echo x) )` is a subshell, but its inner (( is adjacent
             # only when it, too, sits right at the command position)
+            # `!` and the condition/body reserved words keep command
+            # position: `if (( x > /f ))` is arithmetic whose phantom
+            # redirect was a false deny (`for ((...))` likewise)
             j = i - 1
-            while j >= 0 and text[j] in " \t":
-                j -= 1
-            # `! (( x > f ))` — the status-negation reserved word keeps
-            # command position (its phantom redirect was a false deny)
-            while (
-                j >= 0
-                and text[j] == "!"
-                and not _escape_parity(text, j)
-                and (j == 0 or text[j - 1] in " \t\n;&|(")
-            ):
-                j -= 1
+            while True:
                 while j >= 0 and text[j] in " \t":
                     j -= 1
+                w_end = j
+                while j >= 0 and text[j] not in " \t\n;&|(":
+                    j -= 1
+                word = text[j + 1 : w_end + 1]
+                if word in (
+                    "!", "if", "elif", "while", "until", "then", "else",
+                    "do", "for",
+                ) and (word != "!" or not _escape_parity(text, w_end)):
+                    continue
+                j = w_end if word else j
+                break
             if not (j < 0 or (text[j] in ";&|\n(" and not _escape_parity(text, j))):
                 i += 1
                 continue
@@ -442,11 +446,19 @@ _REDIRECT = re.compile(r"(?<![<>&\d])\d?>{1,2}\s*([^\s;|&<>()]+)")
 # /tmp/x AS the user touch, and guessing whether the word after a flag
 # is its argument or the command falsely denied that shape — so a flag
 # breaks the anchor and the command fails open, never guess-denies.
+# Anchors also cover the brace-group opener and condition/body reserved
+# words — `{ touch /x; }` and `if touch /x; then :; fi` really RUN their
+# writers. `builtin` is NOT a wrapper here: touch/tee/... are external,
+# bash rejects `builtin touch` without running it, and recognizing the
+# shape falsely denied a write that never happens (it stays a cd wrapper,
+# where cd IS a builtin).
 _CMD_ANCHOR = (
-    r"(?:^|[\n;&|(])\s*(?:![ \t]+)*"
+    r"(?:^|[\n;&|(]|\{(?=[ \t\n]))\s*"
+    r"(?:(?:if|elif|while|until|then|else|do)[ \t]+)*"
+    r"(?:![ \t]+)*"
     r"(?:"
     r"[A-Za-z_][A-Za-z0-9_]*=[^\s;|&<>()]*[ \t]+"
-    r"|(?:command|builtin|nohup|sudo|env|time)[ \t]+"
+    r"|(?:command|nohup|sudo|env|time)[ \t]+"
     r")*"
 )
 # tee/mkdir/touch accept MULTIPLE operands — group 1 captures the whole
@@ -682,7 +694,11 @@ _FUNC_DEF = re.compile(
 # unlike a compound body, whose extent is unparseable (hard, above).
 _SHELL_EXEC = re.compile(
     r"(?:^|[\n;&|(])\s*"
-    r"(?:[A-Za-z_][A-Za-z0-9_]*=[^\s;|&<>()]*[ \t]+)*"  # MODE=x source ... is valid
+    # MODE=x source ... and `> /dev/null source ...` are valid: a
+    # redirect prefix still runs source in the CURRENT shell, and
+    # missing it left a stale cwd that falsely denied a later write
+    r"(?:[A-Za-z_][A-Za-z0-9_]*=[^\s;|&<>()]*[ \t]+"
+    r"|\d*[<>]{1,2}(?:&\d+-?)?[ \t]*[^\s;|&<>()]*[ \t]+)*"
     r"(?:(?:eval|source)\b|\.(?![^\s;&|)\n]))"
 )
 
