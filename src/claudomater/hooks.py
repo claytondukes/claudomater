@@ -621,6 +621,16 @@ _GLUED_COMMAND = re.compile(
 # escaped blank is part of the word (`MODE=a\ b` is ONE assignment).
 _TRANSPARENT_PREFIX_WORD = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=.*|\d*[<>].*|&>.*|-.*")
 _CD_WRAPPERS = frozenset({"command", "builtin", "time", "!"})
+# a variable assignment effective for the CURRENT shell: at command
+# position, optionally export/declare-prefixed, optionally after other
+# assignment words. An argument mention (`printf CDPATH=/tmp`) is not one.
+_ASSIGN_PREFIX = (
+    r"(?:^|[\n;&|({])\s*(?:![ \t]+)*"
+    r"(?:(?:export|declare|local|readonly)[ \t]+)?"
+    r"(?:[A-Za-z_][A-Za-z0-9_]*=[^\s;|&<>()]*[ \t]+)*"
+)
+_CDPATH_ASSIGN = re.compile(_ASSIGN_PREFIX + r"CDPATH=")
+_HOME_ASSIGN = re.compile(_ASSIGN_PREFIX + r"HOME=")
 # A redirect operator with NO glued operand (`>`, `2>>`, `>&`, `&>`) takes
 # the NEXT word as its file — `> /dev/null cd <root>` redirects and then
 # RUNS cd. Checking `/dev/null` as an independent word kept a stale cwd
@@ -971,18 +981,29 @@ def resolved_bash_targets(
     # not ./ or ../ anchored) become untrackable. Absolute and dot-anchored
     # targets bypass CDPATH per bash and keep tracking.
     env = env if env is not None else dict(os.environ)
-    # an ASSIGNMENT shape only: a mere mention of CDPATH (`printf CDPATH`)
-    # cannot rewire cd, and voiding on it hid a recognized relative write
-    cdpath_active = bool(env.get("CDPATH")) or bool(
-        re.search(r"(?:^|[\s;&|({])CDPATH=", scannable)
-    )
+
+    # A COMMAND-POSITION assignment only (plus export/declare forms): a
+    # mere argument (`printf CDPATH=/tmp`, `printf HOME=/tmp`) assigns
+    # nothing, and the old command-wide substring flags made later cds
+    # and `~` targets untrackable — hiding recognized escapes. The
+    # position is kept so the flag applies only to events AFTER it: a
+    # write before the assignment resolves under the ORIGINAL value.
+    def _first_assignment(pattern: re.Pattern) -> int | None:
+        for am in pattern.finditer(scannable):
+            first = scannable[am.start()]
+            if first in ";&|({" and _escape_parity(scannable, am.start()) == 1:
+                continue
+            return am.end()
+        return None
+
+    cdpath_env = bool(env.get("CDPATH"))
+    cdpath_pos = _first_assignment(_CDPATH_ASSIGN)
     # An in-command HOME assignment changes what `~` means to bash, while
     # expanduser reads the HOOK's environment — resolving `~` through the
     # stale HOME falsely denied in-root writes (`HOME=<root>; echo > ~/f`
-    # and `HOME=<root>; cd ~`). No HOME tracking (frozen): any `~`-leading
-    # target in such a command is unresolved, fail open — position-
-    # insensitive on purpose.
-    home_touched = re.search(r"(?:^|[\s;&|({])HOME=", scannable) is not None
+    # and `HOME=<root>; cd ~`). No HOME tracking (frozen): `~`-leading
+    # targets AFTER the assignment are unresolved, fail open.
+    home_pos = _first_assignment(_HOME_ASSIGN)
     arith = _arith_spans(scannable)
     # `(( x > passwd ))` and `[[ x > passwd ]]` are COMPARISONS — no write
     # happens, and the phantom targets were falsely denied against the
@@ -1382,7 +1403,9 @@ def resolved_bash_targets(
                 out.append((raw, None))
                 continue
             if _resolved_target(raw) is None or (
-                home_touched and raw.startswith("~")
+                home_pos is not None
+                and _pos > home_pos
+                and raw.startswith("~")
             ):
                 out.append((raw, None))
             elif Path(os.path.expanduser(raw)).is_absolute():
@@ -1490,7 +1513,7 @@ def resolved_bash_targets(
             # entry this scan cannot know. All -> unknown, fail open.
             current = None
             continue
-        if home_touched and target.startswith("~"):
+        if home_pos is not None and _pos > home_pos and target.startswith("~"):
             # same stale-HOME rule as write targets: `HOME=<root>; cd ~`
             # returns IN-root while expanduser tracked the old home
             current = None
@@ -1522,7 +1545,9 @@ def resolved_bash_targets(
             continue
         if step.is_absolute():
             new_cwd = str(step)
-        elif cdpath_active and not (
+        elif (
+            cdpath_env or (cdpath_pos is not None and _pos > cdpath_pos)
+        ) and not (
             target in (".", "..") or target.startswith(("./", "../"))
         ):
             # a relative target under an effective CDPATH may land ANYWHERE

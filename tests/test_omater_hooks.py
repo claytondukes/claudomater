@@ -553,6 +553,30 @@ class TestBashFence:
             allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
             assert allow, (cmd, reason)
 
+    def test_env_var_mentions_as_arguments_do_not_disarm(self, tmp_path):
+        """`printf CDPATH=/tmp` / `printf HOME=/tmp` assign NOTHING — the
+        command-wide substring flags made later cds and `~` targets
+        untrackable and hid recognized escapes. Only a command-position
+        assignment counts, and only for text AFTER it (a write BEFORE the
+        assignment resolves under the original value). Real assignments
+        keep failing open."""
+        (tmp_path / "server").mkdir()
+        for cmd in (
+            "printf CDPATH=/tmp; cd server; touch ../../escape",
+            "printf HOME=/tmp; echo hi > ~/omater-probe3.txt",
+            "echo hi > ~/omater-probe4.txt; HOME=/tmp",
+        ):
+            p = payload("Bash", command=cmd)
+            p["cwd"] = str(tmp_path)
+            allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+            assert not allow, cmd
+        p = payload(
+            "Bash", command="export CDPATH=/x\ncd server; touch ../../escape"
+        )
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+
     def test_background_ampersand_restores_the_list_start_cwd(self, tmp_path):
         """`cd /etc; true & cat > passwd`: only the `true` list is
         backgrounded — the parent stays in /etc and the recognized write
