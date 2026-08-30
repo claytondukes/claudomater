@@ -420,6 +420,116 @@ class TestStaleTtlAndNearLimitRule:
         )
         assert evaluate(exc, UserConfig()).action == "ok"
 
+    def test_malformed_readings_fail_closed_not_open(self, tmp_path, monkeypatch):
+        """json.loads accepts NaN, and NaN sails past every `>= threshold`
+        comparison as False — so a malformed reading would otherwise walk the
+        projection loop straight to OK. All non-finite/negative values map to
+        unknown at the single parse choke point, which is a pause on the
+        pause windows — stale AND fresh alike."""
+        for bad in (float("nan"), float("inf"), -5):
+            # stale path: the carve-out must not accept a malformed reading
+            exc = self._stale_exc(
+                tmp_path, monkeypatch,
+                {"five_hour": bad, "seven_day": 1, "scoped": 1}, age_s=4000,
+            )
+            d = evaluate(exc, UserConfig())
+            assert d.action == "pause", bad
+            assert "failing closed" in d.reasons[0], bad
+            # fresh path: same hole, same fix
+            write_fake(
+                tmp_path, monkeypatch,
+                {"five_hour": bad, "seven_day": 1, "scoped": 1},
+            )
+            assert evaluate(read_usage(), UserConfig()).action == "pause", bad
+
+    def test_over_100_percent_is_a_real_reading_not_malformed(
+        self, tmp_path, monkeypatch
+    ):
+        """Over quota is a real state: 120% must trip the thresholds like any
+        high reading, never be discarded as garbage."""
+        write_fake(
+            tmp_path, monkeypatch, {"five_hour": 120, "seven_day": 1, "scoped": 1}
+        )
+        assert evaluate(read_usage(), UserConfig()).action == "pause"
+
+
+class TestStaleProvenance:
+    """Round-1 finding on the carve-out: quota is account-global, so account
+    A's low cache must never pass as account B's stale reading. omater's own
+    refreshes record who fetched (`fetched_by`, inside the payload — atomic
+    with the numbers); the carve-out requires a match with the active
+    account, and a cache without provenance (statusline-written) is
+    unverifiable = fail closed."""
+
+    def _stale_cache(self, tmp_path, payload, age_s=4000):
+        cache = tmp_path / "cache.json"
+        cache.write_text(json.dumps(payload), encoding="utf-8")
+        old = time.time() - age_s
+        os.utime(cache, (old, old))
+        return cache
+
+    LIMITS = [{"kind": "session", "percent": 1, "resets_at": None},
+              {"kind": "weekly_all", "percent": 1, "resets_at": None}]
+
+    def test_matching_provenance_gets_the_carve_out(self, tmp_path):
+        cache = self._stale_cache(
+            tmp_path, {"limits": self.LIMITS, "fetched_by": {"id": "acct-a"}}
+        )
+        with pytest.raises(UsageUnavailable) as excinfo:
+            read_usage(
+                cache_path=cache, providers=[], env={"OMATER_ACCOUNT_ID": "acct-a"}
+            )
+        exc = excinfo.value
+        assert exc.snapshot is not None and exc.snapshot.account == {"id": "acct-a"}
+        assert evaluate(exc, UserConfig()).action == "ok"
+
+    def test_foreign_provenance_fails_closed(self, tmp_path):
+        """The multi-account hole: A's low reading, B's session."""
+        cache = self._stale_cache(
+            tmp_path, {"limits": self.LIMITS, "fetched_by": {"id": "acct-a"}}
+        )
+        with pytest.raises(UsageUnavailable, match="different account") as excinfo:
+            read_usage(
+                cache_path=cache, providers=[], env={"OMATER_ACCOUNT_ID": "acct-b"}
+            )
+        assert excinfo.value.snapshot is None
+        assert evaluate(excinfo.value, UserConfig()).action == "pause"
+
+    def test_unrecorded_provenance_fails_closed(self, tmp_path):
+        """A statusline-written cache carries no fetched_by: unverifiable."""
+        cache = self._stale_cache(tmp_path, {"limits": self.LIMITS})
+        with pytest.raises(UsageUnavailable, match="no recorded account") as excinfo:
+            read_usage(
+                cache_path=cache, providers=[], env={"OMATER_ACCOUNT_ID": "acct-a"}
+            )
+        assert excinfo.value.snapshot is None
+        assert evaluate(excinfo.value, UserConfig()).action == "pause"
+
+    def test_refresh_embeds_provenance_and_fresh_reads_prefer_it(self, tmp_path):
+        """The write side of the contract: omater's refresh records who
+        fetched, and an unrefreshed later read attributes the numbers to the
+        recorded account — not to whoever happens to be reading (which would
+        hide an account switch from the re-baseline check)."""
+        from claudomater.credentials import EnvTokenProvider
+        from claudomater.usage import refresh_cache
+
+        cache = tmp_path / "cache.json"
+        ok, reason, account = refresh_cache(
+            cache,
+            providers=[EnvTokenProvider(env={"OMATER_OAUTH_TOKEN": "tok"})],
+            http=lambda url, headers, timeout: json.dumps(
+                {"limits": self.LIMITS}
+            ).encode(),
+            env={"OMATER_ACCOUNT_ID": "acct-a"},
+        )
+        assert ok is True
+        assert json.loads(cache.read_text())["fetched_by"] == account
+        snap = read_usage(
+            cache_path=cache, providers=[], env={"OMATER_ACCOUNT_ID": "acct-b"}
+        )
+        assert snap.source == "cache"
+        assert snap.account == account  # recorded provenance, not the reader
+
 
 class TestRealPathFailClosed:
     def test_no_credentials_and_no_cache_fails_closed(self, tmp_path, monkeypatch):

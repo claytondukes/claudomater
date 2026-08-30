@@ -17,6 +17,7 @@ its mtime, so tests can backdate it with os.utime().
 from __future__ import annotations
 
 import json
+import math
 import os
 import time
 import urllib.error
@@ -110,12 +111,21 @@ def _default_http(url: str, headers: dict[str, str], timeout: float) -> bytes:
 
 
 def _num_or_none(value: Any) -> float | None:
-    """Strictly numeric or unknown. Guardrails fail CLOSED on None (a
-    missing window pauses), so an unexpected type must map to None — never
-    crash mid-guardrail with a TypeError, never guess at strings."""
+    """Strictly a plausible percentage or unknown. Guardrails fail CLOSED on
+    None (a missing window pauses), so an unexpected type must map to None —
+    never crash mid-guardrail with a TypeError, never guess at strings.
+    NaN/±inf/negative map to None too: Python's JSON parser accepts `NaN`,
+    and `NaN >= threshold` is False everywhere, so a malformed reading would
+    otherwise sail PAST every threshold comparison and fail open. This is the
+    single choke point every path (API payload, fake file) parses through.
+    Over-100 values are kept — over quota is a real state and trips the
+    thresholds naturally."""
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
-    return float(value)
+    value = float(value)
+    if not math.isfinite(value) or value < 0.0:
+        return None
+    return value
 
 
 def parse_limits(payload: dict[str, Any]) -> dict[str, Any]:
@@ -191,7 +201,15 @@ def refresh_cache(
     try:
         cache_path.parent.mkdir(parents=True, exist_ok=True)
         tmp = cache_path.with_suffix(cache_path.suffix + ".tmp")
-        tmp.write_text(json.dumps(payload), encoding="utf-8")
+        # Provenance rides INSIDE the payload (atomic with the numbers it
+        # describes — a sidecar file could describe a cache the statusline
+        # overwrote since). parse_limits ignores unknown keys and the
+        # statusline reads `.limits`, so the extra key is inert there; a
+        # statusline-written cache simply lacks it, which reads as "unknown
+        # provenance" below.
+        to_cache = dict(payload)
+        to_cache["fetched_by"] = account
+        tmp.write_text(json.dumps(to_cache), encoding="utf-8")
         tmp.replace(cache_path)
     except OSError as exc:
         return False, f"cache-write-failed: {exc}", account
@@ -301,26 +319,49 @@ def read_usage(
 
     age = now - mtime
     if age > max_stale:
-        raise UsageUnavailable(
-            f"stale-cache: usage data is {int(age)}s old (max {max_stale}s)"
-            + (f"; refresh failed: {failure}" if failure else ""),
-            # the reading is stale, not unknown — hand it to the guardrail so
-            # staleness alone (Epic 9: a 429'd refresh at 17% real usage)
-            # cannot pause a run whose last reading is nowhere near a limit
-            snapshot=UsageSnapshot(
+        message = f"stale-cache: usage data is {int(age)}s old (max {max_stale}s)" + (
+            f"; refresh failed: {failure}" if failure else ""
+        )
+        # The reading is stale, not unknown — hand it to the guardrail so
+        # staleness alone (Epic 9: a 429'd refresh at 17% real usage) cannot
+        # pause a run whose last reading is nowhere near a limit. But ONLY
+        # when its recorded provenance matches the active account: quota is
+        # account-global, and in a multi-account setup account A's low cache
+        # must never pass the carve-out as account B's stale reading. No
+        # recorded provenance (a statusline-written cache) = unverifiable =
+        # no carve-out, fail closed.
+        provenance = payload.get("fetched_by")
+        current = account_identity(env=env)
+        stale_snapshot = None
+        if isinstance(provenance, dict) and provenance == current:
+            stale_snapshot = UsageSnapshot(
                 **parse_limits(payload),
-                account=fetch_account if refreshed else account_identity(env=env),
+                account=provenance,
                 fetched_at=mtime,
                 source="stale",
-            ),
-            age_s=age,
-        )
+            )
+        elif isinstance(provenance, dict):
+            message += "; stale reading belongs to a different account — not usable"
+        else:
+            message += "; stale reading has no recorded account provenance — not usable"
+        raise UsageUnavailable(message, snapshot=stale_snapshot, age_s=age)
 
-    # A cache we did not refresh was written by the logged-in account's own
-    # refresher (statusline or a prior omater call) — attribute accordingly.
+    # Attribution for a cache we did not refresh: recorded provenance first
+    # (a prior omater refresh embedded who fetched it — the numbers describe
+    # THAT account, whoever reads them now), the current login as fallback
+    # for caches without one (statusline-written). Mislabeling a fresh-ish
+    # cache with the reader's identity would hide an account switch from the
+    # guardrail's re-baseline check.
+    if refreshed:
+        account = fetch_account
+    else:
+        provenance = payload.get("fetched_by")
+        account = (
+            provenance if isinstance(provenance, dict) else account_identity(env=env)
+        )
     return UsageSnapshot(
         **parse_limits(payload),
-        account=fetch_account if refreshed else account_identity(env=env),
+        account=account,
         fetched_at=mtime,
         source="live" if refreshed else "cache",
     )

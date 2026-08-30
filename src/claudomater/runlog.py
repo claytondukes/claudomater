@@ -14,15 +14,17 @@ Two invariants from the design:
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import re
 import secrets
 import shutil
 import time
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 OMATER_DIR = ".omater"
 RUNS_DIR = "runs"
@@ -99,10 +101,17 @@ def _detail_summary(detail: Any) -> str:
     return json.dumps(detail, sort_keys=True, ensure_ascii=False)
 
 
+EVENTS_LOCK = ".events.lock"
+
+
 class RunLog:
     def __init__(self, run_dir: Path, run_id: str):
         self.run_dir = run_dir
         self.run_id = run_id
+        # Set by attach(): a sibling process appending to a run it does not
+        # own must re-verify liveness AT APPEND TIME (under the append lock),
+        # not just once at attach — the owner can finish between the two.
+        self._require_live = False
 
     # ---- lifecycle -------------------------------------------------------
 
@@ -226,7 +235,10 @@ class RunLog:
         its recorded verb, stays `adopt()`.
 
         Raises RunError when there is no current run or it already ended —
-        appending to a closed run would forge post-mortem history."""
+        appending to a closed run would forge post-mortem history. That
+        liveness rule is also re-checked at EVERY append (under the append
+        lock): this check-at-attach alone would be a race the owner's
+        `finish()` could slip through."""
         current = runs_root(project_root) / CURRENT_LINK
         log = cls._attach(current)
         if log is None:
@@ -236,6 +248,7 @@ class RunLog:
             raise RunError(
                 f"run {log.run_id} already ended; nothing to attach to"
             )
+        log._require_live = True
         return log
 
     @classmethod
@@ -277,6 +290,18 @@ class RunLog:
 
     # ---- events ----------------------------------------------------------
 
+    @contextmanager
+    def _append_lock(self) -> Iterator[None]:
+        """Exclusive inter-process lock over event appends. Serializes
+        concurrent appenders (owner + attached siblings) and makes
+        check-then-append sequences atomic — without it, attach()'s liveness
+        check and the parked-run rule below would both be check-once races
+        the owner's finish() could slip through."""
+        with open(self.run_dir / EVENTS_LOCK, "w") as fh:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+            # closing the fd releases the flock
+            yield
+
     def event(
         self,
         phase: str,
@@ -285,7 +310,41 @@ class RunLog:
         story_key: str | None = None,
     ) -> dict[str, Any]:
         """Append one event (jsonl + progress line), flushed to disk before
-        returning — call this BEFORE performing the action it describes."""
+        returning — call this BEFORE performing the action it describes.
+
+        Two rules are enforced HERE, under the append lock, because they are
+        only sound when checked atomically with the append:
+        - an attached sibling (`attach()`) cannot append to a run that has
+          ended — post-mortem history must not grow, and an append after the
+          terminal record would flip `is_live()` back on;
+        - `run-failed` is refused while the run is parked (last event
+          `run-parked`): a parked run is live-and-waiting, and failing it is
+          exactly the Epic 9 empty-reasons death. Resume it (any event that
+          moves the run forward unparks it) or abort it."""
+        with self._append_lock():
+            if self._require_live or event == "run-failed":
+                events = self.events()
+                last = events[-1]["event"] if events else None
+                if self._require_live and last in TERMINAL_EVENTS:
+                    raise RunError(
+                        f"run {self.run_id} has ended; an attached sibling "
+                        "cannot append to it"
+                    )
+                if event == "run-failed" and last == "run-parked":
+                    raise RunError(
+                        f"run {self.run_id} is parked (live-and-waiting), not "
+                        "failed — resume it or abort it; failing a parked run "
+                        "recreates the Epic 9 empty-reasons death"
+                    )
+            return self._append_event(phase, event, detail, story_key)
+
+    def _append_event(
+        self,
+        phase: str,
+        event: str,
+        detail: Any = None,
+        story_key: str | None = None,
+    ) -> dict[str, Any]:
         record = {
             "ts": _utc_now(),
             "run_id": self.run_id,

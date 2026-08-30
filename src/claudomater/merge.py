@@ -93,9 +93,16 @@ class RoundAlarm:
 
 # A test-count claim: "557 passed", "429 tests passed", "suite 557", and the
 # arrow form "suite 381 -> 557" (the current claim is the arrow's right side).
-_PASSED_CLAIM = re.compile(r"\b(\d[\d,]*)\s+(?:tests?\s+)?passed\b", re.IGNORECASE)
+# A count token is plain digits or PROPER three-digit grouping, neither
+# preceded nor followed by more of a digit run: "1,2 passed" must not read
+# as 12 (or as a claim of 2), "suite 1,2" must not read as a claim of 1,
+# and "1, passed" / "3.14 passed" are not claims at all. Malformed
+# claim-like text is deliberately NOT a claim — a lag detector that guessed
+# at garbage would report noise instead of lag.
+_COUNT = r"(?<![\d,.])(\d{1,3}(?:,\d{3})+|\d+)(?![.,]?\d)"
+_PASSED_CLAIM = re.compile(_COUNT + r"\s+(?:tests?\s+)?passed\b", re.IGNORECASE)
 _SUITE_CLAIM = re.compile(
-    r"\bsuite\s+(\d[\d,]*)(?:\s*(?:->|→)\s*(\d[\d,]*))?", re.IGNORECASE
+    r"\bsuite\s+" + _COUNT + r"(?:\s*(?:->|→)\s*" + _COUNT + r")?", re.IGNORECASE
 )
 
 

@@ -436,6 +436,13 @@ class TestGuardrailGate:
         parked = [e for e in log.events() if e["event"] == "run-parked"]
         assert parked and parked[-1]["detail"]["reason"] == reason
         assert log.is_live()  # parked = adoptable, never ended
+        # and the incident's next line is now impossible: the Epic 9 driver
+        # called finish('run-failed') right here — the parked run refuses it
+        from claudomater.runlog import RunError
+
+        with pytest.raises(RunError, match="parked"):
+            log.finish("run-failed", {"reason": "lessons pass did not verify: []"})
+        assert log.is_live()
 
 
 class TestFinalSalvage:

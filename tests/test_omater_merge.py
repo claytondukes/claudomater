@@ -55,6 +55,20 @@ class TestStaleNumericClaims:
         numbers carry no count claim to verify."""
         assert stale_numeric_claims("all tests passed; CI green; 42 files", 7) == []
 
+    def test_malformed_comma_forms_are_not_claims(self):
+        """Round-1 finding: '1,2 passed' read as a claim of 12, and partial
+        matches inside malformed digit runs could claim their tail. A count
+        token is plain digits or proper three-digit grouping, never a
+        fragment of something else — malformed claim-like text is NOT a
+        claim (documented policy), so no tests_passed value flags it."""
+        for text in ("1,2 passed", "1, passed", "12,34 tests passed",
+                     "1,2345 passed", "3.14 passed", "suite 1,2"):
+            assert stale_numeric_claims(text, 999) == [], text
+        # proper grouping still parses on both patterns
+        assert stale_numeric_claims("1,234,567 passed", 1234567) == []
+        (msg,) = stale_numeric_claims("suite 1,234", 5)
+        assert "5" in msg
+
     def test_garbage_counts_fail_loudly(self):
         for bad in (True, -1, "486", None, 4.86):
             with pytest.raises(MergeSeamError):

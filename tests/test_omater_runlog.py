@@ -384,6 +384,19 @@ class TestAttachSeam:
         with pytest.raises(RunError, match="already ended"):
             RunLog.attach(tmp_path)
 
+    def test_attached_sibling_cannot_append_after_the_owner_finishes(self, tmp_path):
+        """Round-1 finding: check-at-attach alone is a race — the owner can
+        finish AFTER the sibling attached, and a late append would land past
+        the terminal record and flip is_live() back on. Liveness is
+        re-verified at every append, under the append lock."""
+        log = RunLog.create(tmp_path)
+        log.event("dev", "phase-spawn", {"model": "m", "attempt": 1})
+        sibling = RunLog.attach(tmp_path)  # valid at attach time
+        log.finish("run-complete")  # owner ends the run afterwards
+        with pytest.raises(RunError, match="has ended"):
+            sibling.event("merge", "copilot-round", {"round": 1})
+        assert not log.is_live()  # the terminal record stayed terminal
+
     def test_attach_without_a_current_run_raises(self, tmp_path):
         with pytest.raises(RunError, match="no current run"):
             RunLog.attach(tmp_path)
@@ -416,3 +429,25 @@ class TestPark:
         log.finish("run-failed", {"reason": "x"})
         with pytest.raises(RunError, match="cannot park"):
             log.park("too late")
+
+    def test_failing_a_parked_run_is_refused(self, tmp_path):
+        """Round-1 finding: the park record alone did not stop a driver from
+        calling finish('run-failed') right after — the incident path with a
+        nicer log. While the LAST event is run-parked, run-failed is refused;
+        an operator abort stays available."""
+        log = RunLog.create(tmp_path)
+        log.event("lessons", "phase-spawn", {"model": "m", "attempt": 1})
+        log.park("paused: guardrail", phase="lessons")
+        with pytest.raises(RunError, match="parked"):
+            log.finish("run-failed", {"reason": "lessons did not verify"})
+        assert log.is_live()  # still adoptable after the refused finish
+        log.finish("run-aborted", {"reason": "operator decision"})  # allowed
+
+    def test_a_resumed_run_can_fail_again(self, tmp_path):
+        """Any event after the park represents the run moving forward — a
+        re-driven phase that then genuinely fails may fail the run."""
+        log = RunLog.create(tmp_path)
+        log.park("paused: guardrail", phase="lessons")
+        log.event("lessons", "phase-spawn", {"model": "m", "attempt": 1})
+        log.finish("run-failed", {"reason": "lessons did not verify: [gate]"})
+        assert not log.is_live()
