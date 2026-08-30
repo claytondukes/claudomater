@@ -103,8 +103,9 @@ def _lex_spans(text: str) -> list[tuple[str, int, int]]:
     there a comment ends at newline-or-backtick. `file#1` and `${#var}`
     are not comments."""
     spans: list[tuple[str, int, int]] = []
-    stack: list[str] = []
+    stack: list[tuple[str, int]] = []
     in_backtick = False
+    backtick_open = 0
     i, n = 0, len(text)
 
     def escaped(idx: int) -> bool:
@@ -122,6 +123,8 @@ def _lex_spans(text: str) -> list[tuple[str, int, int]]:
         c = text[i]
         if c == "`" and not escaped(i):  # parity, like quotes: \\\\` opens
             in_backtick = not in_backtick
+            if in_backtick:
+                backtick_open = i
             i += 1
             continue
         if c == "#":
@@ -207,16 +210,28 @@ def _lex_spans(text: str) -> list[tuple[str, int, int]]:
             # \\( is word data, not a group open; parens inside backticks
             # belong to the substitution's own parser
             prev = text[i - 1] if i else ""
-            stack.append("sub" if prev in ("$", "<", ">") else "group")
+            stack.append(("sub" if prev in ("$", "<", ">") else "group", i))
         elif c == ")" and not in_backtick and not escaped(i):
             # \\) is word data: `echo \\)#x > f` keeps its redirect
-            kind = stack.pop() if stack else "group"
+            kind = stack.pop()[0] if stack else "group"
             if kind == "group" and i + 1 < n and text[i + 1] == "#":
                 end = comment_end(i + 1)
                 spans.append(("comment", i + 1, end))
                 i = end
                 continue
         i += 1
+    # an unclosed backtick or ( hits EOF: bash rejects the whole input
+    # and executes NOTHING — leaving the remainder scannable falsely
+    # denied a redirect that never runs (same rule as unterminated quotes
+    # and unbalanced arithmetic). Everything from the EARLIEST unmatched
+    # opener is data; spans emitted inside it are subsumed.
+    dangling = [pos for _, pos in stack]
+    if in_backtick:
+        dangling.append(backtick_open)
+    if dangling:
+        cut = min(dangling)
+        spans = [s for s in spans if s[2] <= cut]
+        spans.append(("quote", cut, n))
     return spans
 
 
@@ -704,7 +719,17 @@ def _scannable(command: str) -> str:
 # -t/--target-directory (bundled forms included) reverses the operand
 # roles: `cp -t dest src...` makes the LAST operand a source — resolving
 # it as the destination falsely denied it. Unrecognized, fail open.
+# cp/mv/install ONLY: rsync's -t means --times, and exempting it let a
+# recognized out-of-tree destination through.
 _TARGET_DIR_OPT = re.compile(r"(?:^|\s)(?:-\w*t\w*|--target-directory)(?:[=\s]|$)")
+_COPY_VERB = re.compile(r"\b(cp|mv|rsync|install)\b")
+# mkdir -m MODE / touch -r REF / touch -d DATE / touch -t STAMP consume
+# the NEXT operand as the option's argument — resolving it as a write
+# target falsely denied in-root-only commands (`mkdir -m 755 <root>/x`
+# read as writing /etc/755). Arg-taking shapes fail open.
+_CREATE_OPT_WITH_ARG = re.compile(
+    r"(?:^|\s)-[a-zA-Z]*[mrdt]\b|(?:^|\s)--(?:mode|reference|date)(?:[=\s]|$)"
+)
 
 
 def _positioned_write_targets(scannable: str) -> list[tuple[int, str]]:
@@ -740,6 +765,8 @@ def _positioned_write_targets(scannable: str) -> list[tuple[int, str]]:
         for m in pattern.finditer(scannable):
             if anchored_on_syntax(m):
                 continue
+            if pattern is _CREATE and _CREATE_OPT_WITH_ARG.search(m.group(0)):
+                continue  # -m 755 etc. consume the next operand: fail open
             for operand in re.finditer(r"[^\s;|&<>()]+", m.group(1)):
                 if not operand.group().startswith("-"):
                     keep(m.start(1) + operand.start(), operand.group())
@@ -747,7 +774,14 @@ def _positioned_write_targets(scannable: str) -> list[tuple[int, str]]:
         if not anchored_on_syntax(m):
             keep(m.start(1), m.group(1))
     for m in _COPY.finditer(scannable):
-        if anchored_on_syntax(m) or _TARGET_DIR_OPT.search(m.group(0)):
+        if anchored_on_syntax(m):
+            continue
+        verb = _COPY_VERB.search(m.group(0))
+        if (
+            verb is not None
+            and verb.group(1) != "rsync"
+            and _TARGET_DIR_OPT.search(m.group(0))
+        ):
             continue
         keep(m.start(1), m.group(1))
     return targets

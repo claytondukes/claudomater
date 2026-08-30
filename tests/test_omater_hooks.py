@@ -553,6 +553,47 @@ class TestBashFence:
             allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
             assert allow, (cmd, reason)
 
+    def test_dangling_substitution_openers_reject_the_input(self, tmp_path):
+        """An unclosed backtick or ( hits EOF: bash rejects the whole
+        input and executes NOTHING — the still-scannable absolute
+        redirect was a false deny (same rule as unterminated quotes and
+        unbalanced arithmetic)."""
+        for cmd in (
+            "echo `ls; printf x > /tmp_probe/out",
+            "(echo x; printf x > /tmp_probe/out",
+        ):
+            p = payload("Bash", command=cmd)
+            p["cwd"] = str(tmp_path)
+            allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+            assert allow, (cmd, reason)
+
+    def test_rsync_dash_t_is_times_not_target_directory(self, tmp_path):
+        """rsync -t preserves TIMES — the last operand is still the
+        destination and must keep denying (the cp/mv/install -t
+        exemption over-applied and let the out-of-tree dest through)."""
+        p = payload("Bash", command="rsync -t src /tmp_probe/out")
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+
+    def test_option_arguments_are_not_operands(self, tmp_path):
+        """`mkdir -m 755 <root>/safe` consumes 755 as -m's argument — the
+        only write is in-root, and resolving 755 against /etc falsely
+        denied it. Arg-taking option shapes fail open; plain flags keep
+        denying."""
+        for cmd in (
+            f"cd /etc; mkdir -m 755 {tmp_path}/safe",
+            f"cd /etc; touch -r ref {tmp_path}/safe",
+        ):
+            p = payload("Bash", command=cmd)
+            p["cwd"] = str(tmp_path)
+            allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+            assert allow, (cmd, reason)
+        p = payload("Bash", command="cd /etc; mkdir -p passwd")
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+
     def test_multi_operand_writers_check_every_operand(self, tmp_path):
         """tee/mkdir/touch take multiple operands — checking only the
         first let `cd /etc; tee <root>/ok passwd` open /etc/passwd
