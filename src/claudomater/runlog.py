@@ -261,15 +261,18 @@ class RunLog:
         root = runs_root(project_root)
         if run_id is not None and run_id != CURRENT_LINK:
             run_dir = root / validate_run_id(run_id)
+            if run_dir.is_symlink():
+                # Only the dedicated `current` link is ever followed. An
+                # in-tree alias (run-b -> run-a) would open run A while the
+                # handle carries run_id "run-b", stamping a FALSE run_id
+                # into A's history.
+                raise RunError(
+                    f"run {run_id!r} is a symlink; named runs must be real "
+                    "directories (only the 'current' link is followed)"
+                )
             if not run_dir.is_dir():
                 raise RunError(f"no run {run_id!r} under {root}")
-            resolved = run_dir.resolve()
-            if resolved.parent != root.resolve():
-                raise RunError(
-                    f"run {run_id!r} resolves outside the runs directory "
-                    f"({resolved}); remove the symlink manually"
-                )
-            log = cls(resolved, run_id)
+            log = cls(run_dir, run_id)
         else:
             log = cls._attach(root / CURRENT_LINK)
             if log is None:

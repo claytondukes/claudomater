@@ -435,6 +435,32 @@ class TestStaleTtlAndNearLimitRule:
         # the same crossing on a pause-configured window still pauses
         assert evaluate(exc, UserConfig()).action == "pause"
 
+    def test_stale_hard_stop_when_no_pause_window_exists(self, tmp_path, monkeypatch):
+        """Round-8 finding: with BOTH windows degrade-configured (valid
+        config), the observe-don't-act rule returned OK forever — no pause
+        window existed to self-cap. A crossing that can neither degrade
+        (stale) nor ever pause is the stale hard stop."""
+        from claudomater.config import UsageConfig
+
+        cfg = UserConfig(
+            usage=UsageConfig(
+                on_threshold={"five_hour": "degrade", "seven_day": "degrade"}
+            )
+        )
+        exc = self._stale_exc(
+            tmp_path, monkeypatch,
+            {"five_hour": 90, "seven_day": 1, "scoped": 1}, age_s=4000,
+        )
+        d = evaluate(exc, cfg)
+        assert d.action == "pause"
+        assert "hard stop" in d.reasons[0]
+        # below every threshold, both-degrade config still proceeds
+        exc2 = self._stale_exc(
+            tmp_path, monkeypatch,
+            {"five_hour": 1, "seven_day": 1, "scoped": 1}, age_s=4000,
+        )
+        assert evaluate(exc2, cfg).action == "ok"
+
     def test_degrade_never_acts_on_stale_data(self, tmp_path, monkeypatch):
         """A stale scoped reading past degrade_scoped_at does NOT degrade:
         degrading is a positive step that needs fresh numbers. Worst case is
@@ -583,6 +609,36 @@ class TestStaleProvenance:
         assert exc.snapshot is not None  # fingerprint matched fingerprint
         assert exc.snapshot.account == account
         assert evaluate(exc, UserConfig()).action == "ok"
+
+    def test_fresh_ish_cache_from_another_account_fails_closed(self, tmp_path):
+        """Round-8 finding: the provenance gate lived only in the stale
+        branch — a YOUNGER-than-TTL cache from account A was still served
+        while the active credential was B, letting B proceed on A's quota
+        (and the 3900s TTL keeps such caches usable far longer than 300s
+        did). A failed refresh that positively identifies a different
+        account than the cache provenance fails closed at ANY age."""
+        import urllib.error
+
+        from claudomater.credentials import EnvTokenProvider
+
+        cache = self._stale_cache(
+            tmp_path,
+            {"limits": self.LIMITS, "fetched_by": {"id": "acct-a"}},
+            age_s=120,  # younger than max_stale, old enough to attempt refresh
+        )
+
+        def failing_http(url, headers, timeout):
+            raise urllib.error.URLError("429: Too Many Requests")
+
+        with pytest.raises(UsageUnavailable, match="account-mismatch") as excinfo:
+            read_usage(
+                cache_path=cache,
+                providers=[EnvTokenProvider(env={"OMATER_OAUTH_TOKEN": "tok"})],
+                http=failing_http,
+                env={},
+            )
+        assert excinfo.value.snapshot is None
+        assert evaluate(excinfo.value, UserConfig()).action == "pause"
 
     def test_refresh_embeds_provenance_and_fresh_reads_prefer_it(self, tmp_path):
         """The write side of the contract: omater's refresh records who

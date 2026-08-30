@@ -99,6 +99,7 @@ def _stale_decision(
         )
     drift = STALE_DRIFT_PP_PER_MIN * (age / 60.0)
     below: list[str] = []
+    degrade_crossings: list[tuple[str, str | None]] = []
     for window, pct, resets in (
         ("five_hour", snap.five_hour, snap.five_hour_resets_at),
         ("seven_day", snap.seven_day, snap.seven_day_resets_at),
@@ -137,7 +138,9 @@ def _stale_decision(
             # here would be harder than the user configured for a soft
             # threshold — contrary to the fresh-path contract. Worst case is
             # running the configured tier slightly past the soft threshold
-            # until a refresh succeeds.
+            # until a refresh succeeds. (Bounded by the hard stop below when
+            # no pause window exists to self-cap.)
+            degrade_crossings.append((window, resets))
             below.append(
                 f"{WINDOW_LABELS[window]} {pct:.0f}% projects to "
                 f"{projected:.0f}% >= {threshold}% but the window is "
@@ -147,6 +150,29 @@ def _stale_decision(
         below.append(
             f"{WINDOW_LABELS[window]} {pct:.0f}% projects to "
             f"{projected:.0f}% < {threshold}%"
+        )
+    if degrade_crossings and not any(
+        cfg.usage.on_threshold[w] == PAUSE for w in ("five_hour", "seven_day")
+    ):
+        # The stale HARD STOP: with every window degrade-configured (valid
+        # config), no pause window exists to self-cap — the loop above would
+        # return OK forever on stale data, since degrades never act on it.
+        # A crossing that can neither degrade (stale) nor ever pause (no
+        # pause window) must stop the run here.
+        window, resets = degrade_crossings[0]
+        return Decision(
+            action=PAUSE,
+            reasons=prefix
+            + [
+                f"stale usage ({int(age)}s old) crossed the degrade-configured "
+                f"{WINDOW_LABELS[window]} threshold with NO pause-configured "
+                "window to self-cap; degrades never act on stale data, so this "
+                "is the stale hard stop: " + "; ".join(below)
+            ],
+            window=window,
+            resets_at=resets,
+            rebaselined=rebaselined,
+            snapshot=snap,
         )
     return Decision(
         action=OK,

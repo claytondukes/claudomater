@@ -370,6 +370,24 @@ def read_usage(
         account = fetch_account
     else:
         provenance = payload.get("fetched_by")
+        if (
+            fetch_account is not None
+            and isinstance(provenance, dict)
+            and provenance != fetch_account
+        ):
+            # A failed refresh POSITIVELY identified the active credential,
+            # and it is not the account this cache describes — quota is
+            # account-global, so serving A's numbers to B's run would let B
+            # proceed on A's quota (the 3900s TTL keeps such caches usable
+            # far longer than the old 300s did). Known-mismatch = fail
+            # closed, at ANY age — the stale branch above applies the same
+            # rule; this closes the younger-than-max window.
+            raise UsageUnavailable(
+                f"account-mismatch: cache at {cache} was fetched by a "
+                "different account than the active credential; refusing its "
+                "numbers"
+                + (f" (refresh failed: {failure})" if failure else "")
+            )
         account = (
             provenance if isinstance(provenance, dict) else account_identity(env=env)
         )

@@ -452,6 +452,17 @@ class TestAttachSeam:
         with pytest.raises(RunError, match="no run"):
             RunLog.attach(tmp_path, run_id="run-x")
 
+    def test_named_attach_rejects_symlink_aliases(self, tmp_path):
+        """Round-8 finding: an in-tree alias (run-b -> run-a) passed the
+        containment check, opened run A, and stamped run_id 'run-b' into A's
+        history. Named runs must be real directories; only the dedicated
+        'current' link is followed."""
+        log = RunLog.create(tmp_path, run_id="run-a")
+        log.event("dev", "phase-spawn", {"model": "m", "attempt": 1})
+        (runs_root(tmp_path) / "run-b").symlink_to("run-a")
+        with pytest.raises(RunError, match="symlink"):
+            RunLog.attach(tmp_path, run_id="run-b")
+
     def test_append_after_a_torn_tail_repairs_instead_of_corrupting(self, tmp_path):
         """Round-3 finding: events() tolerates a torn FINAL line (crash
         artifact), but an append landing after it would turn the fragment

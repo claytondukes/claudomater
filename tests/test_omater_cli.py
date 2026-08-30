@@ -179,7 +179,10 @@ class TestControlCommand:
 
     def test_symlinked_run_dir_is_rejected(self, tmp_path, capsys):
         """A symlink planted at .omater/runs/<id> must not carry control
-        writes outside the runs directory."""
+        writes outside the runs directory. (Round 8 strengthened the rule:
+        named runs reject ALL symlinks — an in-tree alias would stamp a
+        false run_id into the target's history — so the outside case is
+        refused before it even resolves.)"""
         from claudomater.runlog import runs_root
 
         RunLog.create(tmp_path, run_id="real-run")
@@ -188,7 +191,7 @@ class TestControlCommand:
         (runs_root(tmp_path) / "evil-link").symlink_to(outside)
         rc = main(["control", "resume", "--root", str(tmp_path), "--run", "evil-link"])
         assert rc == EXIT_ERROR
-        assert "resolves outside" in capsys.readouterr().err
+        assert "is a symlink" in capsys.readouterr().err
         assert not (outside / "control.jsonl").exists()
 
     def test_run_path_traversal_is_rejected(self, tmp_path, capsys):
