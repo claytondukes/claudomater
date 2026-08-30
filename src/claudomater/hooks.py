@@ -1070,11 +1070,17 @@ def resolved_bash_targets(
     # redirects attached to the command BEFORE running it, so
     # `source env.sh > audit.log` resolves audit.log against the pre-source
     # cwd — clearing tracking first let a recognized out-of-tree write pass.
+    # Text inside arithmetic spans is EXPRESSION, not shell syntax:
+    # `(($x))`, `((eval))`, `((if))`, `((set -P))`, `((f))`, `((1 || 0))`
+    # run no commands, change no options, and control no lists — each of
+    # those shapes voided a correctly tracked cwd (miss), and a newline
+    # inside `((...))` reset the ||-guard bookkeeping (false deny). The
+    # same _in_arith rule the chdir/target/ampersand scans already apply.
     for m in _GLUED_COMMAND.finditer(scannable):
-        if _real_anchor(m) and not _pipeline_scoped(m):
+        if _real_anchor(m) and not _pipeline_scoped(m) and not _in_arith(m.end() - 1):
             events.append((_segment_boundary(scannable, m.end()), "opaque", None))
     for m in _SHELL_EXEC.finditer(scannable):
-        if _real_anchor(m) and not _pipeline_scoped(m):
+        if _real_anchor(m) and not _pipeline_scoped(m) and not _in_arith(m.end() - 1):
             events.append((_segment_boundary(scannable, m.end()), "opaque", None))
     for m in _COMPOUND.finditer(scannable):
         # HARD opacity: a compound body's extent is unparseable here, so a
@@ -1084,7 +1090,7 @@ def resolved_bash_targets(
         # redirect. Sticky for the rest of the command; soft opacity
         # (subshells, eval, bare &) stays recoverable because top-level
         # flow demonstrably resumes after those.
-        if _real_anchor(m):
+        if _real_anchor(m) and not _in_arith(m.end() - 1):
             events.append((m.start(), "hard", None))
     dead_spans: list[tuple[int, int]] = []
     func_names: set[str] = set()
@@ -1125,14 +1131,18 @@ def resolved_bash_targets(
             + r")(?![^\s;&|)<>\n])",
             scannable,
         ):
-            if _real_anchor(im):
+            if _real_anchor(im) and not _in_arith(im.end() - 1):
                 events.append(
                     (_segment_boundary(scannable, im.end()), "opaque", None)
                 )
     for pos in _bare_ampersands(scannable, arith):
         events.append((pos, "opaque", None))
     for m in _SET_PHYSICAL.finditer(scannable):
-        if _real_anchor(m) and not _pipeline_scoped(m):
+        if (
+            _real_anchor(m)
+            and not _pipeline_scoped(m)
+            and not _in_arith(m.end() - 1)
+        ):
             events.append((m.end(), "setmode", None))
     # A `<<` surviving _scannable is a heredoc shape the parser does not
     # support (exotic delimiters: END@MARK, <<\EOF, ...) — its BODY stayed
@@ -1154,12 +1164,16 @@ def resolved_bash_targets(
     # the "a cd was applied in this list" state: a || in a LATER list says
     # nothing about an earlier list's cd.
     for m in re.finditer(r"\|\|", scannable):
-        # `echo \|| true` is word data + a PIPE, not a || operator
-        if _escape_parity(scannable, m.start()) == 0:
+        # `echo \|| true` is word data + a PIPE, not a || operator;
+        # inside arithmetic || is logical-OR, not list control
+        if _escape_parity(scannable, m.start()) == 0 and not _in_arith(m.start()):
             events.append((m.start(), "orelse", None))
     for m in re.finditer(r"[;\n]", scannable):
-        # an escaped ; is word data (newlines cannot be escaped here)
-        if m.group() == "\n" or _escape_parity(scannable, m.start()) == 0:
+        # an escaped ; is word data (newlines cannot be escaped here);
+        # inside arithmetic both are expression whitespace/syntax
+        if (
+            m.group() == "\n" or _escape_parity(scannable, m.start()) == 0
+        ) and not _in_arith(m.start()):
             events.append((m.start(), "listsep", None))
     def _real_separator(m: re.Match) -> bool:
         # `echo \; cd /etc` never runs cd — an escaped metachar is word

@@ -553,6 +553,32 @@ class TestBashFence:
             allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
             assert allow, (cmd, reason)
 
+    def test_arithmetic_text_never_disturbs_tracking(self, tmp_path):
+        """Arithmetic evaluates — it runs no commands, changes no
+        options, and its operators are not list control. Each shape
+        voided a correctly tracked /etc (miss), and a newline inside
+        ((...)) reset the ||-guard bookkeeping (false deny)."""
+        for cmd in (
+            "cd /etc; (($x)); cat > passwd",
+            "cd /etc; ((eval)); cat > passwd",
+            "cd /etc; ((if)); cat > passwd",
+            "cd /etc; ((set -P)); cd ..; cat > passwd",
+            "f() { :; }; cd /etc; ((f)); cat > passwd",
+            "cd /etc && ((1 || 0)); cat > passwd",
+        ):
+            p = payload("Bash", command=cmd)
+            p["cwd"] = str(tmp_path)
+            allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+            assert not allow, cmd
+        # the REAL || after the arithmetic still voids the failed-cd
+        # assumption: the write runs in the ORIGINAL cwd (in-root)
+        p = payload(
+            "Bash", command="cd /definitely-missing && ((\n1\n)) || cat > out.txt"
+        )
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+
     def test_case_arm_comparisons_are_not_redirects(self, tmp_path):
         """A case-arm's closing `)` is a command position: `case x in x)
         (( x > /tmp_probe/out ));; esac` (and the [[ form) compares and
