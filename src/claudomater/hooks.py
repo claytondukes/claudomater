@@ -344,8 +344,15 @@ def _span_lookup(spans: list[tuple[int, int]]) -> Callable[[int], bool]:
 # redirect was a false deny). The `{` anchor is the brace-group reserved
 # word, which bash only recognizes FOLLOWED BY whitespace — a mid-word
 # `{` (`echo foo{[[ ...`) anchored a span that masked a real redirect.
+# reserved words that introduce condition lists / bodies keep the next
+# word at command position: `if [[ a > /tmp/x ]]` is a comparison, and
+# missing the `if` anchor falsely denied it as a redirect. They anchor
+# only when themselves at a command position (an `echo if [[ ...` really
+# redirects).
 _COND_OPEN = re.compile(
-    r"(?:^|[\n;&|(]|\{(?=[ \t\n]))\s*(?:![ \t]+)*\[\[(?=[ \t\n])"
+    r"(?:^|[\n;&|(]|\{(?=[ \t\n]))\s*"
+    r"(?:(?:if|elif|while|until|then|else|do)[ \t]+)*"
+    r"(?:![ \t]+)*\[\[(?=[ \t\n])"
 )
 _COND_CLOSE = re.compile(r"(?:^|[ \t\n])(\]\])(?=[\s;&|)<>]|$)")
 
@@ -429,19 +436,17 @@ _REDIRECT = re.compile(r"(?<![<>&\d])\d?>{1,2}\s*([^\s;|&<>()]+)")
 # prefixes and same-argv wrappers allowed): `echo mkdir passwd` PRINTS
 # words, and matching the argument resolved a phantom target against the
 # tracked cwd (false deny). Wrapped forms beyond the list fail open.
-# The prefix grammar accepts `!`, INTERLEAVED assignments and wrappers
-# (`env MODE=x touch ...` puts the assignment after the wrapper), and a
-# wrapper flag's argument (`sudo -u root touch ...` — backtracking
-# decides whether the word after a flag is its argument or the command).
-# A rigid assignments-then-wrappers order dropped these statically
-# recognizable writer invocations to unrecognized (missed absolute
-# writes the unanchored patterns used to deny).
+# The prefix grammar accepts `!` and INTERLEAVED assignments and
+# wrappers (`env MODE=x touch ...` puts the assignment after the
+# wrapper). A FLAGGED wrapper is ambiguous — `sudo -u touch /tmp/x` runs
+# /tmp/x AS the user touch, and guessing whether the word after a flag
+# is its argument or the command falsely denied that shape — so a flag
+# breaks the anchor and the command fails open, never guess-denies.
 _CMD_ANCHOR = (
     r"(?:^|[\n;&|(])\s*(?:![ \t]+)*"
     r"(?:"
     r"[A-Za-z_][A-Za-z0-9_]*=[^\s;|&<>()]*[ \t]+"
     r"|(?:command|builtin|nohup|sudo|env|time)[ \t]+"
-    r"(?:-[^\s;|&<>()]+[ \t]+(?:[^\s;|&<>()=-][^\s;|&<>()]*[ \t]+)?)*"
     r")*"
 )
 # tee/mkdir/touch accept MULTIPLE operands — group 1 captures the whole
@@ -652,18 +657,24 @@ _SET_PHYSICAL = re.compile(
 # absolute cd afterwards recovers tracking.
 _COMPOUND = re.compile(
     r"(?:^|[\n;&|(])\s*"
-    r"(?:if|then|elif|else|fi|for|while|until|do|done|case|esac|function)\b"
+    r"(?:if|then|elif|else|fi|for|while|until|do|done|case|esac)\b"
     # brace GROUPS only: `{ ...; }` at a command position (incl. after a
     # function's `()`). `${HOME}` and brace expansion `file{1,2}` are
     # expansions, not compound bodies — treating them as hard opacity let
     # a real /etc write pass unrecognized.
     r"|(?:^|[\n;&|()])\s*\{(?=[ \t\n])"
     r"|(?:^|[\n;&|])\s*\}"
-    # `name() ( ... )` DEFINES a function with a subshell body — nothing
-    # executes. The brace alternative above already covers `name() {`;
-    # without this one the body's cd was applied and its relative write
-    # falsely denied under a cwd the shell never entered.
-    r"|(?:^|[\n;&|])\s*[A-Za-z_][A-Za-z0-9_]*[ \t]*\([ \t]*\)[ \t]*\("
+)
+# A function DEFINITION executes NOTHING at definition time — not even
+# the absolute writes in its body (`deploy() { echo x > /tmp_probe/x; }`
+# was falsely denied). The body extent is unparseable here, so the
+# opener is a WALL: everything after fails open, a possible same-command
+# invocation included (deny-on-recognized accepts that miss). Flow
+# compounds above stay merely HARD — `if true; then cat > /etc/x; fi`
+# usually DOES run its body, and its absolute writes must keep denying.
+_FUNC_DEF = re.compile(
+    r"(?:^|[\n;&|(])\s*function\b"
+    r"|(?:^|[\n;&|])\s*[A-Za-z_][A-Za-z0-9_]*[ \t]*\([ \t]*\)[ \t]*[({]"
 )
 # eval/source/. run current-shell code the scanner cannot see, but they
 # EXECUTE AND RETURN: top-level flow demonstrably resumes after them, so
@@ -972,6 +983,10 @@ def resolved_bash_targets(
         # flow demonstrably resumes after those.
         if _real_anchor(m):
             events.append((m.start(), "hard", None))
+    for m in _FUNC_DEF.finditer(scannable):
+        # definitions execute nothing: wall, not hard (see _FUNC_DEF)
+        if _real_anchor(m):
+            events.append((m.start(), "wall", None))
     for pos in _bare_ampersands(scannable, arith):
         events.append((pos, "opaque", None))
     for m in _SET_PHYSICAL.finditer(scannable):

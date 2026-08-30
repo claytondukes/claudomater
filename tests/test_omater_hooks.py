@@ -554,19 +554,64 @@ class TestBashFence:
             assert allow, (cmd, reason)
 
     def test_prefixed_writer_invocations_stay_recognized(self, tmp_path):
-        """`!`, `env VAR=x`, and `sudo -u root` prefixes run the writer
-        with the same argv — the command-position anchor must accept
-        them (a rigid prefix order regressed these statically
-        recognizable absolute writes to unrecognized)."""
+        """`!`, `env VAR=x`, and unflagged wrappers run the writer with
+        the same argv — the command-position anchor must accept them (a
+        rigid prefix order regressed these statically recognizable
+        absolute writes to unrecognized)."""
         for cmd in (
             "! touch /tmp_probe/x",
             "env MODE=x touch /tmp_probe/x",
-            "sudo -u root touch /tmp_probe/x",
+            "sudo touch /tmp_probe/x",
         ):
             p = payload("Bash", command=cmd)
             p["cwd"] = str(tmp_path)
             allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
             assert not allow, cmd
+
+    def test_flagged_wrapper_prefixes_fail_open(self, tmp_path):
+        """`sudo -u touch /tmp_probe/x` runs /tmp_probe/x AS the user
+        touch — no write happens, and guessing whether a wrapper flag's
+        next word is its argument or the command falsely denied it. A
+        flagged wrapper is ambiguous: unrecognized, fail open."""
+        p = payload("Bash", command="sudo -u touch /tmp_probe/x")
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+
+    def test_reserved_word_conditionals_are_comparisons(self, tmp_path):
+        """`if [[ a > /tmp_probe/x ]]; then :; fi` compares — nothing is
+        written; the reserved word keeps [[ at command position. An `if`
+        that is a plain ARGUMENT opens no span (`echo if [[ ... ]]`
+        really redirects)."""
+        for cmd in (
+            "if [[ a > /tmp_probe/x ]]; then :; fi",
+            "while [[ a > /tmp_probe/x ]]; do :; done",
+        ):
+            p = payload("Bash", command=cmd)
+            p["cwd"] = str(tmp_path)
+            allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+            assert allow, (cmd, reason)
+        p = payload("Bash", command="echo if [[ x > /tmp_probe/x ]]")
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+
+    def test_function_definitions_execute_nothing(self, tmp_path):
+        """`deploy() { echo x > /tmp_probe/x; }` DEFINES — the absolute
+        write in the body never runs at definition time (was falsely
+        denied). A bare brace GROUP executes and keeps denying."""
+        for cmd in (
+            "deploy() { echo x > /tmp_probe/x; }",
+            "function deploy { echo x > /tmp_probe/x; }",
+        ):
+            p = payload("Bash", command=cmd)
+            p["cwd"] = str(tmp_path)
+            allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+            assert allow, (cmd, reason)
+        p = payload("Bash", command="{ echo x > /tmp_probe/x; }")
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
 
     def test_writer_operands_stop_at_newlines(self, tmp_path):
         """Operand separators are HORIZONTAL: a newline ends the command,
