@@ -553,6 +553,28 @@ class TestBashFence:
             allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
             assert allow, (cmd, reason)
 
+    def test_escaped_pipe_never_forms_a_two_char_operator(self, tmp_path):
+        """`\\|&` is word data + a real background `&` (not |&), and
+        `\\||` is word data + a real pipe (not ||): each misread either
+        kept a stale cwd (false deny) or voided a known one (miss).
+        Prev-char exemptions apply only when the prev char is itself
+        unescaped."""
+        # the & backgrounds the list; cat writes in the ORIGINAL cwd
+        p = payload("Bash", command="cd /etc && echo \\|& cat > out.txt")
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+        for cmd in (
+            # real pipeline RHS: source is subshell-scoped, /etc keeps denying
+            "cd /etc; echo \\|| source env.sh; cat > passwd",
+            # foreground cd after the backgrounded echo: /etc applies
+            "echo \\|& cd /etc; cat > passwd",
+        ):
+            p = payload("Bash", command=cmd)
+            p["cwd"] = str(tmp_path)
+            allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+            assert not allow, cmd
+
     def test_dashdash_makes_target_slot_dash_n_an_operand(self, tmp_path):
         """`pushd -- -n` enters a directory NAMED -n (the -- terminator
         ends options) — reading it as the no-chdir option kept a stale

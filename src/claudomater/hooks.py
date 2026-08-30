@@ -481,7 +481,8 @@ def _segment_boundary(text: str, start: int) -> int:
         if c == "&":
             prev = text[i - 1] if i > 0 else ""
             nxt = text[i + 1] if i + 1 < n else ""
-            if prev in (">", "<"):  # >& / <& — fd duplication
+            if prev in (">", "<") and _escape_parity(text, i - 1) == 0:
+                # >& / <& — fd duplication (`\>&` is word data + control &)
                 i += 1
                 continue
             if nxt == ">":  # &> redirect shorthand
@@ -518,7 +519,12 @@ def _bare_ampersands(
         i = m.start()
         prev = text[i - 1] if i > 0 else ""
         nxt = text[i + 1] if i + 1 < len(text) else ""
-        if prev in (">", "<", "&", "|") or nxt in ("&", ">"):
+        # a prev-char exemption applies only when the prev char is itself
+        # UNESCAPED: `\|&` is word data + a real background `&` — skipping
+        # it kept a stale cwd that falsely denied the in-root write
+        if (
+            prev in (">", "<", "&", "|") and _escape_parity(text, i - 1) == 0
+        ) or nxt in ("&", ">"):
             continue
         if _escape_parity(text, i) == 1:  # \& is word data, not control
             continue
@@ -734,7 +740,12 @@ def resolved_bash_targets(
         # _real_separator / _segment_boundary; newlines stay unconditional
         # — \<newline> pairs were already removed by _scannable).
         first = scannable[m.start()]
-        if first == "&" and m.start() > 0 and scannable[m.start() - 1] in "<>":
+        if (
+            first == "&"
+            and m.start() > 0
+            and scannable[m.start() - 1] in "<>"
+            and _escape_parity(scannable, m.start() - 1) == 0
+        ):
             return False  # the & of a >&/<& redirect, not a separator
         return first not in ";&|()" or _escape_parity(scannable, m.start()) == 0
 
@@ -746,9 +757,22 @@ def resolved_bash_targets(
         # not a pipe; `|&` counts (prev char |).
         first = scannable[m.start()]
         if first == "|" and not scannable.startswith("||", m.start()):
-            if m.start() == 0 or scannable[m.start() - 1] != "|":
+            prev_is_pipe = (
+                m.start() > 0
+                and scannable[m.start() - 1] == "|"
+                # an ESCAPED prev pipe is word data — `echo \|| source x`
+                # anchors on a REAL pipe (pipeline RHS), not the || whose
+                # misread voided a known cwd and hid a recognized write
+                and _escape_parity(scannable, m.start() - 1) == 0
+            )
+            if not prev_is_pipe:
                 return True
-        if first == "&" and m.start() > 0 and scannable[m.start() - 1] == "|":
+        if (
+            first == "&"
+            and m.start() > 0
+            and scannable[m.start() - 1] == "|"
+            and _escape_parity(scannable, m.start() - 1) == 0
+        ):
             return True
         end = _segment_boundary(scannable, m.end())
         return (
@@ -820,6 +844,7 @@ def resolved_bash_targets(
                 sep == "&"
                 and m.start(1) > 0
                 and scannable[m.start(1) - 1] in "<>"
+                and _escape_parity(scannable, m.start(1) - 1) == 0
             ):
                 # `echo hi >& cd /etc` redirects to a FILE named cd — the
                 # & belongs to the redirect, and anchoring a chdir on it
@@ -855,7 +880,12 @@ def resolved_bash_targets(
         while s > 0:
             c = scannable[s - 1]
             if c in ";&|(\n" and _escape_parity(scannable, s - 1) == 0:
-                if c == "&" and s >= 2 and scannable[s - 2] in "<>":
+                if (
+                    c == "&"
+                    and s >= 2
+                    and scannable[s - 2] in "<>"
+                    and _escape_parity(scannable, s - 2) == 0
+                ):
                     s -= 1  # the & of >&/<& — inside the segment, keep going
                     continue
                 break
@@ -928,6 +958,9 @@ def resolved_bash_targets(
                 m.group(1) == "&"
                 and m.start(1) > 0
                 and scannable[m.start(1) - 1] == "|"
+                # `\|&` is word data + a background &: the cd after it
+                # runs in the FOREGROUND shell, not a pipeline
+                and _escape_parity(scannable, m.start(1) - 1) == 0
             )
         )
         # `cd /x || ...` makes the next branch the cd's FAILURE path (cwd
