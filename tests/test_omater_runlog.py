@@ -354,3 +354,65 @@ class TestAttachVsAdopt:
         # orchestrator dies here; the unanswered spawn is the orphan shape
         adopted = RunLog.adopt(tmp_path)
         assert [e["event"] for e in adopted.events()][-1] == "run-adopted"
+
+
+class TestAttachSeam:
+    """Epic 9 rough edge #3: the merge-phase driver appended events via
+    `adopt()` and stamped a `run-adopted` (crash-recovery) bookkeeping event
+    per invocation. `attach()` is the first-class append seam: same run,
+    zero bookkeeping noise."""
+
+    def test_attach_writes_no_bookkeeping_event(self, tmp_path):
+        log = RunLog.create(tmp_path)
+        log.event("dev", "phase-spawn", {"model": "m", "attempt": 1})
+        before = [e["event"] for e in log.events()]
+        sibling = RunLog.attach(tmp_path)
+        assert [e["event"] for e in sibling.events()] == before
+
+    def test_attached_sibling_appends_into_the_same_run(self, tmp_path):
+        log = RunLog.create(tmp_path)
+        log.event("dev", "phase-spawn", {"model": "m", "attempt": 1})
+        sibling = RunLog.attach(tmp_path)
+        sibling.event("merge", "copilot-round", {"round": 1})
+        assert log.events()[-1]["event"] == "copilot-round"
+        assert sibling.run_id == log.run_id
+
+    def test_attach_refuses_an_ended_run(self, tmp_path):
+        """Appending to a closed run would forge post-mortem history."""
+        log = RunLog.create(tmp_path)
+        log.finish("run-complete")
+        with pytest.raises(RunError, match="already ended"):
+            RunLog.attach(tmp_path)
+
+    def test_attach_without_a_current_run_raises(self, tmp_path):
+        with pytest.raises(RunError, match="no current run"):
+            RunLog.attach(tmp_path)
+
+
+class TestPark:
+    """Epic 9 rough edge #4 (lifecycle half): a pause PARKS the run — live
+    and adoptable — it never ends it. The severity run died as `run-failed`
+    with empty reasons because nothing owned this stance."""
+
+    def test_park_is_non_terminal_and_keeps_the_run_adoptable(self, tmp_path):
+        log = RunLog.create(tmp_path)
+        log.event("lessons", "phase-spawn", {"model": "m", "attempt": 1})
+        record = log.park("paused: guardrail", phase="lessons", story_key="s-1")
+        assert record["event"] == "run-parked"
+        assert log.is_live()
+        adopted = RunLog.adopt(tmp_path)  # a parked run is precisely adoptable
+        assert adopted.run_id == log.run_id
+
+    def test_park_names_its_reason_in_the_event(self, tmp_path):
+        log = RunLog.create(tmp_path)
+        log.park("paused: 'lessons' guardrail spawn gate: stale-cache ...")
+        ev = log.events()[-1]
+        assert ev["detail"]["reason"].startswith("paused:")
+        assert "adoptable" in ev["detail"]["note"]
+
+    def test_parking_an_ended_run_raises(self, tmp_path):
+        """A park on a closed run would misrepresent it as waiting."""
+        log = RunLog.create(tmp_path)
+        log.finish("run-failed", {"reason": "x"})
+        with pytest.raises(RunError, match="cannot park"):
+            log.park("too late")

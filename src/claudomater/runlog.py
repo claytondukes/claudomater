@@ -216,6 +216,29 @@ class RunLog:
         return log
 
     @classmethod
+    def attach(cls, project_root: Path | str) -> "RunLog":
+        """Attach to the live run WITHOUT writing any bookkeeping event —
+        the seam for sibling processes that append events to a run they do
+        not own (a merge-phase driver logging per-round evidence, a control
+        CLI). Epic 9's merge driver had to call `adopt()` once per event and
+        stamped a `run-adopted` (dead-orchestrator recovery) event each time
+        — noise that misdescribes what happened. Orchestrator takeover, with
+        its recorded verb, stays `adopt()`.
+
+        Raises RunError when there is no current run or it already ended —
+        appending to a closed run would forge post-mortem history."""
+        current = runs_root(project_root) / CURRENT_LINK
+        log = cls._attach(current)
+        if log is None:
+            raise RunError(f"no current run under {current}")
+        events = log.events()
+        if not events or events[-1]["event"] in TERMINAL_EVENTS:
+            raise RunError(
+                f"run {log.run_id} already ended; nothing to attach to"
+            )
+        return log
+
+    @classmethod
     def _attach(cls, current: Path) -> "RunLog | None":
         try:
             run_dir = current.resolve(strict=True)
@@ -343,6 +366,29 @@ class RunLog:
         if status not in TERMINAL_EVENTS:
             raise RunError(f"not a terminal event: {status}")
         self.event("run", status, detail)
+
+    def park(
+        self,
+        reason: str,
+        phase: str = "run",
+        story_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Record that the run is deliberately LIVE-AND-WAITING (guardrail
+        pause, quota window, operator hold). Non-terminal by design: a parked
+        run stays adoptable via `adopt`/`attach`. This is the core-owned fix
+        for the Epic 9 incident where a driver terminated a paused run as
+        `run-failed` with empty reasons — the runner parks, and whoever reads
+        the log sees the run is waiting, not dead. Parking an ended run
+        raises: that would misrepresent a closed run as waiting."""
+        events = self.events()
+        if events and events[-1]["event"] in TERMINAL_EVENTS:
+            raise RunError(f"run {self.run_id} already ended; cannot park it")
+        return self.event(
+            phase,
+            "run-parked",
+            {"reason": reason, "note": "run left live/adoptable on purpose"},
+            story_key=story_key,
+        )
 
     # ---- paths -----------------------------------------------------------
 
