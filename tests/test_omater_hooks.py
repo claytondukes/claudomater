@@ -553,6 +553,39 @@ class TestBashFence:
             allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
             assert allow, (cmd, reason)
 
+    def test_subshell_function_definition_body_never_executes(self, tmp_path):
+        """`deploy() (cd /etc; cat > shadow)` only DEFINES deploy —
+        applying the body's cd falsely denied shadow under a cwd the
+        shell never entered. Same hard opacity as the `name() { ... }`
+        brace form. An INVOKED subshell still executes: its write keeps
+        denying."""
+        p = payload(
+            "Bash", command="deploy() (cd /etc; cat > shadow); cat > out.txt"
+        )
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+        p = payload("Bash", command="(cd /etc; cat > shadow)")
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+
+    def test_heredoc_data_filter_is_linear_in_span_count(self, tmp_path):
+        """The heredoc pre-pass rescanned every data span per match —
+        quadratic on generated scripts full of quoted lines and heredocs
+        in the synchronous hook. Sorted spans + a cursor keep it linear."""
+        import time
+
+        cmd = "".join(
+            f'cat <<EOF > f{i}\n"line a" x\n"line b" y\nEOF\n' for i in range(4000)
+        )
+        p = payload("Bash", command=cmd)
+        p["cwd"] = str(tmp_path)
+        started = time.monotonic()
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert time.monotonic() - started < 1.5
+        assert allow, reason  # every f{i} is a relative in-root write
+
     def test_cd_fallback_scan_is_linear_in_cd_count(self, tmp_path):
         """The _CD_WORD fallback rescanned every matched verb span per
         token — O(N^2) in the cd count inside the synchronous hook. A

@@ -508,6 +508,11 @@ _COMPOUND = re.compile(
     # a real /etc write pass unrecognized.
     r"|(?:^|[\n;&|()])\s*\{(?=[ \t\n])"
     r"|(?:^|[\n;&|])\s*\}"
+    # `name() ( ... )` DEFINES a function with a subshell body — nothing
+    # executes. The brace alternative above already covers `name() {`;
+    # without this one the body's cd was applied and its relative write
+    # falsely denied under a cwd the shell never entered.
+    r"|(?:^|[\n;&|])\s*[A-Za-z_][A-Za-z0-9_]*[ \t]*\([ \t]*\)[ \t]*\("
 )
 # eval/source/. run current-shell code the scanner cannot see, but they
 # EXECUTE AND RETURN: top-level flow demonstrably resumes after them, so
@@ -541,13 +546,21 @@ def _scannable(command: str) -> str:
         return " " * cut + intro[cut:]
 
     data = _data_spans(command)
-    data = data + _arith_spans(command, data)
+    data = sorted(data + _arith_spans(command, data))
+    di = 0
 
     def _outside_data(m: re.Match) -> str:
         # a << inside a comment, quoted span, or arithmetic expansion is
         # DATA (a comment/string starts no heredoc; in arithmetic << is a
-        # SHIFT) — eating the following lines as a body hid real commands
-        if any(start <= m.start(1) < end for start, end in data):
+        # SHIFT) — eating the following lines as a body hid real commands.
+        # Cursor lookup: re.sub fires callbacks in source order and the
+        # spans are sorted, so each span is visited once — the per-match
+        # rescan was quadratic on generated scripts full of quoted lines
+        # and heredocs (synchronous hook).
+        nonlocal di
+        while di < len(data) and data[di][1] <= m.start(1):
+            di += 1
+        if di < len(data) and data[di][0] <= m.start(1):
             return m.group(0)
         return _heredoc_repl(m)
 
