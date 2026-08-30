@@ -1205,10 +1205,10 @@ def resolved_bash_targets(
     # same _in_arith rule the chdir/target/ampersand scans already apply.
     for m in _GLUED_COMMAND.finditer(scannable):
         if _real_anchor(m) and not _pipeline_scoped(m) and not _in_arith(m.end() - 1):
-            events.append((_segment_boundary(scannable, m.end()), "opaque", None))
+            events.append((_segment_boundary(scannable, m.end()), "csopaque", None))
     for m in _SHELL_EXEC.finditer(scannable):
         if _real_anchor(m) and not _pipeline_scoped(m) and not _in_arith(m.end() - 1):
-            events.append((_segment_boundary(scannable, m.end()), "opaque", None))
+            events.append((_segment_boundary(scannable, m.end()), "csopaque", None))
     for m in _COMPOUND.finditer(scannable):
         # HARD opacity: a compound body's extent is unparseable here, so a
         # cd inside it must never recover tracking — `if false; then cd
@@ -1281,7 +1281,7 @@ def resolved_bash_targets(
                 and not _pipeline_scoped(im)
             ):
                 events.append(
-                    (_segment_boundary(scannable, im.end()), "opaque", None)
+                    (_segment_boundary(scannable, im.end()), "csopaque", None)
                 )
     for pos in _bare_ampersands(scannable, arith):
         # a bare & backgrounds ITS OWN and-or list only: the parent keeps
@@ -1505,14 +1505,19 @@ def resolved_bash_targets(
     # then the ||/list bookkeeping, and let an opacity marker (e.g. the `)`
     # closing a subshell that both ends the cd's segment and discards its
     # effect) win last.
+    # opacity attached AT a separator belongs to the ENDING list, so it
+    # applies BEFORE the listsep snapshot — snapshotting first froze a
+    # voided cwd (`false && cd /etc; true & ...` restored /etc at the `&`
+    # and falsely denied the root-relative write)
     priority = {
         "target": 0,
         "chdir": 1,
         "setmode": 1,
         "orelse": 2,
-        "listsep": 3,
-        "opaque": 4,
-        "bgamp": 4,
+        "opaque": 3,
+        "csopaque": 3,
+        "bgamp": 3,
+        "listsep": 4,
         "hard": 5,
         "wall": 6,
     }
@@ -1625,6 +1630,17 @@ def resolved_bash_targets(
         if kind == "opaque":
             current = None
             cd_applied_in_list = False
+            continue
+        if kind == "csopaque":
+            # CURRENT-shell opacity (source/eval, expanded command words,
+            # function invocations): the unseen code can flip `set -P`
+            # too — keeping the mode let a later absolute cd recover
+            # tracking under a stale logical/physical assumption and
+            # misresolve `..` through symlinks. Subshell opacity (parens,
+            # backticks) cannot touch the parent's mode and stays plain.
+            current = None
+            cd_applied_in_list = False
+            physical_mode = None
             continue
         if kind == "orelse":
             # the RHS of || runs exactly when something failed — possibly a

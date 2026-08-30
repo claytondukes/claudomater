@@ -553,6 +553,26 @@ class TestBashFence:
             allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
             assert allow, (cmd, reason)
 
+    def test_void_at_a_separator_applies_before_the_snapshot(self, tmp_path):
+        """`false && cd /etc; true & cat > out.txt`: the &&-guard's void
+        at the `;` belongs to the ENDING list — snapshotting first froze
+        /etc and the `&` restored it, falsely denying the root-relative
+        write."""
+        p = payload("Bash", command="false && cd /etc; true & cat > out.txt")
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+
+    def test_current_shell_opacity_invalidates_the_cd_mode(self, tmp_path):
+        """source/eval can flip `set -P` too: after one, an absolute cd
+        recovers the cwd but the MODE stays unknowable, so a flagless
+        `..` hop fails open instead of tracking a logical answer the
+        shell may not be in."""
+        [(_, resolved)] = hooks.resolved_bash_targets(
+            "source x.sh; cd /tmp && cd .. && cat > out.txt", tmp_path
+        )
+        assert resolved is None
+
     def test_unmatched_paren_outside_case_is_a_syntax_error(self, tmp_path):
         """`) touch /tmp_probe/x` is rejected by bash before anything
         runs — anchoring on the stray ) falsely denied a write that never
