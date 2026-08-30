@@ -20,6 +20,7 @@ from pathlib import Path
 
 from claudomater import hooks, initcmd
 from claudomater.config import ProjectConfig, load_project_config
+from claudomater.phases import worktree_dirt_paths
 from claudomater.runlog import RunError, RunLog
 
 
@@ -59,4 +60,12 @@ def start_run(
                 )
         raise
     log.event("run", "policy", cfg.policy())
+    # The salvage exclusion baseline (F2): paths dirty at run START are the
+    # operator's deliberately-uncommitted state, and `wip(phase-crash)`
+    # salvage must never sweep them onto the branch. Recorded in the run
+    # log — not process memory — so crash-recovery adoption inherits the
+    # ORIGINAL baseline instead of mistaking crashed-phase work for it.
+    log.event(
+        "run", "worktree-baseline", {"paths": sorted(worktree_dirt_paths(root))}
+    )
     return log, cfg

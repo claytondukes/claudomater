@@ -37,14 +37,20 @@ class GateResult:
         return not self.blocking
 
     def as_event_detail(self) -> dict[str, Any]:
-        """The run-log shape (matches what the Phase 0.5 driver logged):
-        counts only — the full findings already live in the phase result."""
-        return {
+        """The run-log shape: counts, plus — when the gate blocks — the
+        blocking reason strings themselves (parity finding F7: a
+        counts-only event left the finding TEXT nowhere but the transcript,
+        and the run log is the post-mortem surface). Callers logging this
+        outside PhaseRunner scrub it like any other event detail."""
+        detail: dict[str, Any] = {
             "floor": self.floor,
             "findings": len(self.findings),
             "blocking": len(self.blocking),
             "gate": "pass" if self.passed else "block",
         }
+        if self.blocking:
+            detail["blocking_reasons"] = self.blocking_reasons()
+        return detail
 
     def blocking_reasons(self) -> list[str]:
         """Failure-reason strings ready for retry feedback / run_escalated."""

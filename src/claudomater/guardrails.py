@@ -23,12 +23,19 @@ Rules (from the design, §5):
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any
+from typing import Any, Callable
 
 from claudomater.config import SKIP, UserConfig, family_rank
-from claudomater.usage import UsageSnapshot, UsageUnavailable
+from claudomater.runlog import RunLog
+from claudomater.usage import (
+    UsageSnapshot,
+    UsageUnavailable,
+    positive_identity,
+    read_usage,
+)
 
 PAUSE = "pause"
 DEGRADE = "degrade"
@@ -107,8 +114,12 @@ def _stale_decision(
     # provenance IS its account, and a switch detected on a stale reading is
     # no less a switch. Skipping this let a run baselined to account A ride
     # account B's stale cache with rebaselined=False and no recorded reason.
+    # positive_identity on the reading's side (F5): a placeholder identifies
+    # NOBODY and cannot prove a switch happened.
     rebaselined = bool(
-        baseline_account and snap.account and baseline_account != snap.account
+        baseline_account
+        and positive_identity(snap.account)
+        and baseline_account != snap.account
     )
     prefix: list[str] = []
     if rebaselined:
@@ -249,9 +260,12 @@ def evaluate(
             window=None,
         )
 
+    # positive_identity, not truthiness (F5): {'unknown': 'true'} identifies
+    # nobody — comparing it against the baseline would report an account
+    # switch no one made.
     rebaselined = bool(
         baseline_account
-        and snapshot.account
+        and positive_identity(snapshot.account)
         and baseline_account != snapshot.account
     )
 
@@ -309,6 +323,192 @@ def evaluate(
         )
 
     return decision
+
+
+def baseline_account_from_log(events: list[dict[str, Any]]) -> dict[str, str] | None:
+    """Seed for the account baseline (parity finding F5): the account of the
+    last positively-identified guardrail reading THIS RUN recorded. An
+    in-memory-only baseline starts empty in every fresh process, so an
+    account switch across a park/resume or crash-adoption boundary was
+    handled safely but recorded as rebaselined=False — invisible in the
+    post-mortem. The run log already carries the answer: walk back to the
+    newest `guardrail-check` event whose snapshot account is a positive
+    identity (a placeholder identifies nobody and cannot anchor a switch)."""
+    for ev in reversed(events):
+        if ev.get("event") != "guardrail-check":
+            continue
+        detail = ev.get("detail")
+        if not isinstance(detail, dict):
+            continue
+        usage = detail.get("usage")
+        if not isinstance(usage, dict):
+            continue
+        account = usage.get("account")
+        if positive_identity(account):
+            return account
+    return None
+
+
+def make_guardrail_check(
+    cfg: UserConfig,
+    runlog: RunLog | None = None,
+    read: Callable[[], UsageSnapshot] | None = None,
+) -> Callable[[], Decision]:
+    """Build the spawn-gate callable PhaseRunner takes as `guardrail_check`.
+
+    Owns the two pieces every driver was hand-rolling:
+    - the read→evaluate plumbing: a UsageUnavailable raise is handed to
+      `evaluate` as-is, so the staleness-AND-near-limit rule applies;
+    - the account BASELINE: seeded from the run log's last recorded
+      guardrail reading (F5) and advanced on every positively-identified
+      reading, so an account switch is reported (rebaselined=True) exactly
+      once — including across a park/resume boundary, where a process-local
+      baseline forgot everything.
+
+    `read` defaults to `read_usage` at the user config's staleness TTL;
+    inject a fake for tests."""
+    if read is None:
+
+        def read() -> UsageSnapshot:
+            return read_usage(max_stale=cfg.usage.max_stale_seconds)
+
+    baseline: dict[str, str] | None = (
+        baseline_account_from_log(runlog.events()) if runlog is not None else None
+    )
+
+    def check() -> Decision:
+        nonlocal baseline
+        try:
+            snapshot: UsageSnapshot | UsageUnavailable = read()
+        except UsageUnavailable as exc:
+            snapshot = exc
+        decision = evaluate(snapshot, cfg, baseline_account=baseline)
+        snap = decision.snapshot
+        if snap is not None and positive_identity(snap.account):
+            baseline = snap.account
+        return decision
+
+    return check
+
+
+@dataclass
+class ParkWake:
+    """What ended a `wait_for_unpark`: `outcome` is one of `capacity` (the
+    spawn gate stopped pausing — window reset, account switch, or plain
+    usage recovery), `resume` / `abort` (operator control), or `timeout`
+    (max_wait exhausted; the run is STILL parked)."""
+
+    outcome: str
+    decision: Decision | None = None
+    control: dict[str, Any] | None = None
+    polls: int = 0
+    waited_s: float = 0.0
+
+
+def wait_for_unpark(
+    runlog: RunLog,
+    check: Callable[[], Decision],
+    poll_interval_s: float = 300.0,
+    max_wait_s: float | None = None,
+    sleep: Callable[[float], None] = time.sleep,
+    clock: Callable[[], float] = time.monotonic,
+) -> ParkWake:
+    """The park-recovery loop (parity finding F6): before this, a parked run
+    woke on exactly two signals — the clock or a human — and an account
+    switch sat unnoticed until the operator pinged. Core stays passive (no
+    daemon); this is the first-class loop the ORCHESTRATOR calls when a
+    phase outcome is `paused`, instead of hand-rolling it:
+
+    - polls `check` (build it with `make_guardrail_check`, so an account
+      switch or a window reset reads as capacity) every `poll_interval_s`;
+    - watches the control channel for an operator `resume` or `abort`
+      written at-or-after the park (`abort` dominates when both landed);
+      the caller acts on the returned control — this function only reports;
+    - gives up after `max_wait_s` with outcome `timeout`, run still parked.
+
+    The first gate poll happens immediately: the live Phase 1 park was
+    resumable the moment the wait would have started (the operator had
+    already switched accounts). Every exit writes a run-log event
+    (`park-wake`, or `park-wait-timeout`), and entry is write-ahead
+    (`park-wait`). `sleep`/`clock` are injectable for tests."""
+    park_ts = ""
+    for ev in reversed(runlog.events()):
+        if ev.get("event") == "run-parked":
+            park_ts = ev.get("ts", "")
+            break
+    runlog.event(
+        "run",
+        "park-wait",
+        {"poll_interval_s": poll_interval_s, "max_wait_s": max_wait_s},
+    )
+    start = clock()
+    polls = 0
+
+    def _pending_control() -> dict[str, Any] | None:
+        # ts strings are _utc_now() ISO — lexicographically ordered. A
+        # control from BEFORE the park was answered (or meant for) an
+        # earlier state; only commands at-or-after the park are pending.
+        pending = [
+            c
+            for c in runlog.read_controls()
+            if c.get("action") in ("resume", "abort") and c.get("ts", "") >= park_ts
+        ]
+        for c in pending:
+            if c["action"] == "abort":
+                return c  # abort dominates: explicit operator stop
+        return pending[-1] if pending else None
+
+    while True:
+        control = _pending_control()
+        if control is not None:
+            wake = ParkWake(
+                outcome=control["action"],
+                control=control,
+                polls=polls,
+                waited_s=clock() - start,
+            )
+            runlog.event(
+                "run",
+                "park-wake",
+                {
+                    "source": f"control-{control['action']}",
+                    "polls": polls,
+                    "waited_s": round(wake.waited_s, 1),
+                },
+            )
+            return wake
+        decision = check()
+        polls += 1
+        if decision.action != PAUSE:
+            wake = ParkWake(
+                outcome="capacity",
+                decision=decision,
+                polls=polls,
+                waited_s=clock() - start,
+            )
+            runlog.event(
+                "run",
+                "park-wake",
+                {
+                    "source": "capacity",
+                    "action": decision.action,
+                    "rebaselined": decision.rebaselined,
+                    "polls": polls,
+                    "waited_s": round(wake.waited_s, 1),
+                },
+            )
+            return wake
+        waited = clock() - start
+        if max_wait_s is not None and waited + poll_interval_s > max_wait_s:
+            runlog.event(
+                "run",
+                "park-wait-timeout",
+                {"polls": polls, "waited_s": round(waited, 1)},
+            )
+            return ParkWake(
+                outcome="timeout", decision=decision, polls=polls, waited_s=waited
+            )
+        sleep(poll_interval_s)
 
 
 def next_model(current: str, degrade_path: list[str]) -> str:
