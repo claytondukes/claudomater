@@ -26,6 +26,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable, Protocol, Sequence
 
+from claudomater import hooks
 from claudomater import notify as notify_mod
 from claudomater.config import UserConfig
 from claudomater.guardrails import Decision, model_for_phase
@@ -95,8 +96,9 @@ class ClaudeCliExecutor:
     - permissions default to `bypassPermissions` — headless runs would
       otherwise deny every un-granted tool and no dev phase could write a
       file. The containment for bypassed permissions is the PreToolUse write
-      fence provisioned by `omater init` (design §3/§12), which is why
-      `omater start` refuses to run when that hook has drifted.
+      fence armed by `run.start_run` (design §3/§12) and scoped to agent
+      sessions via the AGENT_ENV marker `build_env` injects (P1-1), which is
+      why start_run refuses to run when the armed hook has drifted.
     - `--output-format stream-json --verbose` (the CLI requires --verbose
       with stream-json in print mode) captures the agent's FULL session —
       tool calls, file edits, test runs — as the retained transcript. The
@@ -123,6 +125,14 @@ class ClaudeCliExecutor:
         self.extra_args = extra_args or []
         self.cwd = Path(cwd) if cwd else None
         self.permission_mode = permission_mode
+
+    def build_env(self) -> dict[str, str]:
+        """The child session's environment: the parent's, plus the agent
+        marker that ARMS the write fence for this session. Project-level
+        hooks fire in every Claude session in the repo, so the hook
+        self-disarms without this marker (P1-1: a run must never fence the
+        human's own sessions)."""
+        return {**os.environ, hooks.AGENT_ENV: "1"}
 
     def build_argv(self, spec: PhaseSpec, model: str) -> list[str]:
         argv = [
@@ -156,6 +166,7 @@ class ClaudeCliExecutor:
             stderr=subprocess.PIPE,
             text=True,
             cwd=self.cwd,
+            env=self.build_env(),
             start_new_session=True,
         )
         if on_spawn is not None:

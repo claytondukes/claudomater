@@ -2600,6 +2600,235 @@ class TestProvisioning:
         assert hooks.verify(tmp_path) == []
 
 
+class TestFenceScopeP11:
+    """Parity finding P1-1 (2026-08-30, hit live on ui3): the project-level
+    fence hook applies to EVERY Claude session in the repo and denied an
+    unrelated interactive session's legitimate out-of-repo write while a run
+    was live - the run fencing the HUMAN's environment, the exact inversion
+    of the sandbox contract. The fence is now agent-scoped (AGENT_ENV
+    marker, injected only by ClaudeCliExecutor) and run-scoped (armed by
+    start_run, removed by teardown)."""
+
+    def test_fence_active_only_with_the_agent_marker(self):
+        assert hooks.fence_active({}) is False
+        assert hooks.fence_active({"OMATER_PHASE_AGENT": "1"}) is True
+        assert hooks.fence_active({"OMATER_PHASE_AGENT": ""}) is False
+
+    def test_fence_active_is_strict_about_the_canonical_value(self):
+        """Copilot round-1 finding: bool() semantics made ANY non-empty
+        value activate the fence - a hand-exported OMATER_PHASE_AGENT=0
+        would fence a human session (the P1-1 defect, via a side door).
+        The executor writes exactly "1"; everything else reads inactive."""
+        for stray in ("0", "false", "yes", "true", " 1"):
+            assert hooks.fence_active({"OMATER_PHASE_AGENT": stray}) is False, stray
+
+    def test_drift_message_names_a_real_command(self, tmp_path):
+        """Copilot round-1 finding: the drift message said 're-arm it
+        (provision)' but no `omater provision` command exists. Remediation
+        must name the real CLI: `omater teardown` (start re-arms)."""
+        hooks.provision(tmp_path)
+        path = hooks.settings_path(tmp_path)
+        drifted = json.loads(path.read_text())
+        drifted["hooks"]["PreToolUse"][0]["matcher"] = "Write"
+        path.write_text(json.dumps(drifted), encoding="utf-8")
+        (problem,) = hooks.verify(tmp_path, require=False)
+        assert "omater teardown" in problem
+
+    def test_failed_start_does_not_leave_the_fence_armed(self, tmp_path, omater_on_path):
+        """Copilot round-1 finding (suppressed): start_run armed the fence
+        BEFORE the drift check and raised without rollback, leaving the
+        run-scoped hook installed with no run live. A failed start now
+        disarms - unless a LIVE run exists, which owns the fence."""
+        import pytest
+
+        from claudomater.run import start_run
+        from claudomater.runlog import RunError
+
+        # no .omater.yaml -> drift refusal; the fence must not stay behind
+        with pytest.raises(RunError, match="drift"):
+            start_run(tmp_path)
+        settings_file = hooks.settings_path(tmp_path)
+        assert (
+            not settings_file.exists()
+            or hooks._find_entry(json.loads(settings_file.read_text())) is None
+        )
+        # with a LIVE run holding the fence, a conflicting second start
+        # fails but must NOT disarm the live run's fence
+        run_init(tmp_path)
+        log, _cfg = start_run(tmp_path)
+        with pytest.raises(RunError):
+            start_run(tmp_path)  # one-live-run conflict
+        assert hooks.verify(tmp_path, require=True) == []
+        log.finish("run-aborted", {"reason": "test cleanup"})
+
+    def test_executor_injects_the_agent_marker(self, monkeypatch):
+        """The ONLY source of the marker is the phase executor - a human
+        session can never carry it by accident of inheritance from the
+        orchestrator's own env being clean."""
+        from claudomater.phases import ClaudeCliExecutor
+
+        monkeypatch.delenv(hooks.AGENT_ENV, raising=False)
+        env = ClaudeCliExecutor().build_env()
+        assert env[hooks.AGENT_ENV] == "1"
+        # inherits the parent env rather than replacing it
+        import os
+
+        assert env.get("PATH") == os.environ.get("PATH")
+
+    def test_deprovision_removes_exactly_our_entry(self, tmp_path):
+        path = hooks.settings_path(tmp_path)
+        path.parent.mkdir(parents=True)
+        other = {"matcher": "Bash", "hooks": [{"type": "command", "command": "mine"}]}
+        path.write_text(json.dumps({"editor": "vim", "hooks": {"PreToolUse": [other]}}))
+        hooks.provision(tmp_path)
+        assert hooks.deprovision(tmp_path) is True
+        left = json.loads(path.read_text())
+        assert left["editor"] == "vim"
+        assert left["hooks"]["PreToolUse"] == [other]
+
+    def test_deprovision_cleans_empty_containers_and_is_idempotent(self, tmp_path):
+        hooks.provision(tmp_path)
+        assert hooks.deprovision(tmp_path) is True
+        settings = json.loads(hooks.settings_path(tmp_path).read_text())
+        assert "hooks" not in settings
+        assert hooks.deprovision(tmp_path) is False  # nothing left to remove
+        assert hooks.deprovision(tmp_path / "nowhere") is False  # no settings file
+
+    def test_start_run_arms_the_fence(self, tmp_path, omater_on_path):
+        """The fence exists exactly while a run is live: start_run arms it
+        (no prior `omater init` hook step exists anymore), teardown removes
+        it. Pre-P1-1 this refused with 'hook missing' drift instead."""
+        from claudomater.run import start_run
+
+        run_init(tmp_path)
+        log, cfg = start_run(tmp_path)
+        assert hooks.verify(tmp_path, require=True) == []
+        log.finish("run-aborted", {"reason": "test teardown"})
+        assert hooks.deprovision(tmp_path) is True
+        assert hooks.verify(tmp_path, require=False) == []
+
+    def test_unwritable_settings_raise_typed_errors(self, tmp_path):
+        """Copilot round-2 finding (suppressed pair): provision/deprovision
+        raised raw OSError from filesystem writes, bypassing callers' typed
+        HookProvisionError handling - `omater start`/`teardown` crashed with
+        a traceback instead of a user-facing error."""
+        import pytest
+
+        hooks.provision(tmp_path)  # settings exist, hook armed
+        settings_file = hooks.settings_path(tmp_path)
+        settings_file.chmod(0o400)  # readable, not writable
+        try:
+            with pytest.raises(hooks.HookProvisionError, match="cannot write"):
+                hooks.deprovision(tmp_path)
+        finally:
+            settings_file.chmod(0o600)
+        # provision into an unwritable parent: same typed error
+        blocked = tmp_path / "blocked"
+        blocked.mkdir()
+        blocked.chmod(0o500)
+        try:
+            with pytest.raises(hooks.HookProvisionError, match="cannot write"):
+                hooks.provision(blocked)
+        finally:
+            blocked.chmod(0o700)
+
+    def test_rollback_failure_never_masks_the_start_failure(
+        self, tmp_path, monkeypatch, omater_on_path
+    ):
+        """Copilot round-3 finding: if the failed-start rollback's
+        deprovision itself raises (unwritable settings), that cleanup error
+        replaced the ORIGINAL failure. The original propagates; the cleanup
+        failure rides along as an exception note with the remediation."""
+        import pytest
+
+        from claudomater import run as run_mod
+        from claudomater.run import start_run
+        from claudomater.runlog import RunError
+
+        def boom(root):
+            raise hooks.HookProvisionError("cannot write settings (simulated)")
+
+        monkeypatch.setattr(run_mod.hooks, "deprovision", boom)
+        with pytest.raises(RunError, match="drift") as excinfo:
+            start_run(tmp_path)  # no .omater.yaml -> drift refusal
+        notes = getattr(excinfo.value, "__notes__", [])
+        assert any("omater teardown" in n for n in notes)
+
+    def test_between_runs_verify_reports_malformed_settings(self, tmp_path):
+        """Copilot round-4 finding: a present-but-structurally-invalid
+        settings file made _find_entry return None, which require=False
+        read as healthy - so `omater init --verify` passed on the exact
+        file the next start_run's provision() would refuse. Structural
+        invariants report in BOTH modes."""
+        path = hooks.settings_path(tmp_path)
+        path.parent.mkdir(parents=True)
+        for malformed, needle in (
+            ({"hooks": "oops"}, "not a mapping"),
+            ({"hooks": {"PreToolUse": {}}}, "not a list"),
+        ):
+            path.write_text(json.dumps(malformed), encoding="utf-8")
+            (problem,) = hooks.verify(tmp_path, require=False)
+            assert needle in problem, malformed
+
+    def test_duplicate_leftover_entries_are_all_handled(self, tmp_path):
+        """Copilot round-5 finding pair: provision removed only the FIRST
+        matching entry (a stale twin survived and verify reported drift
+        forever), and teardown reported success while a duplicate kept
+        fencing agents. Both now sweep every matching entry."""
+        path = hooks.settings_path(tmp_path)
+        path.parent.mkdir(parents=True)
+        stale = {
+            "matcher": "Write",
+            "hooks": [{"type": "command", "command": "omater hook pre-tool-use --root /old"}],
+        }
+        path.write_text(
+            json.dumps({"hooks": {"PreToolUse": [stale, dict(stale)]}}),
+            encoding="utf-8",
+        )
+        assert hooks.provision(tmp_path) is True
+        settings = json.loads(path.read_text())
+        assert len(hooks._find_entries(settings)) == 1
+        assert hooks.verify(tmp_path, require=True) == []
+        # teardown from a duplicated state removes every entry
+        path.write_text(
+            json.dumps({"hooks": {"PreToolUse": [stale, dict(stale)]}}),
+            encoding="utf-8",
+        )
+        assert hooks.deprovision(tmp_path) is True
+        assert hooks._find_entries(json.loads(path.read_text())) == []
+
+    def test_teardown_refuses_malformed_settings_loudly(self, tmp_path):
+        """Copilot round-5 finding: a structurally-invalid file fell through
+        to 'nothing to remove' - teardown claimed the hook was gone on a
+        file it could not honestly read. Typed error instead."""
+        import pytest
+
+        path = hooks.settings_path(tmp_path)
+        path.parent.mkdir(parents=True)
+        for malformed in ({"hooks": "oops"}, {"hooks": {"PreToolUse": {}}}):
+            path.write_text(json.dumps(malformed), encoding="utf-8")
+            with pytest.raises(hooks.HookProvisionError, match="fix it by hand"):
+                hooks.deprovision(tmp_path)
+
+    def test_init_path_warning_matches_the_new_lifecycle(self, tmp_path, monkeypatch):
+        """Copilot round-5 finding: the PATH warning still said 'the
+        provisioned hook' though init no longer provisions - the warning
+        now names `omater start` as what arms the fence."""
+        monkeypatch.setattr("shutil.which", lambda _: None)
+        actions = run_init(tmp_path)
+        (warning,) = [a for a in actions if a.startswith("WARNING")]
+        assert "omater start" in warning and "provisioned hook" not in warning
+
+    def test_teardown_cli_disarms(self, tmp_path, capsys):
+        from claudomater.cli import EXIT_OK, main
+
+        hooks.provision(tmp_path)
+        assert main(["teardown", str(tmp_path)]) == EXIT_OK
+        assert "removed" in capsys.readouterr().out
+        assert hooks._find_entry(json.loads(hooks.settings_path(tmp_path).read_text())) is None
+        assert main(["teardown", str(tmp_path)]) == EXIT_OK  # idempotent, honest message
+
+
 class TestInit:
     def test_verify_reports_omater_missing_from_path(self, tmp_path, monkeypatch):
         """Command-not-found is exit 127 = allow: a PATH without omater
@@ -2612,9 +2841,13 @@ class TestInit:
         assert any("not on PATH" in p for p in problems)
 
     def test_init_provisions_everything_and_verify_passes(self, tmp_path, omater_on_path):
+        """P1-1 rewrite of the same intent: init provisions config, gitignore
+        and scratch, verify passes - and the write fence is deliberately NOT
+        installed (it is run-scoped; a hook init leaves behind would fire in
+        every human session in the repo between runs)."""
         actions = run_init(tmp_path)
         assert (tmp_path / ".omater.yaml").exists()
-        assert hooks.settings_path(tmp_path).exists()
+        assert not hooks.settings_path(tmp_path).exists()
         assert GITIGNORE_LINE in (tmp_path / ".gitignore").read_text().splitlines()
         assert (tmp_path / hooks.SCRATCH_SUBDIR).is_dir()
         assert any("wrote" in a for a in actions)
@@ -2678,8 +2911,24 @@ class TestInit:
         assert cfg.project == tmp_path.name
 
     def test_verify_reports_all_drift(self, tmp_path):
+        """P1-1 rewrite: a bare directory drifts on config and gitignore; a
+        MISSING fence hook is the healthy between-runs state and reports
+        nothing, while a present-but-drifted leftover still reports."""
         problems = run_verify(tmp_path)
-        assert len(problems) >= 3  # settings, config, gitignore
+        assert len(problems) >= 2  # config, gitignore
+        assert not any("hook" in p for p in problems)
+        # a drifted leftover (present but not canonical) still reports
+        path = hooks.settings_path(tmp_path)
+        path.parent.mkdir(parents=True)
+        path.write_text(
+            json.dumps(
+                {"hooks": {"PreToolUse": [{"matcher": "Write", "hooks": [
+                    {"type": "command", "command": "omater hook pre-tool-use --root /elsewhere"}
+                ]}]}}
+            ),
+            encoding="utf-8",
+        )
+        assert any("drifted" in p for p in run_verify(tmp_path))
 
     def test_unreadable_settings_reports_not_crashes(self, tmp_path):
         hooks.provision(tmp_path)

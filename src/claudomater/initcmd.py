@@ -1,11 +1,17 @@
 """`omater init`: provision a consumer repo.
 
 - writes a starter `.omater.yaml` (if missing),
-- provisions the PreToolUse write-fence hook into `.claude/settings.json`,
 - gitignores the runs/scratch dir.
 
-`omater init --verify` is the drift check the orchestrator runs at every
-run start: it re-verifies the hooks and config without changing anything.
+The PreToolUse write fence is NOT installed here (parity finding P1-1): a
+project-level hook fires in EVERY Claude session in the repo, humans
+included, so the fence is run-scoped - `run.start_run` arms it, teardown
+(`omater teardown`) removes it, and the AGENT_ENV marker keeps it inert for
+non-agent sessions while armed.
+
+`omater init --verify` is the between-runs drift check: config, gitignore,
+PATH, and - if a fence hook is PRESENT - its canonical form (missing is the
+healthy between-runs state; a drifted leftover reports loudly).
 """
 
 from __future__ import annotations
@@ -75,11 +81,8 @@ def run_init(root: Path | str, force: bool = False) -> list[str]:
     else:
         actions.append(f"kept existing {cfg_path}")
 
-    if hooks.provision(root):
-        actions.append(f"provisioned write-fence hook in {hooks.settings_path(root)}")
-    else:
-        actions.append("write-fence hook already provisioned")
-
+    # The write fence is run-scoped (P1-1): start_run arms it, teardown
+    # removes it. init installs nothing into .claude/settings.json.
     gitignore = root / ".gitignore"
     lines = (
         gitignore.read_text(encoding="utf-8").splitlines()
@@ -107,17 +110,20 @@ def run_init(root: Path | str, force: bool = False) -> list[str]:
         # A hook whose command isn't on PATH exits 127, which Claude Code
         # treats as allow — the fence would be a silent no-op.
         actions.append(
-            "WARNING: 'omater' is not on PATH; the provisioned hook will be "
-            "a no-op until claudomater is installed (pip install claudomater)"
+            "WARNING: 'omater' is not on PATH; the write fence that "
+            "`omater start` arms would be a silent no-op until claudomater "
+            "is installed (pip install claudomater)"
         )
     return actions
 
 
 def run_verify(root: Path | str) -> list[str]:
     """Drift detection. Empty list = healthy; the orchestrator refuses to
-    start a run while this reports problems."""
+    start a run while this reports problems. The fence hook is checked in
+    require=False mode: missing is the healthy between-runs state (the run
+    path re-checks with require=True AFTER start_run arms it)."""
     root = Path(root).resolve()
-    problems = hooks.verify(root)
+    problems = hooks.verify(root, require=False)
 
     cfg_path = root / PROJECT_CONFIG_NAME
     if not cfg_path.exists():

@@ -13,9 +13,13 @@ measure is the run report's permission-stall count and the CLI's
 discipline, not a claim of completeness. A false DENY is as costly as a miss
 (it stalls legitimate work), so unrecognized input always passes.
 
-`omater init` provisions the hook into the consumer repo's
-`.claude/settings.json`; `omater init --verify` is the drift check run at
-every run start.
+The hook is RUN-SCOPED and AGENT-SCOPED (parity finding P1-1, 2026-08-30):
+`run.start_run` arms it into the consumer repo's `.claude/settings.json`,
+teardown (`omater teardown` / `deprovision`) removes it, and while armed the
+hook self-disarms (exit 0) for any session not carrying the AGENT_ENV
+marker that ClaudeCliExecutor injects - a project-level hook fires in EVERY
+Claude session in the repo, and fencing the human's own session inverts the
+sandbox contract.
 """
 
 from __future__ import annotations
@@ -34,6 +38,29 @@ HOOK_COMMAND = 'omater hook pre-tool-use --root "$CLAUDE_PROJECT_DIR"'
 HOOK_MARKER = "omater hook pre-tool-use"
 SCRATCH_SUBDIR = ".omater/scratch"
 SCRATCH_ENV = "OMATER_SCRATCH_DIR"
+# The marker only omater-spawned phase agents carry (injected by
+# ClaudeCliExecutor). Project-level hooks apply to EVERY Claude session in
+# the repo - including the human's - so the fence must self-disarm when the
+# marker is absent. Parity finding P1-1 (2026-08-30): the ui3 run's fence
+# denied an unrelated interactive session's legitimate out-of-repo write -
+# the run fencing the HUMAN's environment, the exact inversion of the
+# sandbox contract (the fence exists to contain bypassed-permissions agents,
+# design §3/§12, never to constrain a person).
+AGENT_ENV = "OMATER_PHASE_AGENT"
+
+
+def fence_active(env: dict[str, str] | None = None) -> bool:
+    """True only inside an omater-spawned phase agent's session. The hook
+    process inherits the Claude session's environment, so a human session
+    (no marker) reads False and the fence stays inert for it. STRICT
+    equality with the canonical value: the executor is the marker's only
+    legitimate writer and it writes exactly "1" - a stray non-canonical
+    value (OMATER_PHASE_AGENT=0 exported by hand, say) must read as NOT an
+    agent, because accidentally fencing a human is the P1-1 defect while a
+    disarmed fence for a mislabeled agent is only a lost seatbelt, backed
+    by verifiers and permission_denials accounting."""
+    source = env if env is not None else os.environ
+    return source.get(AGENT_ENV) == "1"
 
 # Paths that are never a stall risk.
 _ALWAYS_ALLOWED = ("/dev/null", "/dev/stdout", "/dev/stderr", "/dev/tty")
@@ -1978,20 +2005,31 @@ def _our_entry() -> dict[str, Any]:
     }
 
 
-def _find_entry(settings: dict[str, Any]) -> dict[str, Any] | None:
+def _find_entries(settings: dict[str, Any]) -> list[dict[str, Any]]:
+    """EVERY PreToolUse entry carrying our hook marker. Duplicates are a
+    real leftover shape (hand edits, crashed older versions) - handling
+    only the first let provision leave a stale twin behind and let teardown
+    report success while agents stayed fenced by the survivor."""
     hooks_cfg = settings.get("hooks")
     if not isinstance(hooks_cfg, dict):
-        return None
+        return []
     entries = hooks_cfg.get("PreToolUse")
     if not isinstance(entries, list):
-        return None
+        return []
+    found: list[dict[str, Any]] = []
     for entry in entries:
         if not isinstance(entry, dict):
             continue
         for hook in entry.get("hooks") or []:
             if isinstance(hook, dict) and HOOK_MARKER in (hook.get("command") or ""):
-                return entry
-    return None
+                found.append(entry)
+                break
+    return found
+
+
+def _find_entry(settings: dict[str, Any]) -> dict[str, Any] | None:
+    found = _find_entries(settings)
+    return found[0] if found else None
 
 
 def provision(project_root: Path | str) -> bool:
@@ -1999,8 +2037,8 @@ def provision(project_root: Path | str) -> bool:
     preserves everything else). Returns True if the file changed."""
     path = settings_path(project_root)
     settings = _load_settings(path)
-    existing = _find_entry(settings)
-    if existing == _our_entry():
+    existing = _find_entries(settings)
+    if existing == [_our_entry()]:
         return False
     if "hooks" in settings and not isinstance(settings["hooks"], dict):
         raise HookProvisionError(
@@ -2012,30 +2050,106 @@ def provision(project_root: Path | str) -> bool:
         raise HookProvisionError(
             f"{path}: hooks.PreToolUse is not a list — fix it by hand before provisioning"
         )
-    if existing is not None:
-        pre.remove(existing)
+    # ALL matching entries go, then the one canonical entry lands —
+    # duplicates would otherwise survive as stale twins that keep verify
+    # reporting drift forever.
+    for entry in existing:
+        pre.remove(entry)
     pre.append(_our_entry())
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(settings, indent=2) + "\n", encoding="utf-8")
+    _write_settings(path, settings)
     return True
 
 
-def verify(project_root: Path | str) -> list[str]:
-    """Drift detection, run at every run start. Empty list = healthy."""
+def _write_settings(path: Path, settings: dict[str, Any]) -> None:
+    """All settings writes go through here: a raw OSError (unwritable
+    .claude dir, read-only checkout) would bypass callers' typed
+    HookProvisionError handling and crash `omater start`/`teardown` with a
+    traceback instead of a user-facing error."""
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(settings, indent=2) + "\n", encoding="utf-8")
+    except OSError as exc:
+        raise HookProvisionError(f"cannot write {path}: {exc}") from exc
+
+
+def deprovision(project_root: Path | str) -> bool:
+    """Remove the write-fence hook from `.claude/settings.json`, preserving
+    everything else (the exact inverse of provision). Returns True if the
+    file changed. Run teardown calls this so the fence exists only while a
+    run is live - a hook left behind is inert for human sessions thanks to
+    the AGENT_ENV gate, but leaving it installed at all is the P1-1 shape:
+    the project-level hook fires in every session in the repo."""
+    path = settings_path(project_root)
+    if not path.exists():
+        return False
+    settings = _load_settings(path)
+    # A structurally-invalid file is reported loudly, never blessed with
+    # "nothing to remove": teardown's contract is 'our hook is GONE', and
+    # on a broken file that claim cannot be made honestly.
+    if "hooks" in settings and not isinstance(settings["hooks"], dict):
+        raise HookProvisionError(
+            f"{path}: 'hooks' is not a mapping — fix it by hand before teardown"
+        )
+    hooks_cfg = settings.get("hooks", {})
+    if "PreToolUse" in hooks_cfg and not isinstance(hooks_cfg["PreToolUse"], list):
+        raise HookProvisionError(
+            f"{path}: hooks.PreToolUse is not a list — fix it by hand before teardown"
+        )
+    entries = _find_entries(settings)
+    if not entries:
+        return False
+    pre = settings["hooks"]["PreToolUse"]
+    for entry in entries:  # every duplicate goes, not just the first
+        pre.remove(entry)
+    if not pre:
+        del settings["hooks"]["PreToolUse"]
+    if not settings["hooks"]:
+        del settings["hooks"]
+    _write_settings(path, settings)
+    return True
+
+
+def verify(project_root: Path | str, require: bool = True) -> list[str]:
+    """Drift detection. Empty list = healthy. With `require=True` (the run
+    path, called after provision arms the fence) a missing hook is a
+    problem; with `require=False` (between-runs checks like
+    `omater init --verify`) missing is the HEALTHY state - the fence is
+    run-scoped since P1-1 - and only a present-but-drifted entry reports."""
     problems: list[str] = []
     path = settings_path(project_root)
     if not path.exists():
-        return [f"{path} does not exist — run `omater init`"]
+        if require:
+            problems.append(f"{path} does not exist — the fence is not armed")
+        return problems
     try:
         settings = _load_settings(path)
     except HookProvisionError as exc:
         return [str(exc)]
+    # Structural invariants provisioning relies on are reported in BOTH
+    # modes: a present-but-malformed settings file would make _find_entry
+    # return None, and in require=False mode that read as "healthy" while
+    # the next start_run's provision() failed on the same file.
+    hooks_cfg = settings.get("hooks")
+    if "hooks" in settings and not isinstance(hooks_cfg, dict):
+        return [
+            f"{path}: 'hooks' is not a mapping — arming the fence would "
+            "fail; fix it by hand"
+        ]
+    if isinstance(hooks_cfg, dict) and "PreToolUse" in hooks_cfg and not isinstance(
+        hooks_cfg["PreToolUse"], list
+    ):
+        return [
+            f"{path}: hooks.PreToolUse is not a list — arming the fence "
+            "would fail; fix it by hand"
+        ]
     entry = _find_entry(settings)
     if entry is None:
-        problems.append("write-fence PreToolUse hook missing — run `omater init`")
+        if require:
+            problems.append("write-fence PreToolUse hook missing — fence not armed")
     elif entry != _our_entry():
         problems.append(
             "write-fence PreToolUse hook drifted from the provisioned form — "
-            "run `omater init` to restore it"
+            "remove it with `omater teardown` (the next `omater start` "
+            "re-arms the canonical hook)"
         )
     return problems

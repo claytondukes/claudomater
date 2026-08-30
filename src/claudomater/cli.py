@@ -124,6 +124,11 @@ def _cmd_hook(args: argparse.Namespace) -> int:
     if args.hook != "pre-tool-use":
         print(f"error: unknown hook {args.hook!r}", file=sys.stderr)
         return EXIT_ERROR
+    if not hooks.fence_active():
+        # Not an omater-spawned agent session: the project-level hook fires
+        # for EVERY Claude session in the repo, and fencing a human's
+        # session is the P1-1 inversion. Allow, before even reading stdin.
+        return EXIT_OK
     try:
         payload = json.load(sys.stdin)
     except (json.JSONDecodeError, ValueError, TypeError, OSError):
@@ -134,6 +139,21 @@ def _cmd_hook(args: argparse.Namespace) -> int:
     response = hooks.hook_response(allow, reason)
     if response is not None:
         print(json.dumps(response))
+    return EXIT_OK
+
+
+def _cmd_teardown(args: argparse.Namespace) -> int:
+    root = Path(args.root).resolve()
+    try:
+        changed = hooks.deprovision(root)
+    except hooks.HookProvisionError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return EXIT_ERROR
+    print(
+        f"write-fence hook removed from {hooks.settings_path(root)}"
+        if changed
+        else "write-fence hook was not installed; nothing to remove"
+    )
     return EXIT_OK
 
 
@@ -173,11 +193,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--version", action="version", version=f"omater {__version__}")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    p = sub.add_parser("init", help="provision a project (hooks, config, gitignore)")
+    p = sub.add_parser("init", help="provision a project (config, gitignore)")
     p.add_argument("root", nargs="?", default=".")
     p.add_argument("--verify", action="store_true", help="drift check only")
     p.add_argument("--force", action="store_true", help="overwrite existing config")
     p.set_defaults(fn=_cmd_init)
+
+    p = sub.add_parser(
+        "teardown",
+        help="disarm the write fence (remove the run-scoped PreToolUse hook)",
+    )
+    p.add_argument("root", nargs="?", default=".")
+    p.set_defaults(fn=_cmd_teardown)
 
     p = sub.add_parser("usage", help="fetch usage and evaluate guardrails")
     p.add_argument("--json", action="store_true")
