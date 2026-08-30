@@ -306,7 +306,11 @@ class TestUserConfig:
             load_user_config(path)
 
     def test_defaults_object_is_valid(self):
-        assert UserConfig().usage.max_stale_seconds == 300
+        from claudomater.usage import DEFAULT_MAX_STALE_S
+
+        # one default, defined in usage.py next to the TTL>longest-phase
+        # invariant — the config layer must not carry its own copy
+        assert UserConfig().usage.max_stale_seconds == DEFAULT_MAX_STALE_S
 
     def test_non_mapping_sections_are_config_errors(self, tmp_path):
         for text in ("usage: [a, b]\n", "notify: just-a-string\n", "learning: 3\n"):

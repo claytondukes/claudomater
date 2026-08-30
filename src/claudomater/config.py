@@ -15,6 +15,8 @@ from typing import Any
 
 import yaml
 
+from claudomater.usage import DEFAULT_MAX_STALE_S
+
 PROJECT_CONFIG_NAME = ".omater.yaml"
 USER_CONFIG_PATH = Path("~/.omater/config.yaml")
 
@@ -321,7 +323,10 @@ class UsageConfig:
     )
     degrade_scoped_at: int = 80
     degrade_path: list[str] = field(default_factory=lambda: [MODEL_OPUS, "pause"])
-    max_stale_seconds: int = 300  # fail closed beyond this
+    # One default, defined in usage.py (> the longest phase timeout — see the
+    # comment there); staleness beyond it applies the near-limit rule, not an
+    # automatic pause.
+    max_stale_seconds: int = DEFAULT_MAX_STALE_S
 
 
 def _validate_degrade_path(path: list[str]) -> None:
@@ -407,7 +412,8 @@ def load_user_config(path: Path | str | None = None) -> UserConfig:
             raise ConfigError("usage.degrade_path must be a list")
         usage.degrade_path = list(raw_path)
     usage.max_stale_seconds = _require_int(
-        "usage.max_stale_seconds", usage_raw.get("max_stale_seconds", 300)
+        "usage.max_stale_seconds",
+        usage_raw.get("max_stale_seconds", DEFAULT_MAX_STALE_S),
     )
 
     for window, pct in usage.pause_at.items():

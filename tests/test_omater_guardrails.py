@@ -289,18 +289,19 @@ class TestFakeUsageInjection:
         d = evaluate(read_usage(), UserConfig())
         assert d.action == "pause"
 
-    def test_stale_fake_fails_closed(self, tmp_path, monkeypatch):
-        """AC: guardrails fail CLOSED on a stale usage cache."""
+    def test_stale_fake_still_raises_and_carries_the_last_reading(self, tmp_path, monkeypatch):
+        """AC (revised 2026-08-30): staleness still raises, but the raise
+        carries the parsed last reading so the guardrail can apply the
+        staleness-AND-near-limit rule instead of pausing blind."""
         write_fake(
-            tmp_path, monkeypatch, {"five_hour": 1, "seven_day": 1, "scoped": 1}, age_s=600
+            tmp_path, monkeypatch, {"five_hour": 1, "seven_day": 1, "scoped": 1}, age_s=4000
         )
-        with pytest.raises(UsageUnavailable, match="stale-cache"):
+        with pytest.raises(UsageUnavailable, match="stale-cache") as excinfo:
             read_usage()
-        # and evaluate() turns that into a pause:
-        try:
-            read_usage()
-        except UsageUnavailable as exc:
-            assert evaluate(exc, UserConfig()).action == "pause"
+        exc = excinfo.value
+        assert exc.snapshot is not None and exc.snapshot.source == "stale"
+        assert exc.snapshot.five_hour == 1
+        assert exc.age_s is not None and exc.age_s > 3900
 
     def test_unreadable_fake_fails_closed(self, tmp_path, monkeypatch):
         monkeypatch.setenv(FAKE_USAGE_ENV, str(tmp_path / "missing.json"))
@@ -322,6 +323,104 @@ class TestFakeUsageInjection:
             read_usage(cache_path=cache, providers=[])
 
 
+class TestStaleTtlAndNearLimitRule:
+    """Epic 9 rough edge #4: the 300s TTL was shorter than a typical phase,
+    so every spawn gate forced a live fetch, the endpoint 429'd, and the run
+    paused at 17% real usage. Two fixes, both pinned here: the TTL exceeds
+    the longest phase, and a pause past the TTL requires staleness AND a
+    near-limit last reading (projected at STALE_DRIFT_PP_PER_MIN)."""
+
+    def test_stale_ttl_exceeds_the_longest_phase_timeout(self):
+        """A reading taken at one spawn gate must survive to the next gate
+        even if every refresh between them fails. Cross-module pin: nobody
+        gets to grow a phase timeout past the TTL (or shrink the TTL) without
+        this test naming the invariant they broke."""
+        from claudomater.phases import DEFAULT_TIMEOUT_S
+        from claudomater.usage import DEFAULT_MAX_STALE_S
+
+        assert DEFAULT_MAX_STALE_S > DEFAULT_TIMEOUT_S
+
+    def test_reading_older_than_the_old_300s_ttl_is_no_longer_stale(
+        self, tmp_path, monkeypatch
+    ):
+        """The Epic 9 incident's exact shape: a 346s-old reading (fresh by
+        any phase-length standard) must read fine, not raise."""
+        write_fake(
+            tmp_path, monkeypatch, {"five_hour": 17, "seven_day": 2, "scoped": 4}, age_s=600
+        )
+        snap = read_usage()
+        assert snap.five_hour == 17
+
+    def _stale_exc(self, tmp_path, monkeypatch, data, age_s):
+        write_fake(tmp_path, monkeypatch, data, age_s=age_s)
+        with pytest.raises(UsageUnavailable) as excinfo:
+            read_usage()
+        return excinfo.value
+
+    def test_stale_low_reading_proceeds_at_degraded_confidence(
+        self, tmp_path, monkeypatch
+    ):
+        """Staleness alone is not evidence of exhaustion: a 17%-style last
+        reading far from every threshold proceeds, with the degraded
+        confidence named in the decision's reasons."""
+        exc = self._stale_exc(
+            tmp_path, monkeypatch,
+            {"five_hour": 1, "seven_day": 1, "scoped": 1}, age_s=4000,
+        )
+        d = evaluate(exc, UserConfig())
+        assert d.action == "ok"
+        assert "degraded confidence" in d.reasons[0] and "stale" in d.reasons[0]
+        assert d.snapshot is not None  # the reading rides into the run event
+
+    def test_stale_near_limit_reading_pauses(self, tmp_path, monkeypatch):
+        """The AND's other arm: stale + a reading that projects to a pause
+        threshold pauses, naming the projection."""
+        exc = self._stale_exc(
+            tmp_path, monkeypatch,
+            {"five_hour": 90, "seven_day": 1, "scoped": 1}, age_s=4000,
+        )
+        d = evaluate(exc, UserConfig())
+        assert d.action == "pause" and d.window == "five_hour"
+        assert "near-limit" in d.reasons[0] and "projects" in d.reasons[0]
+
+    def test_projection_caps_unbounded_staleness(self, tmp_path, monkeypatch):
+        """Self-capping: even a near-zero reading pauses once it has been
+        stale long enough to have plausibly burned to the threshold
+        (0.5 pp/min drift) — 'proceed on stale' can never hold forever."""
+        exc = self._stale_exc(
+            tmp_path, monkeypatch,
+            {"five_hour": 1, "seven_day": 1, "scoped": 1}, age_s=12000,
+        )
+        assert evaluate(exc, UserConfig()).action == "pause"
+
+    def test_stale_reading_missing_a_window_fails_closed(
+        self, tmp_path, monkeypatch
+    ):
+        """A stale snapshot missing a pause window is unknown, not stale."""
+        exc = self._stale_exc(
+            tmp_path, monkeypatch, {"five_hour": 1, "scoped": 1}, age_s=4000
+        )
+        d = evaluate(exc, UserConfig())
+        assert d.action == "pause" and "failing closed" in d.reasons[0]
+
+    def test_unavailable_without_a_reading_still_fails_closed(self):
+        """No carve-out for genuinely unknown usage: an UsageUnavailable
+        that carries no snapshot (no creds, unreadable cache) pauses."""
+        d = evaluate(UsageUnavailable("no-credentials: nothing configured"), UserConfig())
+        assert d.action == "pause" and "failing closed" in d.reasons[0]
+
+    def test_degrade_never_acts_on_stale_data(self, tmp_path, monkeypatch):
+        """A stale scoped reading past degrade_scoped_at does NOT degrade:
+        degrading is a positive step that needs fresh numbers. Worst case is
+        running top-tier slightly past the soft threshold until a refresh
+        succeeds — the pause windows above stay the hard stop."""
+        exc = self._stale_exc(
+            tmp_path, monkeypatch,
+            {"five_hour": 1, "seven_day": 1, "scoped": 95}, age_s=4000,
+        )
+        assert evaluate(exc, UserConfig()).action == "ok"
+
+
 class TestRealPathFailClosed:
     def test_no_credentials_and_no_cache_fails_closed(self, tmp_path, monkeypatch):
         monkeypatch.delenv(FAKE_USAGE_ENV, raising=False)
@@ -332,13 +431,17 @@ class TestRealPathFailClosed:
             )
 
     def test_stale_cache_with_failed_refresh_fails_closed(self, tmp_path, monkeypatch):
+        """Stale beyond the TTL still raises; a payload with no readable
+        windows gives the near-limit rule nothing to project, so evaluate()
+        stays fail-closed."""
         monkeypatch.delenv(FAKE_USAGE_ENV, raising=False)
         cache = tmp_path / "cache.json"
         cache.write_text(json.dumps({"limits": []}), encoding="utf-8")
-        old = time.time() - 3600
+        old = time.time() - 4000
         os.utime(cache, (old, old))
-        with pytest.raises(UsageUnavailable, match="stale-cache"):
+        with pytest.raises(UsageUnavailable, match="stale-cache") as excinfo:
             read_usage(cache_path=cache, providers=[])
+        assert evaluate(excinfo.value, UserConfig()).action == "pause"
 
     def test_fresh_cache_without_creds_still_reads(self, tmp_path, monkeypatch):
         """A fresh cache (e.g. the statusline just refreshed it) is usable

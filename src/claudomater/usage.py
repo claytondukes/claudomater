@@ -3,8 +3,10 @@
 Extracted from the operator's statusline script and shared with it: same
 endpoint, same cache file, so the statusline benefits from omater's
 refreshes and vice versa. A statusline can afford to render stale numbers;
-a guardrail cannot — every read here is mtime-gated, and stale beyond
-`max_stale` after a refresh attempt = unknown = fail closed.
+a guardrail cannot — every read here is mtime-gated. Stale beyond
+`max_stale` after a refresh attempt raises, but the raise carries the last
+parsed reading so the guardrail can distinguish "stale but comfortably low"
+from "genuinely unknown" (which stays fail-closed).
 
 The fake-usage injection path (`OMATER_FAKE_USAGE` -> path to a JSON file)
 exercises the same parse + staleness gates, which is what makes the
@@ -19,7 +21,7 @@ import os
 import time
 import urllib.error
 import urllib.request
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable
 
@@ -33,7 +35,16 @@ USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 OAUTH_BETA_HEADER = "oauth-2025-04-20"
 DEFAULT_CACHE = Path("~/.cache/claude-statusline/usage.json")
 FAKE_USAGE_ENV = "OMATER_FAKE_USAGE"
-DEFAULT_MAX_STALE_S = 300
+# The staleness TTL must exceed the LONGEST phase timeout
+# (phases.DEFAULT_TIMEOUT_S = 3600, pinned by a cross-module test): a reading
+# taken at one spawn gate must still be usable at the next gate even if every
+# refresh between them fails. At 300s the TTL was shorter than a typical
+# phase, so EVERY gate forced a live fetch and the endpoint's 429s paused a
+# run at 17% real usage (Epic 9 verification run, 2026-08-30). Staleness past
+# this is still not an automatic pause: the raise carries the last reading
+# and guardrails.evaluate pauses only when that reading PROJECTS near a pause
+# threshold (staleness AND near-limit).
+DEFAULT_MAX_STALE_S = 3900
 # Refresh only when the cache is older than this. The statusline refreshes
 # the same cache on its own 60s TTL, and the endpoint rate-limits (429) when
 # hammered — a fresh cache IS the answer, no fetch needed.
@@ -45,7 +56,23 @@ HttpFn = Callable[[str, dict[str, str], float], bytes]
 
 class UsageUnavailable(Exception):
     """Usage numbers are unknown (no creds, fetch failed, stale cache).
-    Callers must treat this as over-threshold: pause + notify, never run blind."""
+    Callers must treat this as over-threshold: pause + notify, never run
+    blind — with ONE carve-out: when the failure is staleness of an
+    otherwise-readable cache, the parsed last reading rides along as
+    `snapshot` (source='stale') with its age in `age_s`, and
+    guardrails.evaluate applies the staleness-AND-near-limit rule to it
+    instead of pausing on staleness alone. No snapshot = truly unknown =
+    fail closed, unchanged."""
+
+    def __init__(
+        self,
+        message: str,
+        snapshot: "UsageSnapshot | None" = None,
+        age_s: float | None = None,
+    ):
+        super().__init__(message)
+        self.snapshot = snapshot
+        self.age_s = age_s
 
 
 @dataclass
@@ -241,7 +268,9 @@ def read_usage(
         if now - snap.fetched_at > max_stale:
             raise UsageUnavailable(
                 f"stale-cache: fake usage is {int(now - snap.fetched_at)}s old "
-                f"(max {max_stale}s)"
+                f"(max {max_stale}s)",
+                snapshot=replace(snap, source="stale"),
+                age_s=now - snap.fetched_at,
             )
         return snap
 
@@ -274,7 +303,17 @@ def read_usage(
     if age > max_stale:
         raise UsageUnavailable(
             f"stale-cache: usage data is {int(age)}s old (max {max_stale}s)"
-            + (f"; refresh failed: {failure}" if failure else "")
+            + (f"; refresh failed: {failure}" if failure else ""),
+            # the reading is stale, not unknown — hand it to the guardrail so
+            # staleness alone (Epic 9: a 429'd refresh at 17% real usage)
+            # cannot pause a run whose last reading is nowhere near a limit
+            snapshot=UsageSnapshot(
+                **parse_limits(payload),
+                account=fetch_account if refreshed else account_identity(env=env),
+                fetched_at=mtime,
+                source="stale",
+            ),
+            age_s=age,
         )
 
     # A cache we did not refresh was written by the logged-in account's own

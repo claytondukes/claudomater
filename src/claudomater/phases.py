@@ -530,6 +530,11 @@ class PhaseOutcome:
     model: str | None = None
     attempts: int = 0
     verdicts: list[dict[str, Any]] = field(default_factory=list)
+    # Non-empty for EVERY non-verified, non-skipped outcome, each entry
+    # naming the gate that stopped the phase — a paused outcome carries its
+    # pause reason here too, so a consumer that wrongly routes a pause into
+    # a failure path still reports the cause (the Epic 9 severity run died
+    # as `run-failed` with reasons `[]` because pause populated nothing).
     failure_reasons: list[str] = field(default_factory=list)
     pause_reason: str | None = None
 
@@ -667,6 +672,19 @@ class PhaseRunner:
             if model is None:
                 outcome.status = "paused"
                 outcome.pause_reason = gate_reason
+                outcome.failure_reasons.append(
+                    self._scrub(
+                        f"paused: {spec.name!r} guardrail spawn gate: {gate_reason}"
+                    )
+                )
+                # Core owns the lifecycle stance: a pause PARKS the run —
+                # live and adoptable — it never ends it. The park event puts
+                # that stance in the log whatever the driver does next.
+                self.runlog.park(
+                    outcome.failure_reasons[-1],
+                    phase=spec.name,
+                    story_key=spec.story_key,
+                )
                 return outcome
             outcome.model = model
             outcome.attempts = attempt

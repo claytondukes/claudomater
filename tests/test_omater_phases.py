@@ -413,6 +413,30 @@ class TestGuardrailGate:
         assert executor.calls == []
         assert "never runs degraded" in outcome.pause_reason
 
+    def test_pause_names_its_gate_and_parks_the_run(self, tmp_path):
+        """Epic 9 incident: a driver routed 'paused' into its failure path
+        and the run died as `run-failed` with reasons `[]`. Two core-owned
+        fixes, pinned together: a paused outcome carries a failure reason
+        NAMING the gate (so even that buggy driver reports the cause), and
+        the runner PARKS the run — live and adoptable — whatever the driver
+        does next."""
+        runner, log, executor, _ = make_runner(
+            tmp_path,
+            [GOOD],
+            guardrail_check=lambda: Decision(
+                action="pause",
+                reasons=["usage unknown, failing closed: stale-cache: 429"],
+            ),
+        )
+        outcome = runner.run_phase(PhaseSpec("lessons", "claude-opus-5", "p"))
+        assert outcome.status == "paused"
+        (reason,) = outcome.failure_reasons
+        assert "paused" in reason and "'lessons'" in reason
+        assert "guardrail spawn gate" in reason and "stale-cache" in reason
+        parked = [e for e in log.events() if e["event"] == "run-parked"]
+        assert parked and parked[-1]["detail"]["reason"] == reason
+        assert log.is_live()  # parked = adoptable, never ended
+
 
 class TestFinalSalvage:
     def test_dirty_tree_is_committed_when_escalating(self, git_repo):
