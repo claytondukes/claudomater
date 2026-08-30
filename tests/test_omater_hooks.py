@@ -553,6 +553,17 @@ class TestBashFence:
             allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
             assert allow, (cmd, reason)
 
+    def test_prefix_of_unsupported_delimiter_is_not_the_delimiter(self, tmp_path):
+        """bash's delimiter for <<END@MARK is the WHOLE word — capturing
+        the END prefix let an in-body `END` line terminate the heredoc
+        early and exposed the never-executed redirect (false deny).
+        Unsupported delimiter words must reach the residual-<< wall."""
+        cmd = "cat <<END@MARK\nEND\ncat > /tmp_probe/not-executed\nEND@MARK"
+        p = payload("Bash", command=cmd)
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+
     def test_subshell_function_definition_body_never_executes(self, tmp_path):
         """`deploy() (cd /etc; cat > shadow)` only DEFINES deploy —
         applying the body's cd falsely denied shadow under a cwd the

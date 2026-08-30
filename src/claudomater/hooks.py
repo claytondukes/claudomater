@@ -296,8 +296,14 @@ def _arith_spans(
 # here-string (matching from its second `<` invented a heredoc named by
 # the here-string word), and arithmetic shifts are excluded by
 # _arith_spans at the call site.
+# The bare delimiter must end at a shell-token boundary: bash's delimiter
+# for `<<END@MARK` is the WHOLE word, and capturing the `END` prefix let
+# an in-body `END` line terminate the heredoc early — exposing body text
+# bash never executes (false deny). Unsupported delimiter words now fail
+# the match entirely and reach the residual-<< wall (fail open).
 _HEREDOC = re.compile(
-    r"((?<!<)<<(-)?(?!<)[ \t]*(?:(['\"])((?:(?!\3)[^\n])+)\3|([\w.+-]+))[^\n]*\n)"
+    r"((?<!<)<<(-)?(?!<)[ \t]*"
+    r"(?:(['\"])((?:(?!\3)[^\n])+)\3|([\w.+-]+)(?=[\s;&|<>()]|$))[^\n]*\n)"
     r".*?^(?(2)\t*)(?:\4|\5)$",
     re.DOTALL | re.MULTILINE,
 )
