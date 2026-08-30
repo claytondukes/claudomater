@@ -273,9 +273,15 @@ def read_usage(
 ) -> UsageSnapshot:
     """Refresh + read the usage snapshot, or raise UsageUnavailable.
 
-    Every read is mtime-gated: if the cache is stale beyond `max_stale`
-    after the refresh attempt, the numbers are UNKNOWN and the caller must
-    fail closed. The fake-usage env path goes through the same gate.
+    Every read is mtime-gated. Stale beyond `max_stale` after the refresh
+    attempt raises — but stale is not always unknown: when the cache's
+    recorded account provenance matches the active credential, the raise
+    carries the parsed last reading (`exc.snapshot`, source='stale', with
+    `exc.age_s`). Callers must hand the EXCEPTION to guardrails.evaluate,
+    which applies the staleness-AND-near-limit rule to a carried reading and
+    fails closed (pause) only when the raise carries none — treating every
+    stale raise as unknown would recreate the Epic 9 pause-at-17% incident.
+    The fake-usage env path goes through the same gate.
     """
     env = env if env is not None else os.environ  # type: ignore[assignment]
     now = now if now is not None else time.time()

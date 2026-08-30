@@ -143,6 +143,30 @@ class TestProjectConfig:
                 )
             )
 
+    def test_non_scalar_gate_values_fail_at_load_and_policy_serializes(
+        self, tmp_path
+    ):
+        """Round-4 finding: gates ride verbatim into policy(), which the run
+        log json.dumps'es — and yaml.safe_load happily produces a date for
+        `board_steps_required: 2026-08-30`, crashing start_run AFTER the run
+        directory exists. Non-scalar gate values are ConfigErrors at load,
+        and a loaded policy must always serialize."""
+        import json as _json
+
+        with pytest.raises(ConfigError, match="gates.board_steps_required"):
+            load_project_config(
+                write_project(
+                    tmp_path,
+                    "project: x\ngates:\n  board_steps_required: 2026-08-30\n",
+                )
+            )
+        cfg = load_project_config(
+            write_project(
+                tmp_path, "project: x\ngates:\n  board_steps_required: false\n"
+            )
+        )
+        _json.dumps(cfg.policy())  # the run-log snapshot must serialize
+
     def test_policy_changes_visibly_with_deployment_type(self, tmp_path):
         """AC: changing deployment_type visibly changes model chain, review
         floor, and CI tier (this dict is what run start logs)."""

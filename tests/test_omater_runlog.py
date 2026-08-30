@@ -317,6 +317,20 @@ class TestControl:
         assert not log.is_live()
         assert log.read_controls() == []
 
+    def test_refused_control_leaves_the_command_channel_clean(self, tmp_path):
+        """Round-4 finding: the terminal check, the control.jsonl write, and
+        the event append share ONE _append_lock critical section (which
+        finish() also takes), so 'check passed, owner finished, dead command
+        persisted' can no longer interleave. Contract pin: a refused control
+        leaves control.jsonl untouched."""
+        log = RunLog.create(tmp_path)
+        log.event("dev", "phase-spawn", {"model": "m", "attempt": 1})
+        sibling = RunLog.attach(tmp_path)
+        log.finish("run-complete")
+        with pytest.raises(RunError, match="nothing to act on"):
+            sibling.write_control("resume")
+        assert sibling.read_controls() == []
+
 
 class TestTranscriptPaths:
     """Report rough edge #1: transcript_path(phase, attempt) had no story key,
@@ -454,6 +468,25 @@ class TestAttachSeam:
         assert "torn-tail-repaired" in names
         assert names[-1] == "copilot-round"
         assert "phase-spawn" in names  # intact history untouched
+
+    def test_append_after_a_missing_final_newline_does_not_concatenate(
+        self, tmp_path
+    ):
+        """Round-4 finding (suppressed): a crash can land exactly between a
+        record's JSON bytes and its newline — the record is complete and
+        readable, but a plain append would concatenate onto it, silently
+        merging (and then losing) BOTH records. Appends normalize the
+        delimiter; nothing is discarded, so no repair event either."""
+        log = RunLog.create(tmp_path)
+        with open(log.run_dir / "events.jsonl", "a", encoding="utf-8") as fh:
+            fh.write(
+                '{"ts": "2026-08-30T00:00:00Z", "run_id": "x", '
+                '"phase": "dev", "event": "phase-spawn"}'
+            )  # complete record, missing only its newline
+        log.event("merge", "copilot-round", {"round": 1})
+        names = [e["event"] for e in log.events()]
+        assert names[-2:] == ["phase-spawn", "copilot-round"]
+        assert "torn-tail-repaired" not in names
 
 
 class TestPark:

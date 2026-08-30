@@ -346,6 +346,14 @@ class RunLog:
         try:
             obj = json.loads(last.decode("utf-8"))
             if isinstance(obj, dict) and "event" in obj:
+                if not raw.endswith(b"\n"):
+                    # A crash can land exactly between the JSON bytes and
+                    # their newline: the record is complete and readable, but
+                    # a plain append would concatenate onto it and corrupt
+                    # BOTH records. Normalize the delimiter — nothing is
+                    # discarded, so no repair event.
+                    with open(path, "ab") as fh:
+                        fh.write(b"\n")
                 return 0
         except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
             pass
@@ -565,25 +573,33 @@ class RunLog:
     def write_control(self, action: str, detail: Any = None) -> dict[str, Any]:
         if action not in CONTROL_ACTIONS:
             raise RunError(f"unknown control action: {action}")
-        # An ended run accepts no control: resume/abort/approve have nothing
-        # to act on, and the control-* event would land after the terminal
-        # record and flip is_live() back on. (For attach()-obtained logs the
-        # event append re-checks this atomically under the append lock; this
-        # check also keeps control.jsonl itself clean of dead commands.)
-        events = self.events()
-        if events and events[-1]["event"] in TERMINAL_EVENTS:
-            raise RunError(
-                f"run {self.run_id} already ended; control {action!r} has "
-                "nothing to act on — start a new run instead"
-            )
         record = {"ts": _utc_now(), "action": action}
         if detail is not None:
             record["detail"] = detail
-        with open(self.run_dir / CONTROL_JSONL, "a", encoding="utf-8") as fh:
-            fh.write(json.dumps(record, sort_keys=True) + "\n")
-            fh.flush()
-            os.fsync(fh.fileno())
-        self.event("control", f"control-{action}", detail)
+        # An ended run accepts no control: resume/abort/approve have nothing
+        # to act on, and the control-* event would land after the terminal
+        # record and flip is_live() back on. The terminal check and BOTH
+        # writes (command channel + event) share one critical section — an
+        # unlocked check could pass, the owner finish, and a dead command
+        # still land in control.jsonl even though the event append raised.
+        # _append_event, not event(): flock does not re-enter in-process.
+        with self._append_lock():
+            discarded = self._repair_torn_tail()
+            if discarded:
+                self._append_event(
+                    "run", "torn-tail-repaired", {"discarded_bytes": discarded}
+                )
+            events = self.events()
+            if events and events[-1]["event"] in TERMINAL_EVENTS:
+                raise RunError(
+                    f"run {self.run_id} already ended; control {action!r} has "
+                    "nothing to act on — start a new run instead"
+                )
+            with open(self.run_dir / CONTROL_JSONL, "a", encoding="utf-8") as fh:
+                fh.write(json.dumps(record, sort_keys=True) + "\n")
+                fh.flush()
+                os.fsync(fh.fileno())
+            self._append_event("control", f"control-{action}", detail)
         return record
 
     def read_controls(self) -> list[dict[str, Any]]:

@@ -303,6 +303,19 @@ def load_project_config(root: Path | str) -> ProjectConfig:
         )
 
     gates_raw = _require_mapping("gates", data.get("gates"))
+    # Gates are scalar knobs, and the mapping rides verbatim into policy()
+    # — the run-log snapshot json.dumps'es. yaml.safe_load happily produces
+    # dates and other non-JSON types (`board_steps_required: 2026-08-30`),
+    # which would crash start_run AFTER the run directory exists. Fail at
+    # LOAD instead, like every other knob.
+    for key, value in gates_raw.items():
+        if not isinstance(key, str):
+            raise ConfigError(f"{PROJECT_CONFIG_NAME}: gates keys must be strings, got {key!r}")
+        if value is not None and not isinstance(value, (str, int, float, bool)):
+            raise ConfigError(
+                f"{PROJECT_CONFIG_NAME}: gates.{key} must be a scalar "
+                f"(string/number/bool/null), got {type(value).__name__}: {value!r}"
+            )
     try:
         # Validate the alarm knob AT LOAD, like every other knob — a typo'd
         # value must fail here, not mid-run when policy() first resolves it.
