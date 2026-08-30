@@ -2707,6 +2707,31 @@ class TestFenceScopeP11:
         assert hooks.deprovision(tmp_path) is True
         assert hooks.verify(tmp_path, require=False) == []
 
+    def test_unwritable_settings_raise_typed_errors(self, tmp_path):
+        """Copilot round-2 finding (suppressed pair): provision/deprovision
+        raised raw OSError from filesystem writes, bypassing callers' typed
+        HookProvisionError handling - `omater start`/`teardown` crashed with
+        a traceback instead of a user-facing error."""
+        import pytest
+
+        hooks.provision(tmp_path)  # settings exist, hook armed
+        settings_file = hooks.settings_path(tmp_path)
+        settings_file.chmod(0o400)  # readable, not writable
+        try:
+            with pytest.raises(hooks.HookProvisionError, match="cannot write"):
+                hooks.deprovision(tmp_path)
+        finally:
+            settings_file.chmod(0o600)
+        # provision into an unwritable parent: same typed error
+        blocked = tmp_path / "blocked"
+        blocked.mkdir()
+        blocked.chmod(0o500)
+        try:
+            with pytest.raises(hooks.HookProvisionError, match="cannot write"):
+                hooks.provision(blocked)
+        finally:
+            blocked.chmod(0o700)
+
     def test_teardown_cli_disarms(self, tmp_path, capsys):
         from claudomater.cli import EXIT_OK, main
 

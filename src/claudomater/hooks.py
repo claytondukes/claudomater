@@ -2042,9 +2042,20 @@ def provision(project_root: Path | str) -> bool:
     if existing is not None:
         pre.remove(existing)
     pre.append(_our_entry())
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(settings, indent=2) + "\n", encoding="utf-8")
+    _write_settings(path, settings)
     return True
+
+
+def _write_settings(path: Path, settings: dict[str, Any]) -> None:
+    """All settings writes go through here: a raw OSError (unwritable
+    .claude dir, read-only checkout) would bypass callers' typed
+    HookProvisionError handling and crash `omater start`/`teardown` with a
+    traceback instead of a user-facing error."""
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(settings, indent=2) + "\n", encoding="utf-8")
+    except OSError as exc:
+        raise HookProvisionError(f"cannot write {path}: {exc}") from exc
 
 
 def deprovision(project_root: Path | str) -> bool:
@@ -2067,7 +2078,7 @@ def deprovision(project_root: Path | str) -> bool:
         del settings["hooks"]["PreToolUse"]
     if not settings["hooks"]:
         del settings["hooks"]
-    path.write_text(json.dumps(settings, indent=2) + "\n", encoding="utf-8")
+    _write_settings(path, settings)
     return True
 
 
