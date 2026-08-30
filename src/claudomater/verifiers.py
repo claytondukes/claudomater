@@ -133,7 +133,18 @@ def result_file_exists(
     `..`-carrying entry is refused (the policy is "this in-tree directory
     may point elsewhere", never "also allow that other location"), and
     nothing outside the declared roots gains anything."""
-    roots = [artifact_roots] if isinstance(artifact_roots, str) else list(artifact_roots)
+    # str | list | tuple ONLY: any other iterable (a dict from a YAML
+    # misdeclaration would silently become its KEYS, a set would reorder)
+    # is refused outright — containment exceptions must be legible.
+    if isinstance(artifact_roots, str):
+        roots = [artifact_roots]
+    elif isinstance(artifact_roots, (list, tuple)):
+        roots = list(artifact_roots)
+    else:
+        raise VerifierError(
+            "artifact_roots must be a string or a list of strings, got "
+            f"{type(artifact_roots).__name__}"
+        )
     for ar in roots:
         # A misdeclared spec must fail closed at build time, not silently
         # widen containment: run_verifiers turns this raise into a failed
@@ -171,8 +182,16 @@ def result_file_exists(
         for ar in roots:
             try:
                 allowed.append((root / ar).resolve())
-            except (OSError, RuntimeError):
-                continue  # an unresolvable declared root allows nothing
+            except (OSError, RuntimeError) as exc:
+                # Silently skipping the root would fail closed but LIE about
+                # why (the containment message would blame the artifact
+                # path) — and a misleading verifier message is itself a
+                # hazard (F3). Name the actual problem.
+                return Verdict(
+                    "result_file_exists",
+                    False,
+                    f"declared artifact root {ar!r} cannot be resolved: {exc}",
+                )
         if not any(path == base or base in path.parents for base in allowed):
             where = "the project root"
             if roots:

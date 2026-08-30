@@ -1299,11 +1299,17 @@ class TestWaitForUnpark:
         with pytest.raises(RunError, match="no run-parked event"):
             wait_for_unpark(log, lambda: Decision(action="ok"), sleep=lambda s: None)
 
-    def test_timeout_leaves_the_run_parked(self, tmp_path):
+    def test_timeout_honors_max_wait_with_a_final_deadline_poll(self, tmp_path):
+        """The documented max wait is the max wait: the loop must not cut
+        the last interval short (max=1000/poll=300 used to time out at
+        ~900s), and the deadline itself gets a final poll + control read —
+        so polls land at 0, 300, 600, 900, and 1000."""
         log = self._parked(tmp_path)
         clock_box = [0.0]
+        sleeps = []
 
         def sleep(s):
+            sleeps.append(s)
             clock_box[0] += s
 
         wake = wait_for_unpark(
@@ -1315,7 +1321,9 @@ class TestWaitForUnpark:
             clock=lambda: clock_box[0],
         )
         assert wake.outcome == "timeout"
-        assert wake.polls >= 1
+        assert wake.waited_s == 1000
+        assert wake.polls == 5
+        assert sleeps == [300, 300, 300, 100]
         names = [e["event"] for e in log.events()]
         assert "park-wait-timeout" in names
         # still parked: completing it must be refused, aborting allowed

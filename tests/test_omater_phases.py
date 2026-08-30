@@ -1222,6 +1222,38 @@ class TestArtifactRoots:
         for bad in ("/abs/path", "../outside", ""):
             with pytest.raises(VerifierError, match="artifact root"):
                 result_file_exists("artifact", artifact_roots=[bad])
+
+    def test_non_sequence_declarations_are_refused_not_iterated(self, tmp_path):
+        """Only str | list | tuple: a dict (a YAML misdeclaration) would
+        silently become its KEYS and widen containment illegibly."""
+        for bad in ({"a": "b"}, {"a"}, 7):
+            with pytest.raises(VerifierError, match="artifact_roots must be"):
+                result_file_exists("artifact", artifact_roots=bad)
+
+    def test_unresolvable_declared_root_is_named_not_blamed_on_the_artifact(
+        self, tmp_path
+    ):
+        """A declared root that cannot be resolved must fail the verdict by
+        NAME — silently skipping it fails closed but blames the artifact
+        path ('outside the project root'), and a misleading verifier message
+        is itself the F3 hazard."""
+        from pathlib import Path
+
+        class BoobyTrappedPath(type(Path())):
+            def resolve(self, *a, **kw):
+                if self.name == "badroot":
+                    raise OSError("simulated unresolvable root")
+                return super().resolve(*a, **kw)
+
+        (tmp_path / "out.txt").write_text("x", encoding="utf-8")
+        verdict = result_file_exists("artifact", artifact_roots=["badroot"])(
+            VerifierContext(
+                project_root=BoobyTrappedPath(tmp_path),
+                result={"artifact": "out.txt"},
+            )
+        )
+        assert not verdict.ok
+        assert "'badroot' cannot be resolved" in verdict.detail
         ok, verdicts = run_verifiers(
             [{"result_file_exists": {"name": "artifact", "artifact_roots": [".."]}}],
             VerifierContext(project_root=tmp_path, result={"artifact": "x"}),

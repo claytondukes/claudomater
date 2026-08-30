@@ -509,16 +509,26 @@ def wait_for_unpark(
             )
             return wake
         waited = clock() - start
-        if max_wait_s is not None and waited + poll_interval_s > max_wait_s:
-            runlog.event(
-                "run",
-                "park-wait-timeout",
-                {"polls": polls, "waited_s": round(waited, 1)},
-            )
-            return ParkWake(
-                outcome="timeout", decision=decision, polls=polls, waited_s=waited
-            )
-        sleep(poll_interval_s)
+        if max_wait_s is not None:
+            remaining = max_wait_s - waited
+            if remaining <= 0:
+                # timed out AFTER a poll at (or past) the deadline — the
+                # documented max wait is honored, never cut a full interval
+                # short, and the final control read happened
+                runlog.event(
+                    "run",
+                    "park-wait-timeout",
+                    {"polls": polls, "waited_s": round(waited, 1)},
+                )
+                return ParkWake(
+                    outcome="timeout",
+                    decision=decision,
+                    polls=polls,
+                    waited_s=waited,
+                )
+            sleep(min(poll_interval_s, remaining))
+        else:
+            sleep(poll_interval_s)
 
 
 def next_model(current: str, degrade_path: list[str]) -> str:
