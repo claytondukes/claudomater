@@ -1227,7 +1227,9 @@ class TestArtifactRoots:
         """Only str | list | tuple: a dict (a YAML misdeclaration) would
         silently become its KEYS and widen containment illegibly."""
         for bad in ({"a": "b"}, {"a"}, 7):
-            with pytest.raises(VerifierError, match="artifact_roots must be"):
+            with pytest.raises(
+                VerifierError, match="a string, or a list/tuple of strings"
+            ):
                 result_file_exists("artifact", artifact_roots=bad)
 
     def test_unresolvable_declared_root_is_named_not_blamed_on_the_artifact(

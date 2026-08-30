@@ -8,7 +8,7 @@ from __future__ import annotations
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path, PurePath
-from typing import Any, Callable, Sequence
+from typing import Any, Callable
 
 
 @dataclass
@@ -112,7 +112,7 @@ def result_field(name: str, expected: Any = ...) -> Verifier:
 
 
 def result_file_exists(
-    name: str, artifact_roots: Sequence[str] | str = ()
+    name: str, artifact_roots: str | list[str] | tuple[str, ...] = ()
 ) -> Verifier:
     """The file the agent NAMED in result field `name` exists inside the
     project root — the result-aware companion to `files_exist`. `files_exist`
@@ -142,8 +142,8 @@ def result_file_exists(
         roots = list(artifact_roots)
     else:
         raise VerifierError(
-            "artifact_roots must be a string or a list of strings, got "
-            f"{type(artifact_roots).__name__}"
+            "artifact_roots must be a string, or a list/tuple of strings, "
+            f"got {type(artifact_roots).__name__}"
         )
     for ar in roots:
         # A misdeclared spec must fail closed at build time, not silently
