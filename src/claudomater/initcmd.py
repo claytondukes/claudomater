@@ -110,8 +110,9 @@ def run_init(root: Path | str, force: bool = False) -> list[str]:
         # A hook whose command isn't on PATH exits 127, which Claude Code
         # treats as allow — the fence would be a silent no-op.
         actions.append(
-            "WARNING: 'omater' is not on PATH; the provisioned hook will be "
-            "a no-op until claudomater is installed (pip install claudomater)"
+            "WARNING: 'omater' is not on PATH; the write fence that "
+            "`omater start` arms would be a silent no-op until claudomater "
+            "is installed (pip install claudomater)"
         )
     return actions
 

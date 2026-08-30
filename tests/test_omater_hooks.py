@@ -2770,6 +2770,55 @@ class TestFenceScopeP11:
             (problem,) = hooks.verify(tmp_path, require=False)
             assert needle in problem, malformed
 
+    def test_duplicate_leftover_entries_are_all_handled(self, tmp_path):
+        """Copilot round-5 finding pair: provision removed only the FIRST
+        matching entry (a stale twin survived and verify reported drift
+        forever), and teardown reported success while a duplicate kept
+        fencing agents. Both now sweep every matching entry."""
+        path = hooks.settings_path(tmp_path)
+        path.parent.mkdir(parents=True)
+        stale = {
+            "matcher": "Write",
+            "hooks": [{"type": "command", "command": "omater hook pre-tool-use --root /old"}],
+        }
+        path.write_text(
+            json.dumps({"hooks": {"PreToolUse": [stale, dict(stale)]}}),
+            encoding="utf-8",
+        )
+        assert hooks.provision(tmp_path) is True
+        settings = json.loads(path.read_text())
+        assert len(hooks._find_entries(settings)) == 1
+        assert hooks.verify(tmp_path, require=True) == []
+        # teardown from a duplicated state removes every entry
+        path.write_text(
+            json.dumps({"hooks": {"PreToolUse": [stale, dict(stale)]}}),
+            encoding="utf-8",
+        )
+        assert hooks.deprovision(tmp_path) is True
+        assert hooks._find_entries(json.loads(path.read_text())) == []
+
+    def test_teardown_refuses_malformed_settings_loudly(self, tmp_path):
+        """Copilot round-5 finding: a structurally-invalid file fell through
+        to 'nothing to remove' - teardown claimed the hook was gone on a
+        file it could not honestly read. Typed error instead."""
+        import pytest
+
+        path = hooks.settings_path(tmp_path)
+        path.parent.mkdir(parents=True)
+        for malformed in ({"hooks": "oops"}, {"hooks": {"PreToolUse": {}}}):
+            path.write_text(json.dumps(malformed), encoding="utf-8")
+            with pytest.raises(hooks.HookProvisionError, match="fix it by hand"):
+                hooks.deprovision(tmp_path)
+
+    def test_init_path_warning_matches_the_new_lifecycle(self, tmp_path, monkeypatch):
+        """Copilot round-5 finding: the PATH warning still said 'the
+        provisioned hook' though init no longer provisions - the warning
+        now names `omater start` as what arms the fence."""
+        monkeypatch.setattr("shutil.which", lambda _: None)
+        actions = run_init(tmp_path)
+        (warning,) = [a for a in actions if a.startswith("WARNING")]
+        assert "omater start" in warning and "provisioned hook" not in warning
+
     def test_teardown_cli_disarms(self, tmp_path, capsys):
         from claudomater.cli import EXIT_OK, main
 

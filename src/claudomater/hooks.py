@@ -2005,20 +2005,31 @@ def _our_entry() -> dict[str, Any]:
     }
 
 
-def _find_entry(settings: dict[str, Any]) -> dict[str, Any] | None:
+def _find_entries(settings: dict[str, Any]) -> list[dict[str, Any]]:
+    """EVERY PreToolUse entry carrying our hook marker. Duplicates are a
+    real leftover shape (hand edits, crashed older versions) - handling
+    only the first let provision leave a stale twin behind and let teardown
+    report success while agents stayed fenced by the survivor."""
     hooks_cfg = settings.get("hooks")
     if not isinstance(hooks_cfg, dict):
-        return None
+        return []
     entries = hooks_cfg.get("PreToolUse")
     if not isinstance(entries, list):
-        return None
+        return []
+    found: list[dict[str, Any]] = []
     for entry in entries:
         if not isinstance(entry, dict):
             continue
         for hook in entry.get("hooks") or []:
             if isinstance(hook, dict) and HOOK_MARKER in (hook.get("command") or ""):
-                return entry
-    return None
+                found.append(entry)
+                break
+    return found
+
+
+def _find_entry(settings: dict[str, Any]) -> dict[str, Any] | None:
+    found = _find_entries(settings)
+    return found[0] if found else None
 
 
 def provision(project_root: Path | str) -> bool:
@@ -2026,8 +2037,8 @@ def provision(project_root: Path | str) -> bool:
     preserves everything else). Returns True if the file changed."""
     path = settings_path(project_root)
     settings = _load_settings(path)
-    existing = _find_entry(settings)
-    if existing == _our_entry():
+    existing = _find_entries(settings)
+    if existing == [_our_entry()]:
         return False
     if "hooks" in settings and not isinstance(settings["hooks"], dict):
         raise HookProvisionError(
@@ -2039,8 +2050,11 @@ def provision(project_root: Path | str) -> bool:
         raise HookProvisionError(
             f"{path}: hooks.PreToolUse is not a list — fix it by hand before provisioning"
         )
-    if existing is not None:
-        pre.remove(existing)
+    # ALL matching entries go, then the one canonical entry lands —
+    # duplicates would otherwise survive as stale twins that keep verify
+    # reporting drift forever.
+    for entry in existing:
+        pre.remove(entry)
     pre.append(_our_entry())
     _write_settings(path, settings)
     return True
@@ -2069,11 +2083,24 @@ def deprovision(project_root: Path | str) -> bool:
     if not path.exists():
         return False
     settings = _load_settings(path)
-    entry = _find_entry(settings)
-    if entry is None:
+    # A structurally-invalid file is reported loudly, never blessed with
+    # "nothing to remove": teardown's contract is 'our hook is GONE', and
+    # on a broken file that claim cannot be made honestly.
+    if "hooks" in settings and not isinstance(settings["hooks"], dict):
+        raise HookProvisionError(
+            f"{path}: 'hooks' is not a mapping — fix it by hand before teardown"
+        )
+    hooks_cfg = settings.get("hooks", {})
+    if "PreToolUse" in hooks_cfg and not isinstance(hooks_cfg["PreToolUse"], list):
+        raise HookProvisionError(
+            f"{path}: hooks.PreToolUse is not a list — fix it by hand before teardown"
+        )
+    entries = _find_entries(settings)
+    if not entries:
         return False
     pre = settings["hooks"]["PreToolUse"]
-    pre.remove(entry)
+    for entry in entries:  # every duplicate goes, not just the first
+        pre.remove(entry)
     if not pre:
         del settings["hooks"]["PreToolUse"]
     if not settings["hooks"]:
