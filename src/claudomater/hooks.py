@@ -1057,6 +1057,7 @@ def resolved_bash_targets(
         if _real_anchor(m):
             events.append((m.start(), "hard", None))
     dead_spans: list[tuple[int, int]] = []
+    func_names: set[str] = set()
     for m in _FUNC_DEF.finditer(scannable):
         # definitions execute nothing (see _FUNC_DEF): a bounded body is
         # a dead span; an unmatchable one falls back to the wall
@@ -1065,15 +1066,34 @@ def resolved_bash_targets(
         if m.group("fn") is not None:
             def_start = m.start("fn")
             opener: int | None = m.end() - 1
+            name_m = re.match(r"[A-Za-z_][A-Za-z0-9_]*", scannable[def_start:])
         else:
             def_start = m.start("kw")
             kw_body = _FUNCTION_KW_BODY.match(scannable, m.end())
             opener = kw_body.start(1) if kw_body else None
+            name_m = re.match(r"[ \t]*([A-Za-z_][A-Za-z0-9_]*)", scannable[m.end() :])
+        if name_m:
+            func_names.add(name_m.group(name_m.lastindex or 0))
         end = _func_body_end(scannable, opener) if opener is not None else None
         if end is None:
             events.append((def_start, "wall", None))
         else:
             dead_spans.append((def_start, end))
+    for name in func_names:
+        # INVOKING a defined function runs its body in the current shell
+        # — it may cd anywhere (`f() { cd <root>; }; cd /etc; f` really
+        # returns in-root, and keeping /etc falsely denied the write).
+        # A known name at command position makes the cwd unknowable.
+        for im in re.finditer(
+            r"(?:^|[\n;&|({])\s*(?:![ \t]+)*"
+            + re.escape(name)
+            + r"(?![^\s;&|)<>\n])",
+            scannable,
+        ):
+            if _real_anchor(im):
+                events.append(
+                    (_segment_boundary(scannable, im.end()), "opaque", None)
+                )
     for pos in _bare_ampersands(scannable, arith):
         events.append((pos, "opaque", None))
     for m in _SET_PHYSICAL.finditer(scannable):

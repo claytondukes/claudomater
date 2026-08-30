@@ -553,6 +553,24 @@ class TestBashFence:
             allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
             assert allow, (cmd, reason)
 
+    def test_invoking_a_defined_function_voids_tracking(self, tmp_path):
+        """`f() { cd <root>; }; cd /etc; f; cat > out.txt` writes IN-root
+        (the invocation runs the body's cd) — keeping /etc falsely denied
+        it. A defined name at command position makes the cwd unknowable
+        (fail open); an UNDEFINED word leaves tracking alone (deny keeps
+        working)."""
+        cmd = f"f() {{ cd {tmp_path}; }}; cd /etc; f; cat > out.txt"
+        p = payload("Bash", command=cmd)
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+        p = payload(
+            "Bash", command="g() { cd /somewhere; }; cd /etc; h; cat > passwd"
+        )
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+
     def test_double_dash_ends_writer_option_parsing(self, tmp_path):
         """`touch -- -probe` creates the FILE -probe — skipping every
         dash token hid the write behind the option filter."""
