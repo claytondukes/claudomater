@@ -553,6 +553,34 @@ class TestBashFence:
             allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
             assert allow, (cmd, reason)
 
+    def test_path_qualified_writers_stay_recognized(self, tmp_path):
+        """`/bin/touch`, `/usr/bin/tee`, and `./tools/cp` are the same
+        statically identifiable writers — requiring bare names regressed
+        them to unrecognized. An argument-position path stays inert."""
+        for cmd in (
+            "/bin/touch /tmp_probe/x",
+            "echo x | /usr/bin/tee /tmp_probe/t",
+            "./tools/cp x /tmp_probe/c",
+        ):
+            p = payload("Bash", command=cmd)
+            p["cwd"] = str(tmp_path)
+            allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+            assert not allow, cmd
+        p = payload("Bash", command="echo /bin/touch /tmp_probe/x")
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+
+    def test_backgrounded_set_physical_does_not_flip_the_parent(self, tmp_path):
+        """`set -P & cd sub` backgrounds the mode flip into a subshell —
+        the parent stays logical and the cd stays tracked (the leaked
+        setmode made it unknowable)."""
+        (tmp_path / "sub").mkdir()
+        [(_, resolved)] = hooks.resolved_bash_targets(
+            "set -P & cd sub && cat > out.txt", tmp_path
+        )
+        assert resolved is not None
+
     def test_pipeline_invoked_functions_keep_the_parent_cwd(self, tmp_path):
         """`true | f` runs f in the pipeline's subshell — the parent cwd
         is untouched, and voiding on the invocation hid the recognized

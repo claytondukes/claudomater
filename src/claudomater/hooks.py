@@ -562,19 +562,27 @@ _CMD_ANCHOR = (
 # separator crossed command-ending newlines and absorbed the NEXT
 # command's words as operands (`mkdir\necho passwd` creates nothing, but
 # echo/passwd were extracted as mkdir targets and falsely denied).
+# path-qualified invocations (`/bin/touch`, `./tools/cp`) are the same
+# statically identifiable writers — requiring bare names regressed them
+# to unrecognized
+_CMD_PATH = r"(?:[^\s;|&<>()]*/)?"
 _TEE = re.compile(
-    _CMD_ANCHOR + r"tee[ \t]+(?:-[a-zA-Z]+[ \t]+)*(?P<ops>(?:[^\s;|&<>()]+[ \t]*)+)"
+    _CMD_ANCHOR
+    + _CMD_PATH
+    + r"tee[ \t]+(?:-[a-zA-Z]+[ \t]+)*(?P<ops>(?:[^\s;|&<>()]+[ \t]*)+)"
 )
 _CREATE = re.compile(
     _CMD_ANCHOR
+    + _CMD_PATH
     + r"(?P<cmd>mkdir|touch)[ \t]+(?:-[a-zA-Z=]+[ \t]+)*(?P<ops>(?:[^\s;|&<>()]+[ \t]*)+)"
 )
-_DD_OF = re.compile(_CMD_ANCHOR + r"dd\b[^;|&\n]*\bof=([^\s;|&<>()]+)")
+_DD_OF = re.compile(_CMD_ANCHOR + _CMD_PATH + r"dd\b[^;|&\n]*\bof=([^\s;|&<>()]+)")
 # the verb is CAPTURED: searching the whole match for a verb name found
 # one inside an assignment prefix (`X=cp rsync -t ...`) and applied cp's
 # -t semantics to rsync, letting the real destination through
 _COPY = re.compile(
     _CMD_ANCHOR
+    + _CMD_PATH
     + r"(?P<cmd>cp|mv|rsync|install)[ \t]+(?:-[^\s]+[ \t]+)*"
     + r"(?:[^\s;|&<>()]+[ \t]+)+(?P<dest>[^\s;|&<>()]+)"
 )
@@ -1528,6 +1536,7 @@ def resolved_bash_targets(
     current: Path | None = cwd
     cd_applied_in_list = False
     list_start_cwd: Path | None = cwd  # snapshot at each and-or list start
+    list_start_mode: bool | None = False  # ... and the cd mode's snapshot
     dead = False  # hard opacity: no cd may recover tracking anymore
     walled = False  # unparseable remainder: even absolute targets fail open
     physical_mode: bool | None = False  # bash default -L; None = unknowable
@@ -1576,13 +1585,16 @@ def resolved_bash_targets(
         if kind == "listsep":
             cd_applied_in_list = False
             list_start_cwd = current
+            list_start_mode = physical_mode
             continue
         if kind == "bgamp":
             # the & backgrounds everything since the list started: the
-            # PARENT never experienced any of it — restore the snapshot
-            # (unless a hard compound made positions here unparseable)
+            # PARENT never experienced any of it — cwd AND cd mode both
+            # (`set -P & ...` flips nothing in the parent). No restore
+            # when a hard compound made positions here unparseable.
             if not dead:
                 current = list_start_cwd
+                physical_mode = list_start_mode
             cd_applied_in_list = False
             continue
         if kind == "setmode":
