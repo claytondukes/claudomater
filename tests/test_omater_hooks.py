@@ -553,6 +553,20 @@ class TestBashFence:
             allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
             assert allow, (cmd, reason)
 
+    def test_unmatched_paren_outside_case_is_a_syntax_error(self, tmp_path):
+        """`) touch /tmp_probe/x` is rejected by bash before anything
+        runs — anchoring on the stray ) falsely denied a write that never
+        happens. Inside a live `case ... in` the arm's ) still anchors
+        (and denies)."""
+        p = payload("Bash", command=") touch /tmp_probe/x")
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+        p = payload("Bash", command="case x in x) touch /tmp_probe/x;; esac")
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+
     def test_shell_only_wrappers_after_exec_wrappers_fail_open(self, tmp_path):
         """`env command touch /x` asks env to run an external program
         NAMED command — touch never runs (false deny closed). The shell

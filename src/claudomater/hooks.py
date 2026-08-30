@@ -982,14 +982,40 @@ def _positioned_write_targets(scannable: str) -> list[tuple[int, str]]:
                 depth -= 1
             else:
                 unmatched_close.add(k)
+    # an unmatched ) is a case-ARM terminator only inside a live
+    # `case ... in` region — a bare `) touch /f` is a syntax error bash
+    # rejects before anything runs, and anchoring on it falsely denied a
+    # write that never happens
+    case_live: list[tuple[int, int]] = []
+    pending_case = False
+    open_in: int | None = None
+    for wm in re.finditer(
+        r"(?<![^\s;&|({])(case|in|esac)(?![^\s;&|)<>\n])", scannable
+    ):
+        w = wm.group(1)
+        if w == "case":
+            pending_case = True
+        elif w == "in" and pending_case:
+            open_in = wm.end()
+            pending_case = False
+        elif w == "esac" and open_in is not None:
+            case_live.append((open_in, wm.start()))
+            open_in = None
+    if open_in is not None:
+        case_live.append((open_in, len(scannable)))
+    _in_case = _span_lookup(case_live)
 
     def anchored_on_syntax(m: re.Match) -> bool:
         first = scannable[m.start()]
         if first in ";&|()" and _escape_parity(scannable, m.start()) == 1:
             return True  # escaped separator: word data (`echo \; mkdir x`)
-        if first == ")" and m.start() not in unmatched_close:
+        if first == ")" and (
+            m.start() not in unmatched_close or not _in_case(m.start())
+        ):
             # a substitution/subshell close is not a command anchor
-            # (`echo $(x) touch /f` prints); an unmatched case-ARM `)` is
+            # (`echo $(x) touch /f` prints), and an unmatched ) outside a
+            # live `case ... in` is a syntax error bash rejects; only a
+            # case-ARM's ) anchors
             return True
         if (
             first == "&"
