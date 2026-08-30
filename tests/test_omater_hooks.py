@@ -553,6 +553,32 @@ class TestBashFence:
             allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
             assert allow, (cmd, reason)
 
+    def test_unterminated_quote_is_a_syntax_error_not_a_write(self, tmp_path):
+        """`echo " > /tmp_probe/out` hits EOF inside the quote: bash
+        rejects the whole input and writes NOTHING — the exposed redirect
+        was a false deny. The unterminated span is data to EOF (same rule
+        as unbalanced arithmetic)."""
+        for cmd in ('echo " > /tmp_probe/out', "echo ' > /tmp_probe/out"):
+            p = payload("Bash", command=cmd)
+            p["cwd"] = str(tmp_path)
+            allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+            assert allow, (cmd, reason)
+
+    def test_brace_group_anchor_requires_trailing_whitespace(self, tmp_path):
+        """`echo foo{[[ x > /tmp_probe/out ]]` is a plain word plus a
+        REAL redirect — bash's brace-group reserved word needs whitespace
+        after {, and anchoring a comparison span on the mid-word { masked
+        the write. A real group-open `{ [[ ... ]]` still masks its
+        comparison (no false deny)."""
+        p = payload("Bash", command="echo foo{[[ x > /tmp_probe/out ]]")
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+        p = payload("Bash", command="cd /etc; { [[ x > passwd ]]; }; echo done")
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+
     def test_command_word_patterns_require_command_position(self, tmp_path):
         """`echo mkdir passwd` PRINTS words — matching the argument
         resolved a phantom target against the tracked /etc (false deny).

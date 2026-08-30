@@ -89,8 +89,8 @@ def _lex_spans(text: str) -> list[tuple[str, int, int]]:
     is a literal char; after an EVEN run (`\\\\"` = escaped backslash +
     real quote) it delimits. Inside double quotes \\" does not end the
     span; a plain single-quoted span cannot contain escapes in bash;
-    ANSI-C $'...' can. Unterminated quotes yield no span
-    (deny-on-recognized).
+    ANSI-C $'...' can. An unterminated quote spans to EOF: bash rejects
+    the whole input, so nothing after the quote executes.
 
     A comment starts at `#` at the start of a WORD: after whitespace, a
     shell metacharacter, the string start — or a GROUP-closing `)`
@@ -193,10 +193,16 @@ def _lex_spans(text: str) -> list[tuple[str, int, int]]:
                 if hazard or expect:
                     spans.append(("quote", i, n))
                     break
-            if end != -1:
-                spans.append(("quote", i, end + 1))
-                i = end + 1
-                continue
+            if end == -1:
+                # an unterminated quote hits EOF: bash rejects the whole
+                # input and executes NOTHING — leaving its text scannable
+                # falsely denied a redirect that never runs (same rule as
+                # unbalanced arithmetic: remainder = data)
+                spans.append(("quote", i, n))
+                break
+            spans.append(("quote", i, end + 1))
+            i = end + 1
+            continue
         elif c == "(" and not in_backtick and not escaped(i):
             # \\( is word data, not a group open; parens inside backticks
             # belong to the substitution's own parser
@@ -320,8 +326,12 @@ def _span_lookup(spans: list[tuple[int, int]]) -> Callable[[int], bool]:
 
 # the `!` status-negation reserved word keeps command position:
 # `! [[ x > passwd ]]` is still a comparison (denying its phantom
-# redirect was a false deny)
-_COND_OPEN = re.compile(r"(?:^|[\n;&|({])\s*(?:![ \t]+)*\[\[(?=[ \t\n])")
+# redirect was a false deny). The `{` anchor is the brace-group reserved
+# word, which bash only recognizes FOLLOWED BY whitespace — a mid-word
+# `{` (`echo foo{[[ ...`) anchored a span that masked a real redirect.
+_COND_OPEN = re.compile(
+    r"(?:^|[\n;&|(]|\{(?=[ \t\n]))\s*(?:![ \t]+)*\[\[(?=[ \t\n])"
+)
 _COND_CLOSE = re.compile(r"(?:^|[ \t\n])(\]\])(?=[\s;&|)<>]|$)")
 
 
