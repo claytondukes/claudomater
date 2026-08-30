@@ -1265,16 +1265,39 @@ class TestWaitForUnpark:
         wake = wait_for_unpark(log, lambda: Decision(action="pause"), sleep=lambda s: None)
         assert wake.outcome == "abort"
 
-    def test_controls_from_before_the_park_are_not_consumed(self, tmp_path):
+    def test_controls_from_before_the_park_are_not_consumed(
+        self, tmp_path, monkeypatch
+    ):
         """A resume answered to an EARLIER state must not wake a later park:
-        only commands at-or-after the park are pending."""
+        only commands at-or-after the park are pending. Timestamps have 1s
+        resolution, so the clock is faked to tick per write instead of
+        sleeping the suite past a real second boundary."""
+        import itertools
+
+        ticker = itertools.count()
+
+        def fake_now():
+            t = next(ticker)
+            return f"2026-08-30T00:{t // 60:02d}:{t % 60:02d}Z"
+
+        monkeypatch.setattr("claudomater.runlog._utc_now", fake_now)
         log = RunLog.create(tmp_path)
         log.write_control("resume")
-        time.sleep(1.1)  # event ts has 1s resolution; the park must be later
         log.park("5h window at 100%")
         decisions = [Decision(action="pause"), Decision(action="ok")]
         wake = wait_for_unpark(log, lambda: decisions.pop(0), sleep=lambda s: None)
         assert wake.outcome == "capacity"
+
+    def test_unparked_run_is_refused(self, tmp_path):
+        """With no run-parked event an empty park timestamp would make EVERY
+        stale control eligible — a leftover abort would kill a run that was
+        never parked. Fail loudly instead."""
+        from claudomater.runlog import RunError
+
+        log = RunLog.create(tmp_path)
+        log.write_control("abort")  # stale command lying in wait
+        with pytest.raises(RunError, match="no run-parked event"):
+            wait_for_unpark(log, lambda: Decision(action="ok"), sleep=lambda s: None)
 
     def test_timeout_leaves_the_run_parked(self, tmp_path):
         log = self._parked(tmp_path)

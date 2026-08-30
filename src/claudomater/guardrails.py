@@ -29,7 +29,7 @@ from datetime import datetime
 from typing import Any, Callable
 
 from claudomater.config import SKIP, UserConfig, family_rank
-from claudomater.runlog import RunLog
+from claudomater.runlog import RunError, RunLog
 from claudomater.usage import (
     UsageSnapshot,
     UsageUnavailable,
@@ -430,12 +430,22 @@ def wait_for_unpark(
     resumable the moment the wait would have started (the operator had
     already switched accounts). Every exit writes a run-log event
     (`park-wake`, or `park-wait-timeout`), and entry is write-ahead
-    (`park-wait`). `sleep`/`clock` are injectable for tests."""
+    (`park-wait`). `sleep`/`clock` are injectable for tests.
+
+    Calling this on a run with NO `run-parked` event raises: an empty park
+    timestamp would make every stale control eligible, waking (or aborting)
+    on a command that answered an earlier state. A legitimate caller always
+    has one — PhaseRunner parks before returning a paused outcome."""
     park_ts = ""
     for ev in reversed(runlog.events()):
         if ev.get("event") == "run-parked":
             park_ts = ev.get("ts", "")
             break
+    if not park_ts:
+        raise RunError(
+            f"run {runlog.run_id} has no run-parked event (or a malformed "
+            "one); wait_for_unpark is the resume loop for a PARKED run"
+        )
     runlog.event(
         "run",
         "park-wait",
