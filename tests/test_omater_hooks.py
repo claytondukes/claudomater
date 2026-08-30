@@ -553,6 +553,19 @@ class TestBashFence:
             allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
             assert allow, (cmd, reason)
 
+    def test_arithmetic_comparison_is_not_a_redirect(self, tmp_path):
+        """`(( x > passwd ))` compares — nothing is written, and the
+        phantom target was falsely denied against the (correctly) kept
+        /etc cwd. A real redirect AFTER the closing )) still denies."""
+        p = payload("Bash", command="cd /etc; (( x > passwd )); echo done")
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+        p = payload("Bash", command="cd /etc; (( x > 2 )) > passwd; echo done")
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+
     def test_escaped_whitespace_in_prefix_words_stays_one_word(self, tmp_path):
         """`MODE=a\\ b cd <dir>` is one assignment word and the cd RUNS —
         str.split() shattered it, the stray fragment read as a command

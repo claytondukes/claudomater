@@ -627,10 +627,16 @@ def resolved_bash_targets(
     # target in such a command is unresolved, fail open — position-
     # insensitive on purpose.
     home_touched = re.search(r"(?:^|[\s;&|({])HOME=", scannable) is not None
-    events: list[tuple[int, str, Any]] = [
-        (pos, "target", raw) for pos, raw in _positioned_write_targets(scannable)
-    ]
     arith = _arith_spans(scannable)
+    events: list[tuple[int, str, Any]] = [
+        (pos, "target", raw)
+        for pos, raw in _positioned_write_targets(scannable)
+        # `(( x > passwd ))` is an arithmetic COMPARISON — no write
+        # happens, and the phantom target was falsely denied against the
+        # (correctly) kept cwd. Redirects after the closing )) are real
+        # and stay ((x)) > out carries its redirect outside the span).
+        if not any(start <= pos < end for start, end in arith)
+    ]
     # A paren inside PURE arithmetic — no nested command substitution
     # ($( or backtick) in the span — is the arithmetic's own delimiter
     # or grouping: evaluation cannot move the shell's cwd, and voiding
