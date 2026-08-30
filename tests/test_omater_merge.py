@@ -104,6 +104,20 @@ class TestStaleNumericClaims:
         (msg,) = stale_numeric_claims("suite 1,234", 5)
         assert "5" in msg
 
+    def test_malformed_arrow_forms_are_not_claims(self):
+        """Round-12 finding: 'suite 381 -> 1,2' partially matched — the
+        arrow group failed on the malformed right side, and the left side
+        (historical by the arrow's own semantics) was reported as a
+        standalone current claim. Arrow parsing is all-or-nothing: a suite
+        count followed by an arrow the grammar cannot fully parse is not a
+        claim, per the documented malformed-text policy."""
+        for text in ("suite 381 -> 1,2", "suite 381 ->", "suite 381 → 1,2",
+                     "suite 381 -> 557 -> 624"):
+            assert stale_numeric_claims(text, 999) == [], text
+        # the well-formed arrow form still claims its right side
+        (msg,) = stale_numeric_claims("suite 381 -> 557", 560)
+        assert '"suite 381 -> 557"' in msg and "560" in msg
+
     def test_signed_or_alphanumeric_attached_counts_are_not_claims(self):
         """Round-9 finding: '-1 passed' read as a claim of 1 and '1e3
         passed' as a claim of 3. Count tokens must not be glued to signs or

@@ -65,6 +65,14 @@ class RunError(Exception):
     pass
 
 
+class RunEndedError(RunError):
+    """The run's last event is terminal — the ONE condition callers may
+    translate into their own 'already ended' message. Everything else a
+    liveness check raises (corrupt middle history above all) is damage
+    that must propagate unchanged: rebranding it as 'ended' tells the
+    operator to start a new run instead of diagnosing the damage."""
+
+
 def _utc_now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -229,7 +237,7 @@ class RunLog:
             # A finished (or never-committed) run must stay that way —
             # "adopting" it would flip it live again and wedge one-live-run
             # enforcement (is_live() says the same thing to create()).
-            raise RunError(
+            raise RunEndedError(
                 f"run {log.run_id} already ended; start a new run instead"
             )
         has_phase_activity = any(
@@ -279,7 +287,7 @@ class RunLog:
                 raise RunError(f"no current run under {root / CURRENT_LINK}")
         events = log.events()
         if not events or events[-1]["event"] in TERMINAL_EVENTS:
-            raise RunError(
+            raise RunEndedError(
                 f"run {log.run_id} already ended; nothing to attach to"
             )
         return log
@@ -425,7 +433,7 @@ class RunLog:
         discarded = self._repair_torn_tail()
         events = self.events()
         if events and events[-1]["event"] in TERMINAL_EVENTS:
-            raise RunError(
+            raise RunEndedError(
                 f"run {self.run_id} has ended; no further events can be "
                 "appended — post-mortem history must not grow"
             )
@@ -595,8 +603,12 @@ class RunLog:
         with self._append_lock():
             try:
                 self._repaired_live_events()
-            except RunError:
-                raise RunError(
+            except RunEndedError:
+                # ONLY the ended signal is translated — a RunError from
+                # corrupt middle history propagates unchanged (misreporting
+                # damage as an ended run tells the operator to start a new
+                # run for the wrong reason).
+                raise RunEndedError(
                     f"run {self.run_id} already ended; control {action!r} has "
                     "nothing to act on — start a new run instead"
                 ) from None

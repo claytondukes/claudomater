@@ -305,6 +305,25 @@ class TestControl:
         with pytest.raises(RunError, match="corrupt"):
             log.read_controls()
 
+    def test_corrupt_middle_events_damage_is_not_reported_as_ended(self, tmp_path):
+        """Round-12 finding (suppressed): write_control caught EVERY RunError
+        from the liveness check — including a corrupt middle events.jsonl
+        record — and rebranded it 'already ended; start a new run instead',
+        hiding the loud corruption diagnosis behind the wrong instruction.
+        Only the ended signal (RunEndedError) is translated; damage
+        propagates naming the damaged line."""
+        log = RunLog.create(tmp_path)
+        with open(log.run_dir / "events.jsonl", "a", encoding="utf-8") as fh:
+            fh.write("garbage not json\n")  # middle damage, written directly
+            fh.write(
+                '{"ts": "2026-08-28T23:00:01Z", "run_id": "x", '
+                '"phase": "dev", "event": "phase-spawn"}\n'
+            )
+        with pytest.raises(RunError, match="corrupt events.jsonl at line 2"):
+            log.write_control("resume")
+        # the refused control never lands in the command channel
+        assert log.read_controls() == []
+
     def test_control_on_an_ended_run_is_refused(self, tmp_path):
         """Round-3 finding (suppressed): `omater resume|abort|approve` could
         append control-* after a terminal event and flip is_live() back on.

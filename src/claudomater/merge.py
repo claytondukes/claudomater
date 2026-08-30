@@ -103,8 +103,14 @@ class RoundAlarm:
 # detector that guessed at garbage would report noise instead of lag.
 _COUNT = r"(?<![\w,.+-])(\d{1,3}(?:,\d{3})+|\d+)(?![.,]?\d)(?!\w)"
 _PASSED_CLAIM = re.compile(_COUNT + r"\s+(?:tests?\s+)?passed\b", re.IGNORECASE)
+# The trailing lookahead makes arrow parsing all-or-nothing: in
+# "suite 381 -> 1,2" the malformed right side must not leave "suite 381"
+# matching as a standalone claim — the arrow marks 381 as historical, and a
+# construct the grammar cannot fully parse is not a claim (chained arrows
+# and dangling arrows fall out the same way).
 _SUITE_CLAIM = re.compile(
-    r"\bsuite\s+" + _COUNT + r"(?:\s*(?:->|→)\s*" + _COUNT + r")?", re.IGNORECASE
+    r"\bsuite\s+" + _COUNT + r"(?:\s*(?:->|→)\s*" + _COUNT + r")?(?!\s*(?:->|→))",
+    re.IGNORECASE,
 )
 # An explicitly historical count is not a claim about NOW: "557 passed
 # (was 381 passed)" cites its baseline the way the arrow grammar's left side
