@@ -108,11 +108,13 @@ _SUITE_CLAIM = re.compile(
 )
 # An explicitly historical count is not a claim about NOW: "557 passed
 # (was 381 passed)" cites its baseline the way the arrow grammar's left side
-# does. History markers are matched immediately before the count; quoted
+# does. History markers are matched immediately before the count, allowing
+# Markdown emphasis in between ("was **381 passed**" — the count grammar
+# deliberately supports bolded counts, so the exemption must too). Quoted
 # citations of old claims are deliberately NOT exempted — a genuinely stale
 # claim can sit in quotes too, so those stay with the caller's judgment.
 _HISTORY_MARKER = re.compile(
-    r"\b(?:was|were|previously|formerly|from)\s*[:(]?\s*$", re.IGNORECASE
+    r"\b(?:was|were|previously|formerly|from)\s*[:(]?\s*[*_~]*\s*$", re.IGNORECASE
 )
 
 

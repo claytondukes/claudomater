@@ -640,6 +640,27 @@ class TestStaleProvenance:
         assert excinfo.value.snapshot is None
         assert evaluate(excinfo.value, UserConfig()).action == "pause"
 
+    def test_unknown_to_unknown_identity_gets_no_carve_out(
+        self, tmp_path, monkeypatch
+    ):
+        """Round-11 finding: on a headless box with no resolvable account,
+        both sides of the provenance equality can be the {'unknown': 'true'}
+        placeholder — and unknown == unknown is not proof the cache belongs
+        to the active account. The carve-out requires a POSITIVE identity."""
+        monkeypatch.setattr(
+            "claudomater.usage.account_identity",
+            lambda **kw: {"unknown": "true"},
+        )
+        cache = self._stale_cache(
+            tmp_path,
+            {"limits": self.LIMITS, "fetched_by": {"unknown": "true"}},
+            age_s=4000,
+        )
+        with pytest.raises(UsageUnavailable, match="unknown-identity") as excinfo:
+            read_usage(cache_path=cache, providers=[], env={})
+        assert excinfo.value.snapshot is None
+        assert evaluate(excinfo.value, UserConfig()).action == "pause"
+
     def test_unprovenanced_cache_with_a_foreign_credential_fails_closed(
         self, tmp_path
     ):

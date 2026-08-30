@@ -69,6 +69,18 @@ class TestStaleNumericClaims:
             "previously 100 tests passed; now suite 200", 200
         ) == []
 
+    def test_history_markers_survive_markdown_emphasis(self):
+        """Round-11 finding: the count grammar deliberately supports bolded
+        counts, so the history exemption must too — '(was **381 passed**)'
+        is still a cited baseline. Quotes stay actionable (not emphasis)."""
+        assert stale_numeric_claims(
+            "Full suite: 557 passed (was **381 passed**).", 557
+        ) == []
+        assert stale_numeric_claims("previously **suite 100**; suite 200", 200) == []
+        # a QUOTED old claim is still checked — quotes are not emphasis
+        (msg,) = stale_numeric_claims('the PR said "398 passed" back then', 486)
+        assert "398" in msg
+
     def test_history_markers_cover_the_suite_grammar_too(self):
         """Round-10 finding: the exemption only guarded the `passed`
         grammar — 'previously suite 100' was still reported as stale,
