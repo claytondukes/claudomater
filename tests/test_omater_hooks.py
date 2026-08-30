@@ -553,6 +553,39 @@ class TestBashFence:
             allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
             assert allow, (cmd, reason)
 
+    def test_negated_comparison_contexts_are_still_comparisons(self, tmp_path):
+        """`! [[ x > passwd ]]` and `! (( x > passwd ))` negate a
+        COMPARISON — nothing is written; the `!` reserved word keeps
+        command position and the phantom redirects were false denies."""
+        for cmd in (
+            "cd /etc; ! [[ x > passwd ]]; echo done",
+            "cd /etc; ! (( x > passwd )); echo done",
+        ):
+            p = payload("Bash", command=cmd)
+            p["cwd"] = str(tmp_path)
+            allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+            assert allow, (cmd, reason)
+
+    def test_concatenated_quoted_delimiter_reaches_the_wall(self, tmp_path):
+        """bash's delimiter for <<'EOF'x is the CONCATENATED word EOFx —
+        matching the quoted prefix let an in-body EOF line terminate the
+        heredoc early and falsely denied the never-executed redirect.
+        Unsupported concatenations reach the residual-<< wall."""
+        cmd = "cat <<'EOF'x\nEOF\ncat > /tmp_probe/not-executed\nEOFx"
+        p = payload("Bash", command=cmd)
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+
+    def test_cond_open_requires_a_live_anchor(self, tmp_path):
+        """`echo \\; [[ x > /tmp_probe/out ]]` anchors on word data: the
+        [[ is an ARGUMENT and the > a REAL out-of-tree redirect — masking
+        it as a comparison hid the write."""
+        p = payload("Bash", command="echo \\; [[ x > /tmp_probe/out ]]")
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+
     def test_escaped_pipe_never_forms_a_two_char_operator(self, tmp_path):
         """`\\|&` is word data + a real background `&` (not |&), and
         `\\||` is word data + a real pipe (not ||): each misread either

@@ -274,6 +274,17 @@ def _arith_spans(
             j = i - 1
             while j >= 0 and text[j] in " \t":
                 j -= 1
+            # `! (( x > f ))` — the status-negation reserved word keeps
+            # command position (its phantom redirect was a false deny)
+            while (
+                j >= 0
+                and text[j] == "!"
+                and not _escape_parity(text, j)
+                and (j == 0 or text[j - 1] in " \t\n;&|(")
+            ):
+                j -= 1
+                while j >= 0 and text[j] in " \t":
+                    j -= 1
             if not (j < 0 or (text[j] in ";&|\n(" and not _escape_parity(text, j))):
                 i += 1
                 continue
@@ -307,7 +318,10 @@ def _span_lookup(spans: list[tuple[int, int]]) -> Callable[[int], bool]:
     return contains
 
 
-_COND_OPEN = re.compile(r"(?:^|[\n;&|({])\s*\[\[(?=[ \t\n])")
+# the `!` status-negation reserved word keeps command position:
+# `! [[ x > passwd ]]` is still a comparison (denying its phantom
+# redirect was a false deny)
+_COND_OPEN = re.compile(r"(?:^|[\n;&|({])\s*(?:![ \t]+)*\[\[(?=[ \t\n])")
 _COND_CLOSE = re.compile(r"(?:^|[ \t\n])(\]\])(?=[\s;&|)<>]|$)")
 
 
@@ -323,6 +337,15 @@ def _cond_spans(text: str) -> list[tuple[int, int]]:
         m = _COND_OPEN.search(text, i)
         if not m:
             return spans
+        if (
+            text[m.start()] in ";&|({"
+            and _escape_parity(text, m.start()) == 1
+        ):
+            # `echo \; [[ x > /tmp/f ]]` anchors on word data — the [[ is
+            # an ARGUMENT and the > a REAL redirect (same parity rule as
+            # every other command-position scan)
+            i = m.start() + 1
+            continue
         start = m.end() - 2
         close = _COND_CLOSE.search(text, m.end())
         if not close:
@@ -348,9 +371,15 @@ def _cond_spans(text: str) -> list[tuple[int, int]]:
 # an in-body `END` line terminate the heredoc early — exposing body text
 # bash never executes (false deny). Unsupported delimiter words now fail
 # the match entirely and reach the residual-<< wall (fail open).
+# Both delimiter branches require a token boundary after them: bash's
+# delimiter for <<'EOF'x is the CONCATENATED word EOFx, and matching the
+# quoted prefix let an in-body 'EOF' line terminate early — exposing body
+# text bash never executes (false deny), same shape as the bare-prefix
+# case.
 _HEREDOC = re.compile(
     r"((?<!<)<<(-)?(?!<)[ \t]*"
-    r"(?:(['\"])((?:(?!\3)[^\n])+)\3|([\w.+-]+)(?=[\s;&|<>()]|$))[^\n]*\n)"
+    r"(?:(['\"])((?:(?!\3)[^\n])+)\3(?=[\s;&|<>()]|$)"
+    r"|([\w.+-]+)(?=[\s;&|<>()]|$))[^\n]*\n)"
     r".*?^(?(2)\t*)(?:\4|\5)$",
     re.DOTALL | re.MULTILINE,
 )
