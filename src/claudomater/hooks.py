@@ -491,9 +491,13 @@ def _strip_heredocs(command: str, in_data: Callable[[int], bool]) -> str:
             term_end = len(command) if term_end == -1 else term_end
             search_from = term_end
         if not resolved_all:
-            out.append(command[pos : m.end()])
-            pos = m.end()
-            continue  # some body unterminated: residual << (wall)
+            # some body unterminated: the residual << walls everything
+            # after the introducer line anyway — emit the remainder and
+            # stop (advancing one marker at a time re-collected the
+            # remaining siblings per iteration, quadratic on generated
+            # `cat <<A <<A ...` lines in the synchronous hook)
+            out.append(command[pos:])
+            break
         # emit the intro line with every live marker blanked; drop all
         # bodies + terminator lines
         line = list(command[m.start() : eol + 1])
@@ -550,9 +554,14 @@ _CMD_ANCHOR = (
     # never runs (recognizing it falsely denied a write that never
     # happens). Unsupported compositions fail open.
     r"(?:[A-Za-z_][A-Za-z0-9_]*=[^\s;|&<>()]*[ \t]+)*"
+    # `command` is shell-only, so it may appear only BEFORE exec-style
+    # wrappers: `env command touch /x` asks env to run an external
+    # program named command (host-dependent, usually nothing) — touch
+    # never runs, and recognizing the chain falsely denied it.
+    r"(?:command[ \t]+)*"
     r"(?:"
     r"(?:env|sudo|time)[ \t]+(?:[A-Za-z_][A-Za-z0-9_]*=[^\s;|&<>()]*[ \t]+)*"
-    r"|(?:command|nohup)[ \t]+"
+    r"|nohup[ \t]+"
     r")*"
 )
 # tee/mkdir/touch accept MULTIPLE operands — group 1 captures the whole
@@ -1519,6 +1528,11 @@ def resolved_bash_targets(
             tail = re.sub(
                 r"^(?:[ \t]+[A-Za-z_][A-Za-z0-9_]*=[^\s;|&<>()]*)*", "", tail
             )
+            # a redirection-only statement has NO command name:
+            # `HOME=<root> > /dev/null` persists the assignment (reading
+            # the redirect as a command made it one-shot and falsely
+            # denied a later ~ write)
+            tail = _TRAILING_REDIRECT.sub("", tail)
             # a declaration builtin's trailing words are its OPERANDS
             # (`export HOME=<root> OTHER` persists HOME — treating OTHER
             # as a prefixed command cut the range short and falsely

@@ -553,6 +553,45 @@ class TestBashFence:
             allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
             assert allow, (cmd, reason)
 
+    def test_shell_only_wrappers_after_exec_wrappers_fail_open(self, tmp_path):
+        """`env command touch /x` asks env to run an external program
+        NAMED command — touch never runs (false deny closed). The shell
+        order `command env touch /x` really runs touch and keeps
+        denying."""
+        p = payload("Bash", command="env command touch /tmp_probe/x")
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+        p = payload("Bash", command="command env touch /tmp_probe/x")
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+
+    def test_redirection_only_assignment_is_persistent(self, tmp_path):
+        """`HOME=<root> > /dev/null` has NO command name: the assignment
+        persists (reading the redirect as a command made it one-shot and
+        resolved the later ~ under the stale home — false deny)."""
+        p = payload(
+            "Bash", command=f"HOME={tmp_path} > /dev/null; echo hi > ~/out.txt"
+        )
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+
+    def test_unterminated_sibling_heredocs_bail_linearly(self, tmp_path):
+        """With any sibling body unterminated, the residual << walls the
+        rest anyway — re-collecting remaining siblings per marker was
+        quadratic (78s at 20000 markers in the synchronous hook)."""
+        import time
+
+        cmd = "cat " + "<<A " * 6000 + "\n"
+        p = payload("Bash", command=cmd)
+        p["cwd"] = str(tmp_path)
+        started = time.monotonic()
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert time.monotonic() - started < 2.0
+        assert allow, reason
+
     def test_option_checks_stop_at_the_terminator(self, tmp_path):
         """Dash tokens after `--` are OPERANDS: `touch -- -r /f` writes
         both, and `cp -- -t src /f` copies to /f — reading them as
