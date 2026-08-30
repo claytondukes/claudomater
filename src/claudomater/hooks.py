@@ -228,9 +228,10 @@ def _arith_spans(
     introducer: `$((1 << EOF))` must neither eat the following lines as a
     heredoc body nor raise the residual-<< wall. Detection is quote-,
     comment-, and escape-aware via _data_spans, so a `$((` that is data
-    cannot open a span. Unbalanced arithmetic yields NO span: bash rejects
-    the whole command before running anything, so nothing executes either
-    way. A `<<` inside a command substitution NESTED in the arithmetic is
+    cannot open a span. Unbalanced arithmetic spans to END-OF-TEXT: bash
+    keeps reading for the missing )) and rejects the whole input at EOF —
+    nothing executes, and leaving the remainder scannable falsely denied
+    its `>` tokens as writes. A `<<` inside a command substitution NESTED in the arithmetic is
     also treated as a shift (its heredoc body stays scannable) — the
     parens have already voided the tracked cwd, and best-effort deny
     accepts that pathological shape.
@@ -278,11 +279,36 @@ def _arith_spans(
         # depth from i returns to zero exactly where the OUTER ( pairs
         close = match.get(i)
         if close is None:
-            i += 1
-            continue
+            spans.append((i - 1 if dollar else i, n))
+            break
         spans.append((i - 1 if dollar else i, close + 1))
         i = close + 1
     return spans
+
+
+_COND_OPEN = re.compile(r"(?:^|[\n;&|({])\s*\[\[(?=[ \t\n])")
+_COND_CLOSE = re.compile(r"(?:^|[ \t\n])(\]\])(?=[\s;&|)<>]|$)")
+
+
+def _cond_spans(text: str) -> list[tuple[int, int]]:
+    """`[[ ... ]]` conditional expressions: `<`/`>` inside are string
+    COMPARISONS, not redirects — `[[ x > passwd ]]` writes nothing, and
+    the phantom target was falsely denied against the kept cwd. An
+    unclosed `[[` is a syntax error bash hits at EOF having executed
+    nothing: the remainder is data too."""
+    spans: list[tuple[int, int]] = []
+    i = 0
+    while True:
+        m = _COND_OPEN.search(text, i)
+        if not m:
+            return spans
+        start = m.end() - 2
+        close = _COND_CLOSE.search(text, m.end())
+        if not close:
+            spans.append((start, len(text)))
+            return spans
+        spans.append((start, close.end(1)))
+        i = close.end(1)
 
 
 # Bash write patterns: redirections, tee, file-creating commands, copy/move
@@ -647,14 +673,15 @@ def resolved_bash_targets(
     # insensitive on purpose.
     home_touched = re.search(r"(?:^|[\s;&|({])HOME=", scannable) is not None
     arith = _arith_spans(scannable)
+    # `(( x > passwd ))` and `[[ x > passwd ]]` are COMPARISONS — no write
+    # happens, and the phantom targets were falsely denied against the
+    # (correctly) kept cwd. Redirects after the closing ))/]] are real
+    # and stay (`((x)) > out` carries its redirect outside the span).
+    inert = sorted(arith + _cond_spans(scannable))
     events: list[tuple[int, str, Any]] = [
         (pos, "target", raw)
         for pos, raw in _positioned_write_targets(scannable)
-        # `(( x > passwd ))` is an arithmetic COMPARISON — no write
-        # happens, and the phantom target was falsely denied against the
-        # (correctly) kept cwd. Redirects after the closing )) are real
-        # and stay ((x)) > out carries its redirect outside the span).
-        if not any(start <= pos < end for start, end in arith)
+        if not any(start <= pos < end for start, end in inert)
     ]
     # A paren inside PURE arithmetic — no nested command substitution
     # ($( or backtick) in the span — is the arithmetic's own delimiter
@@ -689,16 +716,35 @@ def resolved_bash_targets(
             return False  # the & of a >&/<& redirect, not a separator
         return first not in ";&|()" or _escape_parity(scannable, m.start()) == 0
 
+    def _pipeline_scoped(m: re.Match) -> bool:
+        # a current-shell state changer INSIDE a pipeline runs in that
+        # pipeline's subshell: the parent's cwd/options are untouched —
+        # voiding them turned a known /etc into unknown and hid the
+        # recognized write (same rule as pipeline cds). `||` is an OR,
+        # not a pipe; `|&` counts (prev char |).
+        first = scannable[m.start()]
+        if first == "|" and not scannable.startswith("||", m.start()):
+            if m.start() == 0 or scannable[m.start() - 1] != "|":
+                return True
+        if first == "&" and m.start() > 0 and scannable[m.start() - 1] == "|":
+            return True
+        end = _segment_boundary(scannable, m.end())
+        return (
+            end < len(scannable)
+            and scannable[end] == "|"
+            and not scannable.startswith("||", end)
+        )
+
     # Command-induced opacity (an unnameable/current-shell command) takes
     # effect at the SEGMENT boundary, not the command start: bash opens
     # redirects attached to the command BEFORE running it, so
     # `source env.sh > audit.log` resolves audit.log against the pre-source
     # cwd — clearing tracking first let a recognized out-of-tree write pass.
     for m in _GLUED_COMMAND.finditer(scannable):
-        if _real_anchor(m):
+        if _real_anchor(m) and not _pipeline_scoped(m):
             events.append((_segment_boundary(scannable, m.end()), "opaque", None))
     for m in _SHELL_EXEC.finditer(scannable):
-        if _real_anchor(m):
+        if _real_anchor(m) and not _pipeline_scoped(m):
             events.append((_segment_boundary(scannable, m.end()), "opaque", None))
     for m in _COMPOUND.finditer(scannable):
         # HARD opacity: a compound body's extent is unparseable here, so a
@@ -713,7 +759,7 @@ def resolved_bash_targets(
     for pos in _bare_ampersands(scannable, arith):
         events.append((pos, "opaque", None))
     for m in _SET_PHYSICAL.finditer(scannable):
-        if _real_anchor(m):
+        if _real_anchor(m) and not _pipeline_scoped(m):
             events.append((m.end(), "setmode", None))
     # A `<<` surviving _scannable is a heredoc shape the parser does not
     # support (exotic delimiters: END@MARK, <<\EOF, ...) — its BODY stayed
@@ -814,6 +860,11 @@ def resolved_bash_targets(
         while k < len(words):
             w = words[k]
             if _BARE_REDIRECT.fullmatch(w):
+                if k + 1 >= len(words):
+                    # the redirect's operand is the cd TOKEN itself
+                    # (`< cd`): a filename, not a command — voiding on it
+                    # lost a known cwd and hid the recognized write
+                    return False
                 k += 2  # the next word is this redirect's file operand
                 continue
             if w in _CD_WRAPPERS or _TRANSPARENT_PREFIX_WORD.fullmatch(w):

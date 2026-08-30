@@ -553,6 +553,57 @@ class TestBashFence:
             allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
             assert allow, (cmd, reason)
 
+    def test_unbalanced_arithmetic_is_a_syntax_error_not_a_write(self, tmp_path):
+        """`(( x > /tmp_probe/out` never closes: bash reads to EOF hunting
+        for )) and rejects the whole input — nothing executes, so the
+        exposed `>` was a false deny. The unmatched remainder is data."""
+        for cmd in (
+            "(( x > /tmp_probe/out",
+            "echo $(( x > /tmp_probe/out",
+        ):
+            p = payload("Bash", command=cmd)
+            p["cwd"] = str(tmp_path)
+            allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+            assert allow, (cmd, reason)
+
+    def test_conditional_comparison_is_not_a_redirect(self, tmp_path):
+        """`[[ x > passwd ]]` compares strings — nothing is written, and
+        the phantom target was falsely denied against the kept /etc cwd.
+        A real redirect after ]] still denies."""
+        p = payload("Bash", command="cd /etc; [[ x > passwd ]]; echo done")
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+        p = payload("Bash", command="cd /etc; [[ x > y ]] > passwd")
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+
+    def test_redirect_operand_cd_keeps_tracking(self, tmp_path):
+        """`< cd` reads FROM a file named cd — no chdir runs, so the
+        known /etc must stay tracked and the recognized write denied
+        (voiding on the operand token hid it)."""
+        p = payload("Bash", command="cd /etc; < cd; cat > passwd")
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+
+    def test_pipeline_scoped_state_changes_keep_the_parent_cwd(self, tmp_path):
+        """source/eval, an expanded command word, and set -P inside a
+        pipeline run in the pipeline's subshell — the parent's cwd and
+        options are untouched (same rule as pipeline cds). Voiding them
+        hid the recognized /etc write."""
+        for cmd in (
+            "cd /etc; true | source env.sh; cat > passwd",
+            "cd /etc; source env.sh | true; cat > passwd",
+            "cd /etc; true | $CMD; cat > passwd",
+            "cd /etc; true | set -P; cd ..; cat > passwd",
+        ):
+            p = payload("Bash", command=cmd)
+            p["cwd"] = str(tmp_path)
+            allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+            assert not allow, cmd
+
     def test_prefix_of_unsupported_delimiter_is_not_the_delimiter(self, tmp_path):
         """bash's delimiter for <<END@MARK is the WHOLE word — capturing
         the END prefix let an in-body `END` line terminate the heredoc
