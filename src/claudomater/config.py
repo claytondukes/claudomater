@@ -15,6 +15,7 @@ from typing import Any
 
 import yaml
 
+from claudomater.merge import MergeSeamError, RoundAlarm
 from claudomater.usage import DEFAULT_MAX_STALE_S
 
 PROJECT_CONFIG_NAME = ".omater.yaml"
@@ -207,6 +208,13 @@ class ProjectConfig:
             "qa_board": base["qa_board"],
             "close_pass": base["close_pass"],
             "merge": {"converge": self.merge.converge, "reviewer": self.merge.reviewer},
+            # Resolved gates ride into the run log's policy event so the log
+            # can establish which review-round limit governed a run — a later
+            # config edit must be distinguishable from the original setting.
+            "gates": {
+                **self.gates,
+                "review_round_alarm": RoundAlarm.from_gates(self.gates).limit,
+            },
         }
 
 
@@ -294,6 +302,14 @@ def load_project_config(root: Path | str) -> ProjectConfig:
             f"scope names, got {scopes!r}"
         )
 
+    gates_raw = _require_mapping("gates", data.get("gates"))
+    try:
+        # Validate the alarm knob AT LOAD, like every other knob — a typo'd
+        # value must fail here, not mid-run when policy() first resolves it.
+        RoundAlarm.from_gates(gates_raw)
+    except MergeSeamError as exc:
+        raise ConfigError(f"{PROJECT_CONFIG_NAME}: {exc}") from exc
+
     return ProjectConfig(
         project=project,
         deployment_type=deployment_type,
@@ -308,7 +324,7 @@ def load_project_config(root: Path | str) -> ProjectConfig:
         learning_scopes=list(scopes),
         ci_tier_on_push=ci_raw.get("tier_on_push"),
         ci_tier_on_merge=ci_raw.get("tier_on_merge", "full"),
-        gates=_require_mapping("gates", data.get("gates")),
+        gates=gates_raw,
         root=root,
     )
 

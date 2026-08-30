@@ -163,12 +163,19 @@ class TestEvents:
 
     def test_object_missing_event_key_counts_as_corrupt(self, tmp_path):
         """A valid JSON object without 'event' must not reach is_live() as a
-        KeyError — torn tail drops, middle line is a clear RunError."""
+        KeyError — torn tail drops, middle line is a clear RunError. (Both
+        lines written directly: an API append would now REPAIR a damaged
+        tail instead of burying it, so genuine middle damage is the only way
+        this state exists.)"""
         log = RunLog.create(tmp_path)
         with open(log.run_dir / "events.jsonl", "a", encoding="utf-8") as fh:
             fh.write('{"ts": "2026-08-28T23:00:00Z"}\n')
         assert log.is_live()  # tail dropped, no KeyError
-        log.event("dev", "phase-spawn")  # now the damaged line is in the middle
+        with open(log.run_dir / "events.jsonl", "a", encoding="utf-8") as fh:
+            fh.write(
+                '{"ts": "2026-08-28T23:00:01Z", "run_id": "x", '
+                '"phase": "dev", "event": "phase-spawn"}\n'
+            )
         with pytest.raises(RunError, match="corrupt"):
             log.events()
 
@@ -199,11 +206,16 @@ class TestEvents:
             RunLog.create(tmp_path)
 
     def test_corrupt_middle_line_is_a_run_error(self, tmp_path):
+        """Damage in the MIDDLE of history stays a loud error (only a torn
+        FINAL line is recoverable). Written directly — an API append now
+        repairs a damaged tail rather than burying it under new events."""
         log = RunLog.create(tmp_path)
         with open(log.run_dir / "events.jsonl", "a", encoding="utf-8") as fh:
             fh.write("garbage not json\n")
-        log_path_ok = log.event  # appending a valid event after the garbage
-        log_path_ok("dev", "phase-spawn")
+            fh.write(
+                '{"ts": "2026-08-28T23:00:01Z", "run_id": "x", '
+                '"phase": "dev", "event": "phase-spawn"}\n'
+            )
         with pytest.raises(RunError, match="corrupt"):
             log.events()
 
@@ -292,6 +304,18 @@ class TestControl:
         log.write_control("resume")
         with pytest.raises(RunError, match="corrupt"):
             log.read_controls()
+
+    def test_control_on_an_ended_run_is_refused(self, tmp_path):
+        """Round-3 finding (suppressed): `omater resume|abort|approve` could
+        append control-* after a terminal event and flip is_live() back on.
+        An ended run accepts no control — and the command channel stays
+        clean of dead commands too."""
+        log = RunLog.create(tmp_path)
+        log.finish("run-complete")
+        with pytest.raises(RunError, match="nothing to act on"):
+            log.write_control("resume")
+        assert not log.is_live()
+        assert log.read_controls() == []
 
 
 class TestTranscriptPaths:
@@ -400,6 +424,36 @@ class TestAttachSeam:
     def test_attach_without_a_current_run_raises(self, tmp_path):
         with pytest.raises(RunError, match="no current run"):
             RunLog.attach(tmp_path)
+
+    def test_attach_by_run_id_with_the_same_liveness_rules(self, tmp_path):
+        """Named attach serves the control CLI's --run flag: same containment
+        and liveness rules as the current-link path."""
+        log = RunLog.create(tmp_path, run_id="run-a")
+        log.event("dev", "phase-spawn", {"model": "m", "attempt": 1})
+        sibling = RunLog.attach(tmp_path, run_id="run-a")
+        sibling.event("merge", "copilot-round", {"round": 1})
+        log.finish("run-complete")
+        with pytest.raises(RunError, match="already ended"):
+            RunLog.attach(tmp_path, run_id="run-a")
+        with pytest.raises(RunError, match="no run"):
+            RunLog.attach(tmp_path, run_id="run-x")
+
+    def test_append_after_a_torn_tail_repairs_instead_of_corrupting(self, tmp_path):
+        """Round-3 finding: events() tolerates a torn FINAL line (crash
+        artifact), but an append landing after it would turn the fragment
+        into corrupt MIDDLE history and every later events() call would
+        raise. Appends now truncate a recoverable torn tail under the append
+        lock and record the repair."""
+        log = RunLog.create(tmp_path)
+        log.event("dev", "phase-spawn", {"model": "m", "attempt": 1})
+        with open(log.run_dir / "events.jsonl", "a", encoding="utf-8") as fh:
+            fh.write('{"ts": "2026-08-30T00:00:00Z", "event": "phase-ver')
+        sibling = RunLog.attach(tmp_path)  # tolerant read: run is live
+        sibling.event("merge", "copilot-round", {"round": 1})
+        names = [e["event"] for e in log.events()]  # raised pre-fix (corrupt)
+        assert "torn-tail-repaired" in names
+        assert names[-1] == "copilot-round"
+        assert "phase-spawn" in names  # intact history untouched
 
 
 class TestPark:

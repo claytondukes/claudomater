@@ -64,7 +64,11 @@ class Decision:
         }
 
 
-def _stale_decision(exc: UsageUnavailable, cfg: UserConfig) -> Decision:
+def _stale_decision(
+    exc: UsageUnavailable,
+    cfg: UserConfig,
+    baseline_account: dict[str, str] | None = None,
+) -> Decision:
     """The staleness-AND-near-limit rule (2026-08-30 order). Staleness alone
     is not evidence of exhaustion — the Epic 9 run was paused at 17% real
     usage because the usage endpoint 429'd — so a stale-but-readable last
@@ -80,6 +84,19 @@ def _stale_decision(exc: UsageUnavailable, cfg: UserConfig) -> Decision:
             action=PAUSE,
             reasons=[f"usage unknown, failing closed: {exc}"],
         )
+    # The stale path re-baselines exactly like the fresh path — the reading's
+    # provenance IS its account, and a switch detected on a stale reading is
+    # no less a switch. Skipping this let a run baselined to account A ride
+    # account B's stale cache with rebaselined=False and no recorded reason.
+    rebaselined = bool(
+        baseline_account and snap.account and baseline_account != snap.account
+    )
+    prefix: list[str] = []
+    if rebaselined:
+        prefix.append(
+            f"account switch detected ({baseline_account} -> {snap.account}); "
+            "guardrails re-baselined"
+        )
     drift = STALE_DRIFT_PP_PER_MIN * (age / 60.0)
     below: list[str] = []
     for window, pct, resets in (
@@ -89,10 +106,12 @@ def _stale_decision(exc: UsageUnavailable, cfg: UserConfig) -> Decision:
         if pct is None:
             return Decision(
                 action=PAUSE,
-                reasons=[
+                reasons=prefix
+                + [
                     "usage unknown, failing closed: "
                     f"{window} window missing from the stale reading ({exc})"
                 ],
+                rebaselined=rebaselined,
                 snapshot=snap,
             )
         threshold = cfg.usage.pause_at[window]
@@ -100,7 +119,8 @@ def _stale_decision(exc: UsageUnavailable, cfg: UserConfig) -> Decision:
         if projected >= threshold:
             return Decision(
                 action=PAUSE,
-                reasons=[
+                reasons=prefix
+                + [
                     f"stale usage ({int(age)}s old) with a near-limit last "
                     f"reading: {WINDOW_LABELS[window]} {pct:.0f}% projects to "
                     f"{projected:.0f}% (+{STALE_DRIFT_PP_PER_MIN} pp/min) "
@@ -108,6 +128,7 @@ def _stale_decision(exc: UsageUnavailable, cfg: UserConfig) -> Decision:
                 ],
                 window=window,
                 resets_at=resets,
+                rebaselined=rebaselined,
                 snapshot=snap,
             )
         below.append(
@@ -116,12 +137,14 @@ def _stale_decision(exc: UsageUnavailable, cfg: UserConfig) -> Decision:
         )
     return Decision(
         action=OK,
-        reasons=[
+        reasons=prefix
+        + [
             f"usage stale ({int(age)}s old; refresh failing) but the last "
             "reading is not near any pause threshold: "
             + "; ".join(below)
             + " — proceeding at degraded confidence"
         ],
+        rebaselined=rebaselined,
         snapshot=snap,
     )
 
@@ -137,7 +160,7 @@ def evaluate(
     staleness-AND-near-limit rule instead."""
     if snapshot is None or isinstance(snapshot, UsageUnavailable):
         if isinstance(snapshot, UsageUnavailable) and snapshot.snapshot is not None:
-            return _stale_decision(snapshot, cfg)
+            return _stale_decision(snapshot, cfg, baseline_account=baseline_account)
         reason = str(snapshot) if snapshot else "no usage data"
         return Decision(
             action=PAUSE,

@@ -118,6 +118,31 @@ class TestProjectConfig:
                 write_project(tmp_path, "project: x\nmerge:\n  converge: maybe\n")
             )
 
+    def test_policy_snapshot_records_the_resolved_round_alarm(self, tmp_path):
+        """Round-3 finding: the policy event start_run logs must establish
+        which review-round limit governed a run — a later config edit has to
+        be distinguishable from the original setting. Defaulted and custom
+        values both resolve into the snapshot; garbage fails at LOAD like
+        every other knob."""
+        from claudomater.merge import DEFAULT_REVIEW_ROUND_ALARM
+
+        default = load_project_config(write_project(tmp_path, "project: x\n"))
+        assert default.policy()["gates"]["review_round_alarm"] == (
+            DEFAULT_REVIEW_ROUND_ALARM
+        )
+        custom = load_project_config(
+            write_project(
+                tmp_path, "project: x\ngates:\n  review_round_alarm: 3\n"
+            )
+        )
+        assert custom.policy()["gates"]["review_round_alarm"] == 3
+        with pytest.raises(ConfigError, match="review_round_alarm"):
+            load_project_config(
+                write_project(
+                    tmp_path, "project: x\ngates:\n  review_round_alarm: soon\n"
+                )
+            )
+
     def test_policy_changes_visibly_with_deployment_type(self, tmp_path):
         """AC: changing deployment_type visibly changes model chain, review
         floor, and CI tier (this dict is what run start logs)."""

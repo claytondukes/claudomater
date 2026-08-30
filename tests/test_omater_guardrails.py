@@ -420,6 +420,24 @@ class TestStaleTtlAndNearLimitRule:
         )
         assert evaluate(exc, UserConfig()).action == "ok"
 
+    def test_stale_path_rebaselines_account_switches(self, tmp_path, monkeypatch):
+        """Round-3 finding: the stale path skipped the account-switch
+        re-baselining the fresh path performs — a run baselined to account A
+        could proceed on B's stale reading with rebaselined=False and no
+        recorded switch reason."""
+        exc = self._stale_exc(
+            tmp_path, monkeypatch,
+            {"five_hour": 1, "seven_day": 1, "scoped": 1,
+             "account": {"uuid": "acct-b"}},
+            age_s=4000,
+        )
+        d = evaluate(exc, UserConfig(), baseline_account={"uuid": "acct-a"})
+        assert d.action == "ok" and d.rebaselined
+        assert "account switch detected" in d.reasons[0]
+        # same baseline, no switch: flag stays down
+        d2 = evaluate(exc, UserConfig(), baseline_account={"uuid": "acct-b"})
+        assert d2.action == "ok" and not d2.rebaselined
+
     def test_malformed_readings_fail_closed_not_open(self, tmp_path, monkeypatch):
         """json.loads accepts NaN, and NaN sails past every `>= threshold`
         comparison as False — so a malformed reading would otherwise walk the
