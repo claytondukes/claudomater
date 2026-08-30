@@ -310,7 +310,9 @@ def _arith_spans(
                     continue
                 j = w_end if word else j
                 break
-            if not (j < 0 or (text[j] in ";&|\n(" and not _escape_parity(text, j))):
+            # `)` covers case-ARM command positions (`case x in x) (( ... ))`)
+            # — a substitution-close anchoring errs toward masking (fail open)
+            if not (j < 0 or (text[j] in ";&|\n()" and not _escape_parity(text, j))):
                 i += 1
                 continue
         # depth from i returns to zero exactly where the OUTER ( pairs
@@ -353,8 +355,11 @@ def _span_lookup(spans: list[tuple[int, int]]) -> Callable[[int], bool]:
 # missing the `if` anchor falsely denied it as a redirect. They anchor
 # only when themselves at a command position (an `echo if [[ ...` really
 # redirects).
+# `)` is included for case-ARM command positions (`case x in x) [[ ... ]]`)
+# — a substitution-closing `)` can also anchor, which errs toward masking
+# a comparison (fail open), never toward a deny.
 _COND_OPEN = re.compile(
-    r"(?:^|[\n;&|(]|\{(?=[ \t\n]))\s*"
+    r"(?:^|[\n;&|()]|\{(?=[ \t\n]))\s*"
     r"(?:(?:if|elif|while|until|then|else|do)[ \t]+)*"
     r"(?:![ \t]+)*\[\[(?=[ \t\n])"
 )
@@ -374,7 +379,7 @@ def _cond_spans(text: str) -> list[tuple[int, int]]:
         if not m:
             return spans
         if (
-            text[m.start()] in ";&|({"
+            text[m.start()] in ";&|(){"
             and _escape_parity(text, m.start()) == 1
         ):
             # `echo \; [[ x > /tmp/f ]]` anchors on word data — the [[ is
@@ -1104,15 +1109,20 @@ def resolved_bash_targets(
             events.append((def_start, "wall", None))
         else:
             dead_spans.append((def_start, end))
-    for name in func_names:
+    if func_names:
         # INVOKING a defined function runs its body in the current shell
         # — it may cd anywhere (`f() { cd <root>; }; cd /etc; f` really
         # returns in-root, and keeping /etc falsely denied the write).
         # A known name at command position makes the cwd unknowable.
+        # ONE alternation pass: a scan per name was O(names x command)
+        # in the synchronous hook.
+        alternation = "|".join(
+            re.escape(n) for n in sorted(func_names, key=len, reverse=True)
+        )
         for im in re.finditer(
-            r"(?:^|[\n;&|({])\s*(?:![ \t]+)*"
-            + re.escape(name)
-            + r"(?![^\s;&|)<>\n])",
+            r"(?:^|[\n;&|({])\s*(?:![ \t]+)*(?:"
+            + alternation
+            + r")(?![^\s;&|)<>\n])",
             scannable,
         ):
             if _real_anchor(im):

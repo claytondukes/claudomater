@@ -553,6 +553,34 @@ class TestBashFence:
             allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
             assert allow, (cmd, reason)
 
+    def test_case_arm_comparisons_are_not_redirects(self, tmp_path):
+        """A case-arm's closing `)` is a command position: `case x in x)
+        (( x > /tmp_probe/out ));; esac` (and the [[ form) compares and
+        writes nothing — the phantom absolute targets were falsely
+        denied."""
+        for cmd in (
+            "case x in x) (( x > /tmp_probe/out ));; esac",
+            "case x in x) [[ a > /tmp_probe/out ]];; esac",
+        ):
+            p = payload("Bash", command=cmd)
+            p["cwd"] = str(tmp_path)
+            allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+            assert allow, (cmd, reason)
+
+    def test_function_name_scan_is_linear_in_definition_count(self, tmp_path):
+        """One invocation-scan per defined name was O(names x command) in
+        the synchronous hook (1.3s at 1500 definitions). A single
+        alternation pass is linear."""
+        import time
+
+        cmd = "".join(f"f{i}() {{ :; }}; " for i in range(4000)) + "cat > out.txt"
+        p = payload("Bash", command=cmd)
+        p["cwd"] = str(tmp_path)
+        started = time.monotonic()
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert time.monotonic() - started < 2.0
+        assert allow, reason  # out.txt is a relative in-root write
+
     def test_backtick_cd_targets_are_not_literal(self, tmp_path):
         """a cd target containing backticks expands at RUNTIME — an
         ABSOLUTE fabricated path (`cd /\\`x\\`/sub`) overwrote the
