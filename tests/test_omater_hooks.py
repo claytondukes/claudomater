@@ -553,6 +553,39 @@ class TestBashFence:
             allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
             assert allow, (cmd, reason)
 
+    def test_redirect_ampersand_is_not_a_command_anchor(self, tmp_path):
+        """`echo hi >& cd /etc` redirects to a FILE named cd — no chdir.
+        Anchoring the chdir match on the redirect's & applied /etc and
+        falsely denied the in-root write; the unmatched-cd back-scan
+        honors the same rule so a tracked cwd is not voided either."""
+        p = payload("Bash", command="echo hi >& cd /etc; cat > out.txt")
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+        p = payload("Bash", command="cd /etc; echo hi >& cd; cat > passwd")
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+
+    def test_tilde_after_home_assignment_fails_open(self, tmp_path):
+        """An in-command HOME assignment changes what `~` means; the
+        hook's expanduser reads its own stale HOME. `HOME=<root>;
+        echo > ~/f` and `HOME=<root>; cd ~` land IN-root — resolving
+        through the old HOME falsely denied both. Without a HOME
+        assignment, `~` still resolves (and denies)."""
+        for cmd in (
+            f"HOME={tmp_path}; echo hi > ~/out.txt",
+            f"HOME={tmp_path}; cd ~; cat > out.txt",
+        ):
+            p = payload("Bash", command=cmd)
+            p["cwd"] = str(tmp_path)
+            allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+            assert allow, (cmd, reason)
+        p = payload("Bash", command="echo hi > ~/omater-tilde-probe2.txt")
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+
     def test_identifiers_inside_arithmetic_are_not_builtins(self, tmp_path):
         """`((cd /etc))` evaluates the arithmetic expression `cd / etc` —
         no chdir happens, and applying the target falsely denied the

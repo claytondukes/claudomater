@@ -612,6 +612,13 @@ def resolved_bash_targets(
     # targets bypass CDPATH per bash and keep tracking.
     env = env if env is not None else dict(os.environ)
     cdpath_active = bool(env.get("CDPATH")) or "CDPATH" in scannable
+    # An in-command HOME assignment changes what `~` means to bash, while
+    # expanduser reads the HOOK's environment — resolving `~` through the
+    # stale HOME falsely denied in-root writes (`HOME=<root>; echo > ~/f`
+    # and `HOME=<root>; cd ~`). No HOME tracking (frozen): any `~`-leading
+    # target in such a command is unresolved, fail open — position-
+    # insensitive on purpose.
+    home_touched = re.search(r"(?:^|[\s;&|({])HOME=", scannable) is not None
     events: list[tuple[int, str, Any]] = [
         (pos, "target", raw) for pos, raw in _positioned_write_targets(scannable)
     ]
@@ -645,6 +652,8 @@ def resolved_bash_targets(
         # _real_separator / _segment_boundary; newlines stay unconditional
         # — \<newline> pairs were already removed by _scannable).
         first = scannable[m.start()]
+        if first == "&" and m.start() > 0 and scannable[m.start() - 1] in "<>":
+            return False  # the & of a >&/<& redirect, not a separator
         return first not in ";&|()" or _escape_parity(scannable, m.start()) == 0
 
     # Command-induced opacity (an unnameable/current-shell command) takes
@@ -706,6 +715,15 @@ def resolved_bash_targets(
         # unmatched-token fail-open path below.
         sep = m.group(1)
         if len(sep) == 1 and sep in ";&|(":
+            if (
+                sep == "&"
+                and m.start(1) > 0
+                and scannable[m.start(1) - 1] in "<>"
+            ):
+                # `echo hi >& cd /etc` redirects to a FILE named cd — the
+                # & belongs to the redirect, and anchoring a chdir on it
+                # applied /etc and falsely denied the in-root write
+                return False
             return _escape_parity(scannable, m.start(1)) == 0
         return True
 
@@ -736,6 +754,9 @@ def resolved_bash_targets(
         while s > 0:
             c = scannable[s - 1]
             if c in ";&|(\n" and _escape_parity(scannable, s - 1) == 0:
+                if c == "&" and s >= 2 and scannable[s - 2] in "<>":
+                    s -= 1  # the & of >&/<& — inside the segment, keep going
+                    continue
                 break
             s -= 1
         return all(
@@ -847,7 +868,9 @@ def resolved_bash_targets(
                 # almost certainly body DATA bash never executes
                 out.append((raw, None))
                 continue
-            if _resolved_target(raw) is None:
+            if _resolved_target(raw) is None or (
+                home_touched and raw.startswith("~")
+            ):
                 out.append((raw, None))
             elif Path(os.path.expanduser(raw)).is_absolute():
                 out.append((raw, _norm(raw, cwd)))
@@ -938,6 +961,11 @@ def resolved_bash_targets(
             # brace chars expand at runtime (`cd ../proj*` can land right
             # back in-root); pushd +N/-N rotates the directory stack to an
             # entry this scan cannot know. All -> unknown, fail open.
+            current = None
+            continue
+        if home_touched and target.startswith("~"):
+            # same stale-HOME rule as write targets: `HOME=<root>; cd ~`
+            # returns IN-root while expanduser tracked the old home
             current = None
             continue
         step = Path(os.path.expanduser(target))
