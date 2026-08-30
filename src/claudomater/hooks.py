@@ -437,21 +437,25 @@ _CMD_ANCHOR = (
 # tee/mkdir/touch accept MULTIPLE operands — group 1 captures the whole
 # list (checking only the first let `tee <root>/ok passwd` open
 # /etc/passwd unrecognized); dash tokens inside are skipped per-operand.
+# Intra-command spacing is HORIZONTAL only ([ \t]), as in _CHDIR: a \s+
+# separator crossed command-ending newlines and absorbed the NEXT
+# command's words as operands (`mkdir\necho passwd` creates nothing, but
+# echo/passwd were extracted as mkdir targets and falsely denied).
 _TEE = re.compile(
-    _CMD_ANCHOR + r"tee\s+(?:-[a-zA-Z]+\s+)*(?P<ops>(?:[^\s;|&<>()]+[ \t]*)+)"
+    _CMD_ANCHOR + r"tee[ \t]+(?:-[a-zA-Z]+[ \t]+)*(?P<ops>(?:[^\s;|&<>()]+[ \t]*)+)"
 )
 _CREATE = re.compile(
     _CMD_ANCHOR
-    + r"(?P<cmd>mkdir|touch)\s+(?:-[a-zA-Z=]+\s+)*(?P<ops>(?:[^\s;|&<>()]+[ \t]*)+)"
+    + r"(?P<cmd>mkdir|touch)[ \t]+(?:-[a-zA-Z=]+[ \t]+)*(?P<ops>(?:[^\s;|&<>()]+[ \t]*)+)"
 )
-_DD_OF = re.compile(_CMD_ANCHOR + r"dd\b[^;|&]*\bof=([^\s;|&<>()]+)")
+_DD_OF = re.compile(_CMD_ANCHOR + r"dd\b[^;|&\n]*\bof=([^\s;|&<>()]+)")
 # the verb is CAPTURED: searching the whole match for a verb name found
 # one inside an assignment prefix (`X=cp rsync -t ...`) and applied cp's
 # -t semantics to rsync, letting the real destination through
 _COPY = re.compile(
     _CMD_ANCHOR
-    + r"(?P<cmd>cp|mv|rsync|install)\s+(?:-[^\s]+\s+)*"
-    + r"(?:[^\s;|&<>()]+\s+)+(?P<dest>[^\s;|&<>()]+)"
+    + r"(?P<cmd>cp|mv|rsync|install)[ \t]+(?:-[^\s]+[ \t]+)*"
+    + r"(?:[^\s;|&<>()]+[ \t]+)+(?P<dest>[^\s;|&<>()]+)"
 )
 
 

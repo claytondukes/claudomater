@@ -553,6 +553,25 @@ class TestBashFence:
             allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
             assert allow, (cmd, reason)
 
+    def test_writer_operands_stop_at_newlines(self, tmp_path):
+        """Operand separators are HORIZONTAL: a newline ends the command,
+        and absorbing the next command's words as operands falsely denied
+        writes that never happen (`mkdir\\necho passwd` creates nothing).
+        Same-line operands keep denying."""
+        for cmd in (
+            "cd /etc; mkdir\necho passwd",
+            "cd /etc; dd if=/dev/null\necho of=passwd",
+            f"cd /etc; cp src {tmp_path}/safe\necho passwd",
+        ):
+            p = payload("Bash", command=cmd)
+            p["cwd"] = str(tmp_path)
+            allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+            assert allow, (cmd, reason)
+        p = payload("Bash", command="cd /etc; mkdir passwd\necho x")
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+
     def test_create_option_semantics_are_per_verb(self, tmp_path):
         """touch -m is a FLAG (set mtime, no argument) — sharing mkdir's
         -m exemption let `touch -m /etc/passwd` through unrecognized.
