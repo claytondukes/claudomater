@@ -86,7 +86,9 @@ def review_gate(findings: Any, floor: str) -> GateResult:
                 f"(known: {SEVERITIES})"
             )
         for key in ("finding", "file"):
-            if not isinstance(f.get(key), str) or not f[key]:
+            # .strip(): a whitespace-only value is as unreadable as a
+            # missing one — it must fail closed, not gate on garbage
+            if not isinstance(f.get(key), str) or not f[key].strip():
                 raise GateError(
                     f"finding {i}: {key!r} must be a non-empty string: {f!r}"
                 )

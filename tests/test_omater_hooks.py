@@ -553,6 +553,20 @@ class TestBashFence:
             allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
             assert allow, (cmd, reason)
 
+    def test_cd_fallback_scan_is_linear_in_cd_count(self, tmp_path):
+        """The _CD_WORD fallback rescanned every matched verb span per
+        token — O(N^2) in the cd count inside the synchronous hook. A
+        start-position set keeps it linear."""
+        import time
+
+        cmd = "; ".join(["cd ."] * 10000) + "; cat > out.txt"
+        p = payload("Bash", command=cmd)
+        p["cwd"] = str(tmp_path)
+        started = time.monotonic()
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert time.monotonic() - started < 1.5
+        assert allow, reason  # 'cd .' chains stay in-root
+
     def test_arithmetic_comparison_is_not_a_redirect(self, tmp_path):
         """`(( x > passwd ))` compares — nothing is written, and the
         phantom target was falsely denied against the (correctly) kept

@@ -755,7 +755,10 @@ def resolved_bash_targets(
         for m in _CHDIR.finditer(scannable)
         if _real_separator(m) and not _in_arith(m.start(2))
     ]
-    matched_verb_spans = [(m.start(2), m.end(2)) for m in chdir_matches]
+    # a set of verb STARTS suffices: _CD_WORD and _CHDIR anchor on the
+    # same verb token, so membership is exact — and the per-token interval
+    # rescan was O(N^2) in the cd count inside the synchronous hook
+    matched_verb_starts = {m.start(2) for m in chdir_matches}
     def _cd_word_can_execute(pos: int) -> bool:
         # An unmatched cd-ish token can move THIS shell's cwd only when
         # every word between its segment start and the token leaves it in
@@ -807,7 +810,7 @@ def resolved_bash_targets(
         # command (`command cd /etc > ../escape.txt`) opens against the
         # PRE-command cwd and must still resolve (and deny).
         if (
-            not any(start <= m.start() < end for start, end in matched_verb_spans)
+            m.start() not in matched_verb_starts
             and not _in_arith(m.start())
             and _cd_word_can_execute(m.start())
         ):

@@ -65,6 +65,14 @@ class TestReviewGate:
             with pytest.raises(GateError):
                 review_gate(bad, "MUST-FIX")
 
+    def test_whitespace_only_fields_fail_closed(self):
+        """A whitespace-only file/finding is as unreadable as a missing
+        one — it must raise, not gate on garbage."""
+        for bad_field in ({"file": " "}, {"finding": "\t"}):
+            f = {"severity": "NOTE", "file": "x", "finding": "y", **bad_field}
+            with pytest.raises(GateError, match="non-empty string"):
+                review_gate([f], "MUST-FIX")
+
     def test_unknown_floor_fails_closed(self):
         with pytest.raises(GateError, match="unknown review floor"):
             review_gate([], "BLOCKER")
