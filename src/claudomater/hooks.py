@@ -825,6 +825,15 @@ def _func_body_end(scannable: str, opener: int) -> int | None:
             elif c == ")" and _escape_parity(scannable, k) == 0:
                 depth -= 1
                 if depth == 0:
+                    # a case-ARM terminator inside the body aliases the
+                    # close (`f() ( case x in x) ... )` "ended" at x) and
+                    # the never-executed write after it was falsely
+                    # denied). With a case in play the close is not
+                    # confidently matchable: wall fallback.
+                    if re.search(
+                        r"(?<![^\s;&|({])case[ \t]", scannable[opener : k]
+                    ):
+                        return None
                     return k + 1
         return None
     # brace body: { and } count only as the reserved WORDS (bash
@@ -1212,6 +1221,10 @@ def resolved_bash_targets(
                 _real_anchor(im)
                 and not _in_arith(im.end() - 1)
                 and im.start("fname") > func_defined_at[im.group("fname")]
+                # a pipeline-invoked function runs in the pipeline's
+                # subshell: the parent cwd is untouched (`true | f`) —
+                # same rule as source/eval/set
+                and not _pipeline_scoped(im)
             ):
                 events.append(
                     (_segment_boundary(scannable, im.end()), "opaque", None)

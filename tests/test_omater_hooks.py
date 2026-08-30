@@ -553,6 +553,36 @@ class TestBashFence:
             allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
             assert allow, (cmd, reason)
 
+    def test_pipeline_invoked_functions_keep_the_parent_cwd(self, tmp_path):
+        """`true | f` runs f in the pipeline's subshell — the parent cwd
+        is untouched, and voiding on the invocation hid the recognized
+        /etc write (same rule as pipeline source/eval/set)."""
+        p = payload(
+            "Bash",
+            command="f() { cd /tmp; }; cd /etc; true | f; cat > passwd",
+        )
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+
+    def test_case_inside_a_paren_function_body_walls(self, tmp_path):
+        """A case-arm `)` inside a subshell-form body aliases the close:
+        `f() ( case x in x) touch /x;; esac )` "ended" at x) and the
+        never-executed write was falsely denied — with a case in play the
+        close is unmatchable, wall fallback (fail open). Case-free paren
+        bodies stay bounded and post-definition writes keep denying."""
+        p = payload(
+            "Bash",
+            command="f() ( case x in a) :;; b) touch /tmp_probe/x;; esac )",
+        )
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+        p = payload("Bash", command="g() ( echo hi ); touch /tmp_probe/y")
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+
     def test_export_operands_do_not_cut_the_range_short(self, tmp_path):
         """`export HOME=<root> OTHER` persists HOME — OTHER is another
         export OPERAND, and reading it as a prefixed command cut the
