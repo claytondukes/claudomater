@@ -713,7 +713,23 @@ def _scannable(command: str) -> str:
     # cd /etc`-style joins to the comment blanker and hid the real cd).
     # Quoted spans are already placeholdered, so what remains is a real
     # continuation.
-    return scannable.replace("\\\n", "")
+    # Parity, as everywhere: `\\<nl>` (escaped backslash + newline) keeps
+    # the newline as a REAL boundary — joining it unconditionally glued
+    # the next line into the previous word and missed a real cd + write.
+    out: list[str] = []
+    i, n = 0, len(scannable)
+    while i < n:
+        if (
+            scannable[i] == "\\"
+            and i + 1 < n
+            and scannable[i + 1] == "\n"
+            and _escape_parity(scannable, i) == 0
+        ):
+            i += 2
+            continue
+        out.append(scannable[i])
+        i += 1
+    return "".join(out)
 
 
 # -t/--target-directory (bundled forms included) reverses the operand

@@ -553,6 +553,16 @@ class TestBashFence:
             allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
             assert allow, (cmd, reason)
 
+    def test_escaped_backslash_newline_is_a_real_boundary(self, tmp_path):
+        """`echo \\\\<nl>cd /etc; cat > passwd`: the first backslash
+        escapes the second, so the newline is a REAL command boundary and
+        the cd runs — joining unconditionally glued the next line into
+        echo's argument and missed the out-of-tree write."""
+        p = payload("Bash", command="echo \\\\\ncd /etc; cat > passwd")
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+
     def test_dangling_substitution_openers_reject_the_input(self, tmp_path):
         """An unclosed backtick or ( hits EOF: bash rejects the whole
         input and executes NOTHING — the still-scannable absolute
