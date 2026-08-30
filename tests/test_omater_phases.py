@@ -1139,6 +1139,7 @@ class TestResultFileExists:
 
 from claudomater.phases import (
     RETRY_FEEDBACK_FRAME,
+    RETRY_FEEDBACK_HEADER,
     amend_prompt_with_failures,
     worktree_dirt_paths,
 )
