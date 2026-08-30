@@ -400,10 +400,24 @@ def _mask_data(text: str) -> str:
     out.append(text[pos:])
     return "".join(out)
 _REDIRECT = re.compile(r"(?<![<>&\d])\d?>{1,2}\s*([^\s;|&<>()]+)")
-_TEE = re.compile(r"\btee\s+(?:-[a-zA-Z]+\s+)*([^\s;|&<>()]+)")
-_CREATE = re.compile(r"\b(?:mkdir|touch)\s+(?:-[a-zA-Z=]+\s+)*([^\s;|&<>()]+)")
-_DD_OF = re.compile(r"\bdd\b[^;|&]*\bof=([^\s;|&<>()]+)")
-_COPY = re.compile(r"\b(?:cp|mv|rsync|install)\s+(?:-[^\s]+\s+)*(?:[^\s;|&<>()]+\s+)+([^\s;|&<>()]+)")
+# Command-word patterns are anchored at a COMMAND position (assignment
+# prefixes and same-argv wrappers allowed): `echo mkdir passwd` PRINTS
+# words, and matching the argument resolved a phantom target against the
+# tracked cwd (false deny). Wrapped forms beyond the list fail open.
+_CMD_ANCHOR = (
+    r"(?:^|[\n;&|(])\s*"
+    r"(?:[A-Za-z_][A-Za-z0-9_]*=[^\s;|&<>()]*[ \t]+)*"
+    r"(?:(?:command|builtin|nohup|sudo|env|time)[ \t]+(?:-[^\s;|&<>()]+[ \t]+)*)*"
+)
+_TEE = re.compile(_CMD_ANCHOR + r"tee\s+(?:-[a-zA-Z]+\s+)*([^\s;|&<>()]+)")
+_CREATE = re.compile(
+    _CMD_ANCHOR + r"(?:mkdir|touch)\s+(?:-[a-zA-Z=]+\s+)*([^\s;|&<>()]+)"
+)
+_DD_OF = re.compile(_CMD_ANCHOR + r"dd\b[^;|&]*\bof=([^\s;|&<>()]+)")
+_COPY = re.compile(
+    _CMD_ANCHOR
+    + r"(?:cp|mv|rsync|install)\s+(?:-[^\s]+\s+)*(?:[^\s;|&<>()]+\s+)+([^\s;|&<>()]+)"
+)
 
 
 # cd/pushd/popd at a command position, optionally preceded by assignment
@@ -674,11 +688,24 @@ def _scannable(command: str) -> str:
 
 def _positioned_write_targets(scannable: str) -> list[tuple[int, str]]:
     targets: list[tuple[int, str]] = []
-    for pattern in (_REDIRECT, _TEE, _CREATE, _DD_OF, _COPY):
+
+    def keep(m: re.Match) -> None:
+        target = m.group(1).strip("'\"")
+        if target and not target.startswith("&"):
+            targets.append((m.start(1), target))
+
+    for m in _REDIRECT.finditer(scannable):
+        # `test x \> passwd` passes a LITERAL > to test — reporting a
+        # write falsely denied it against the tracked cwd
+        op = m.start() + m.group(0).index(">")
+        if _escape_parity(scannable, op) == 0:
+            keep(m)
+    for pattern in (_TEE, _CREATE, _DD_OF, _COPY):
         for m in pattern.finditer(scannable):
-            target = m.group(1).strip("'\"")
-            if target and not target.startswith("&"):
-                targets.append((m.start(1), target))
+            first = scannable[m.start()]
+            if first in ";&|(" and _escape_parity(scannable, m.start()) == 1:
+                continue  # anchored on word data (`echo \; mkdir x`)
+            keep(m)
     return targets
 
 

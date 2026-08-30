@@ -553,6 +553,42 @@ class TestBashFence:
             allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
             assert allow, (cmd, reason)
 
+    def test_command_word_patterns_require_command_position(self, tmp_path):
+        """`echo mkdir passwd` PRINTS words — matching the argument
+        resolved a phantom target against the tracked /etc (false deny).
+        Real command-position forms, wrapper- and pipe-prefixed included,
+        keep denying."""
+        for cmd in (
+            "cd /etc; echo mkdir passwd",
+            "cd /etc; echo cp x passwd",
+        ):
+            p = payload("Bash", command=cmd)
+            p["cwd"] = str(tmp_path)
+            allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+            assert allow, (cmd, reason)
+        for cmd in (
+            "cd /etc; mkdir passwd",
+            "cd /etc; sudo mkdir passwd",
+            "echo x | tee /tmp_probe/t",
+        ):
+            p = payload("Bash", command=cmd)
+            p["cwd"] = str(tmp_path)
+            allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+            assert not allow, cmd
+
+    def test_escaped_redirect_operator_is_an_argument(self, tmp_path):
+        """`test x \\> passwd` passes a LITERAL > — reporting passwd as a
+        write falsely denied it against the tracked /etc; the unescaped
+        form is a real redirect and keeps denying."""
+        p = payload("Bash", command="cd /etc; test x \\> passwd")
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+        p = payload("Bash", command="cd /etc; test x > passwd")
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+
     def test_negated_comparison_contexts_are_still_comparisons(self, tmp_path):
         """`! [[ x > passwd ]]` and `! (( x > passwd ))` negate a
         COMPARISON — nothing is written; the `!` reserved word keeps
