@@ -7,6 +7,7 @@ reviewable and versioned like code. User config carries account facts
 
 from __future__ import annotations
 
+import math
 import os
 import re
 from dataclasses import dataclass, field
@@ -315,6 +316,13 @@ def load_project_config(root: Path | str) -> ProjectConfig:
             raise ConfigError(
                 f"{PROJECT_CONFIG_NAME}: gates.{key} must be a scalar "
                 f"(string/number/bool/null), got {type(value).__name__}: {value!r}"
+            )
+        # YAML's `.nan` / `.inf` are floats, but json.dumps emits them as
+        # NaN/Infinity — not valid JSON, and a strict JSONL reader of the
+        # run log would choke on the policy event.
+        if isinstance(value, float) and not math.isfinite(value):
+            raise ConfigError(
+                f"{PROJECT_CONFIG_NAME}: gates.{key} must be finite, got {value!r}"
             )
     try:
         # Validate the alarm knob AT LOAD, like every other knob — a typo'd

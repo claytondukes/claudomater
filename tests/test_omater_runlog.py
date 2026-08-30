@@ -514,8 +514,23 @@ class TestPark:
         """A park on a closed run would misrepresent it as waiting."""
         log = RunLog.create(tmp_path)
         log.finish("run-failed", {"reason": "x"})
-        with pytest.raises(RunError, match="cannot park"):
+        with pytest.raises(RunError, match="ended"):
             log.park("too late")
+
+    def test_no_handle_may_append_after_the_run_ends(self, tmp_path):
+        """Round-5 finding: terminal enforcement was scoped to attach()
+        handles, but ownership does not make post-mortem history safe — the
+        owner (or an adopted handle) could event() after finish(), append a
+        non-terminal record, and flip is_live() back on. EVERY handle now
+        refuses, and a double finish() is a loud error instead of a second
+        terminal record."""
+        log = RunLog.create(tmp_path)
+        log.finish("run-complete")
+        with pytest.raises(RunError, match="post-mortem"):
+            log.event("dev", "phase-spawn", {"model": "m", "attempt": 1})
+        with pytest.raises(RunError, match="post-mortem"):
+            log.finish("run-failed", {"reason": "double finish"})
+        assert [e["event"] for e in log.events()][-1] == "run-complete"
 
     def test_failing_a_parked_run_is_refused(self, tmp_path):
         """Round-1 finding: the park record alone did not stop a driver from

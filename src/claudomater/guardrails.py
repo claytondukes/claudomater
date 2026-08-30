@@ -117,20 +117,33 @@ def _stale_decision(
         threshold = cfg.usage.pause_at[window]
         projected = pct + drift
         if projected >= threshold:
-            return Decision(
-                action=PAUSE,
-                reasons=prefix
-                + [
-                    f"stale usage ({int(age)}s old) with a near-limit last "
-                    f"reading: {WINDOW_LABELS[window]} {pct:.0f}% projects to "
-                    f"{projected:.0f}% (+{STALE_DRIFT_PP_PER_MIN} pp/min) "
-                    f">= {threshold}% -> pause"
-                ],
-                window=window,
-                resets_at=resets,
-                rebaselined=rebaselined,
-                snapshot=snap,
+            if cfg.usage.on_threshold[window] == PAUSE:
+                return Decision(
+                    action=PAUSE,
+                    reasons=prefix
+                    + [
+                        f"stale usage ({int(age)}s old) with a near-limit last "
+                        f"reading: {WINDOW_LABELS[window]} {pct:.0f}% projects to "
+                        f"{projected:.0f}% (+{STALE_DRIFT_PP_PER_MIN} pp/min) "
+                        f">= {threshold}% -> pause"
+                    ],
+                    window=window,
+                    resets_at=resets,
+                    rebaselined=rebaselined,
+                    snapshot=snap,
+                )
+            # A degrade-configured window's crossing is OBSERVED, never acted
+            # on: degrades need fresh numbers (the rule above), and pausing
+            # here would be harder than the user configured for a soft
+            # threshold — contrary to the fresh-path contract. Worst case is
+            # running the configured tier slightly past the soft threshold
+            # until a refresh succeeds.
+            below.append(
+                f"{WINDOW_LABELS[window]} {pct:.0f}% projects to "
+                f"{projected:.0f}% >= {threshold}% but the window is "
+                "degrade-configured and degrades never act on stale data"
             )
+            continue
         below.append(
             f"{WINDOW_LABELS[window]} {pct:.0f}% projects to "
             f"{projected:.0f}% < {threshold}%"

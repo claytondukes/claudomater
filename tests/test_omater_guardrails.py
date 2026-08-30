@@ -346,7 +346,7 @@ class TestStaleTtlAndNearLimitRule:
         """The Epic 9 incident's exact shape: a 346s-old reading (fresh by
         any phase-length standard) must read fine, not raise."""
         write_fake(
-            tmp_path, monkeypatch, {"five_hour": 17, "seven_day": 2, "scoped": 4}, age_s=600
+            tmp_path, monkeypatch, {"five_hour": 17, "seven_day": 2, "scoped": 4}, age_s=346
         )
         snap = read_usage()
         assert snap.five_hour == 17
@@ -408,6 +408,32 @@ class TestStaleTtlAndNearLimitRule:
         that carries no snapshot (no creds, unreadable cache) pauses."""
         d = evaluate(UsageUnavailable("no-credentials: nothing configured"), UserConfig())
         assert d.action == "pause" and "failing closed" in d.reasons[0]
+
+    def test_stale_projection_over_a_degrade_threshold_reports_but_proceeds(
+        self, tmp_path, monkeypatch
+    ):
+        """Round-5 finding: the stale path hard-paused every projected
+        crossing, including windows the user configured as `degrade` —
+        harder than the fresh-path contract for a soft threshold. A
+        degrade-configured crossing on stale data is OBSERVED in the
+        reasons, never acted on (degrades need fresh numbers); only
+        pause-configured windows trigger the stale pause."""
+        from claudomater.config import UsageConfig
+
+        cfg = UserConfig(
+            usage=UsageConfig(
+                on_threshold={"five_hour": "pause", "seven_day": "degrade"}
+            )
+        )
+        exc = self._stale_exc(
+            tmp_path, monkeypatch,
+            {"five_hour": 1, "seven_day": 90, "scoped": 1}, age_s=4000,
+        )
+        d = evaluate(exc, cfg)
+        assert d.action == "ok"
+        assert any("degrade-configured" in r for r in d.reasons)
+        # the same crossing on a pause-configured window still pauses
+        assert evaluate(exc, UserConfig()).action == "pause"
 
     def test_degrade_never_acts_on_stale_data(self, tmp_path, monkeypatch):
         """A stale scoped reading past degrade_scoped_at does NOT degrade:

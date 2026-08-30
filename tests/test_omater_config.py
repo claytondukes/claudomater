@@ -160,6 +160,13 @@ class TestProjectConfig:
                     "project: x\ngates:\n  board_steps_required: 2026-08-30\n",
                 )
             )
+        # YAML's .nan is a float and would sail through a bare scalar check,
+        # but json.dumps emits it as NaN — invalid JSON for strict JSONL
+        # readers of the run log (round-5 finding).
+        with pytest.raises(ConfigError, match="must be finite"):
+            load_project_config(
+                write_project(tmp_path, "project: x\ngates:\n  weight: .nan\n")
+            )
         cfg = load_project_config(
             write_project(
                 tmp_path, "project: x\ngates:\n  board_steps_required: false\n"

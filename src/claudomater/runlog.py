@@ -127,10 +127,6 @@ class RunLog:
     def __init__(self, run_dir: Path, run_id: str):
         self.run_dir = run_dir
         self.run_id = run_id
-        # Set by attach(): a sibling process appending to a run it does not
-        # own must re-verify liveness AT APPEND TIME (under the append lock),
-        # not just once at attach — the owner can finish between the two.
-        self._require_live = False
 
     # ---- lifecycle -------------------------------------------------------
 
@@ -258,9 +254,9 @@ class RunLog:
         default is the current run.
 
         Raises RunError when the run is missing or already ended — appending
-        to a closed run would forge post-mortem history. That liveness rule
-        is also re-checked at EVERY append (under the append lock): this
-        check-at-attach alone would be a race the owner's `finish()` could
+        to a closed run would forge post-mortem history. Liveness is also
+        re-checked at EVERY append, for every handle, under the append lock:
+        a check-at-attach alone would be a race the owner's `finish()` could
         slip through."""
         root = runs_root(project_root)
         if run_id is not None and run_id != CURRENT_LINK:
@@ -283,7 +279,6 @@ class RunLog:
             raise RunError(
                 f"run {log.run_id} already ended; nothing to attach to"
             )
-        log._require_live = True
         return log
 
     @classmethod
@@ -386,20 +381,19 @@ class RunLog:
         """Append one event (jsonl + progress line), flushed to disk before
         returning — call this BEFORE performing the action it describes.
 
-        Three rules are enforced HERE, under the append lock, because they
+        Two rules are enforced HERE, under the append lock, because they
         are only sound when checked atomically with the append:
-        - an attached sibling (`attach()`) cannot append to a run that has
-          ended — post-mortem history must not grow, and an append after the
-          terminal record would flip `is_live()` back on;
+        - NO handle may append to a run that has ended — owner, adopted, or
+          attached alike. Ownership does not make post-mortem history safe:
+          any append after the terminal record grows closed history and
+          flips `is_live()` back on. (This also makes a double `finish()` a
+          loud error.)
         - `run-failed` is refused while the run is parked (`_is_parked`:
           a run-parked with no later progress signal — bookkeeping like
           run-adopted and sibling evidence appends do NOT unpark): a parked
           run is live-and-waiting, and failing it is exactly the Epic 9
           empty-reasons death. Resume it (phase-spawn / control-resume) or
-          abort it;
-        - `run-parked` is refused on an ended run — that would misrepresent
-          a closed run as waiting (and, appended after the terminal record,
-          would flip `is_live()` back on)."""
+          abort it."""
         with self._append_lock():
             discarded = self._repair_torn_tail()
             if discarded:
@@ -407,24 +401,18 @@ class RunLog:
                 self._append_event(
                     "run", "torn-tail-repaired", {"discarded_bytes": discarded}
                 )
-            if self._require_live or event in ("run-failed", "run-parked"):
-                events = self.events()
-                last = events[-1]["event"] if events else None
-                if self._require_live and last in TERMINAL_EVENTS:
-                    raise RunError(
-                        f"run {self.run_id} has ended; an attached sibling "
-                        "cannot append to it"
-                    )
-                if event == "run-failed" and _is_parked(events):
-                    raise RunError(
-                        f"run {self.run_id} is parked (live-and-waiting), not "
-                        "failed — resume it or abort it; failing a parked run "
-                        "recreates the Epic 9 empty-reasons death"
-                    )
-                if event == "run-parked" and last in TERMINAL_EVENTS:
-                    raise RunError(
-                        f"run {self.run_id} already ended; cannot park it"
-                    )
+            events = self.events()
+            if events and events[-1]["event"] in TERMINAL_EVENTS:
+                raise RunError(
+                    f"run {self.run_id} has ended; no further events can be "
+                    "appended — post-mortem history must not grow"
+                )
+            if event == "run-failed" and _is_parked(events):
+                raise RunError(
+                    f"run {self.run_id} is parked (live-and-waiting), not "
+                    "failed — resume it or abort it; failing a parked run "
+                    "recreates the Epic 9 empty-reasons death"
+                )
             return self._append_event(phase, event, detail, story_key)
 
     def _append_event(
