@@ -46,15 +46,20 @@ Phase 0 skeleton — the pieces every pipeline run stands on:
 - **Slack notifications** — `PAUSED-QUOTA`, `DEGRADED`, `ESCALATED`,
   `RUN-COMPLETE`, `PROMPT-BLOCKED`, sent the moment the state changes so an
   overnight run never saves its bad news for the morning.
-- **`omater init`** — provisions the PreToolUse write-fence hook into the
-  consumer repo's `.claude/settings.json` (denies Write/Edit outside the
-  project root, pattern-matches Bash for out-of-tree writes), writes a
-  starter `.omater.yaml`, and gitignores the runs dir. `omater init --verify`
-  is the drift check run at every run start. The fence is a redirector for
-  tool-shaped writes, **not a jail**: writes constructed inside quoted
-  interpreter code (`python -c`, tempfile) pass the Bash scan by design; the
-  measured backstop is the per-phase `permission_denials` capture in the run
-  log plus verifier discipline.
+- **`omater init`** — writes a starter `.omater.yaml` and gitignores the
+  runs dir. The PreToolUse write fence (denies Write/Edit outside the
+  project root, pattern-matches Bash for out-of-tree writes) is RUN-SCOPED
+  and AGENT-SCOPED: `omater start` arms it into the consumer repo's
+  `.claude/settings.json`, `omater teardown` removes it, and while armed it
+  self-disarms (allows) for any session not carrying the `OMATER_PHASE_AGENT`
+  marker the phase executor injects — a project-level hook fires in EVERY
+  Claude session in the repo, and the fence contains spawned agents, never
+  the human (parity finding P1-1). `omater init --verify` is the
+  between-runs drift check. The fence is a redirector for tool-shaped
+  writes, **not a jail**: writes constructed inside quoted interpreter code
+  (`python -c`, tempfile) pass the Bash scan by design; the measured
+  backstop is the per-phase `permission_denials` capture in the run log
+  plus verifier discipline.
 
 ### Install
 
@@ -68,8 +73,9 @@ omater usage         # guardrail snapshot + decision
 
 | Command | What it does |
 |---|---|
-| `omater init [ROOT] [--verify] [--force]` | Provision hooks + config template; `--verify` = drift check (exit 1 on drift) |
-| `omater start [ROOT]` | Start a run: drift check, run-log creation, resolved policy written to the log |
+| `omater init [ROOT] [--verify] [--force]` | Provision config template + gitignore; `--verify` = between-runs drift check (exit 1 on drift) |
+| `omater start [ROOT]` | Start a run: arm the write fence, drift check, run-log creation, resolved policy written to the log |
+| `omater teardown [ROOT]` | Disarm the write fence (remove the run-scoped PreToolUse hook) |
 | `omater usage [--json]` | Fetch usage, evaluate guardrails; exit 0 ok / 3 pause / 4 degrade |
 | `omater policy [ROOT] [--json]` | Show the resolved policy (model chain, review floor, CI tier) for the project's `deployment_type` |
 | `omater notify KIND MESSAGE` | Send a Slack notification through the configured webhook |

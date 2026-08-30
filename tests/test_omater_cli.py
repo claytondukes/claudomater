@@ -114,6 +114,8 @@ class TestInitCommand:
 
 class TestHookCommand:
     def test_denies_outside_write_via_stdin(self, tmp_path, monkeypatch, capsys):
+        """AGENT session (marker present): the fence denies as before."""
+        monkeypatch.setenv("OMATER_PHASE_AGENT", "1")
         monkeypatch.setattr(
             "sys.stdin",
             __import__("io").StringIO(
@@ -125,6 +127,25 @@ class TestHookCommand:
         assert main(["hook", "pre-tool-use", "--root", str(tmp_path)]) == EXIT_OK
         out = json.loads(capsys.readouterr().out)
         assert out["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+    def test_unmarked_session_is_never_fenced(self, tmp_path, monkeypatch, capsys):
+        """Parity finding P1-1: the project-level hook fires in EVERY Claude
+        session in the repo - it denied an unrelated interactive session's
+        legitimate out-of-repo write while a run was live. Without the
+        agent marker the hook allows unconditionally (exit 0, no output),
+        before even reading the payload - the fence contains omater-spawned
+        agents, never the human."""
+        monkeypatch.delenv("OMATER_PHASE_AGENT", raising=False)
+        monkeypatch.setattr(
+            "sys.stdin",
+            __import__("io").StringIO(
+                json.dumps(
+                    {"tool_name": "Write", "tool_input": {"file_path": "/tmp_x/f"}}
+                )
+            ),
+        )
+        assert main(["hook", "pre-tool-use", "--root", str(tmp_path)]) == EXIT_OK
+        assert capsys.readouterr().out == ""
 
     def test_allows_inside_write_silently(self, tmp_path, monkeypatch, capsys):
         monkeypatch.setattr(

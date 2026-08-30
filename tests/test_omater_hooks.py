@@ -2600,6 +2600,76 @@ class TestProvisioning:
         assert hooks.verify(tmp_path) == []
 
 
+class TestFenceScopeP11:
+    """Parity finding P1-1 (2026-08-30, hit live on ui3): the project-level
+    fence hook applies to EVERY Claude session in the repo and denied an
+    unrelated interactive session's legitimate out-of-repo write while a run
+    was live - the run fencing the HUMAN's environment, the exact inversion
+    of the sandbox contract. The fence is now agent-scoped (AGENT_ENV
+    marker, injected only by ClaudeCliExecutor) and run-scoped (armed by
+    start_run, removed by teardown)."""
+
+    def test_fence_active_only_with_the_agent_marker(self):
+        assert hooks.fence_active({}) is False
+        assert hooks.fence_active({"OMATER_PHASE_AGENT": "1"}) is True
+        assert hooks.fence_active({"OMATER_PHASE_AGENT": ""}) is False
+
+    def test_executor_injects_the_agent_marker(self, monkeypatch):
+        """The ONLY source of the marker is the phase executor - a human
+        session can never carry it by accident of inheritance from the
+        orchestrator's own env being clean."""
+        from claudomater.phases import ClaudeCliExecutor
+
+        monkeypatch.delenv(hooks.AGENT_ENV, raising=False)
+        env = ClaudeCliExecutor().build_env()
+        assert env[hooks.AGENT_ENV] == "1"
+        # inherits the parent env rather than replacing it
+        import os
+
+        assert env.get("PATH") == os.environ.get("PATH")
+
+    def test_deprovision_removes_exactly_our_entry(self, tmp_path):
+        path = hooks.settings_path(tmp_path)
+        path.parent.mkdir(parents=True)
+        other = {"matcher": "Bash", "hooks": [{"type": "command", "command": "mine"}]}
+        path.write_text(json.dumps({"editor": "vim", "hooks": {"PreToolUse": [other]}}))
+        hooks.provision(tmp_path)
+        assert hooks.deprovision(tmp_path) is True
+        left = json.loads(path.read_text())
+        assert left["editor"] == "vim"
+        assert left["hooks"]["PreToolUse"] == [other]
+
+    def test_deprovision_cleans_empty_containers_and_is_idempotent(self, tmp_path):
+        hooks.provision(tmp_path)
+        assert hooks.deprovision(tmp_path) is True
+        settings = json.loads(hooks.settings_path(tmp_path).read_text())
+        assert "hooks" not in settings
+        assert hooks.deprovision(tmp_path) is False  # nothing left to remove
+        assert hooks.deprovision(tmp_path / "nowhere") is False  # no settings file
+
+    def test_start_run_arms_the_fence(self, tmp_path, omater_on_path):
+        """The fence exists exactly while a run is live: start_run arms it
+        (no prior `omater init` hook step exists anymore), teardown removes
+        it. Pre-P1-1 this refused with 'hook missing' drift instead."""
+        from claudomater.run import start_run
+
+        run_init(tmp_path)
+        log, cfg = start_run(tmp_path)
+        assert hooks.verify(tmp_path, require=True) == []
+        log.finish("run-aborted", {"reason": "test teardown"})
+        assert hooks.deprovision(tmp_path) is True
+        assert hooks.verify(tmp_path, require=False) == []
+
+    def test_teardown_cli_disarms(self, tmp_path, capsys):
+        from claudomater.cli import EXIT_OK, main
+
+        hooks.provision(tmp_path)
+        assert main(["teardown", str(tmp_path)]) == EXIT_OK
+        assert "removed" in capsys.readouterr().out
+        assert hooks._find_entry(json.loads(hooks.settings_path(tmp_path).read_text())) is None
+        assert main(["teardown", str(tmp_path)]) == EXIT_OK  # idempotent, honest message
+
+
 class TestInit:
     def test_verify_reports_omater_missing_from_path(self, tmp_path, monkeypatch):
         """Command-not-found is exit 127 = allow: a PATH without omater
@@ -2612,9 +2682,13 @@ class TestInit:
         assert any("not on PATH" in p for p in problems)
 
     def test_init_provisions_everything_and_verify_passes(self, tmp_path, omater_on_path):
+        """P1-1 rewrite of the same intent: init provisions config, gitignore
+        and scratch, verify passes - and the write fence is deliberately NOT
+        installed (it is run-scoped; a hook init leaves behind would fire in
+        every human session in the repo between runs)."""
         actions = run_init(tmp_path)
         assert (tmp_path / ".omater.yaml").exists()
-        assert hooks.settings_path(tmp_path).exists()
+        assert not hooks.settings_path(tmp_path).exists()
         assert GITIGNORE_LINE in (tmp_path / ".gitignore").read_text().splitlines()
         assert (tmp_path / hooks.SCRATCH_SUBDIR).is_dir()
         assert any("wrote" in a for a in actions)
@@ -2678,8 +2752,24 @@ class TestInit:
         assert cfg.project == tmp_path.name
 
     def test_verify_reports_all_drift(self, tmp_path):
+        """P1-1 rewrite: a bare directory drifts on config and gitignore; a
+        MISSING fence hook is the healthy between-runs state and reports
+        nothing, while a present-but-drifted leftover still reports."""
         problems = run_verify(tmp_path)
-        assert len(problems) >= 3  # settings, config, gitignore
+        assert len(problems) >= 2  # config, gitignore
+        assert not any("hook" in p for p in problems)
+        # a drifted leftover (present but not canonical) still reports
+        path = hooks.settings_path(tmp_path)
+        path.parent.mkdir(parents=True)
+        path.write_text(
+            json.dumps(
+                {"hooks": {"PreToolUse": [{"matcher": "Write", "hooks": [
+                    {"type": "command", "command": "omater hook pre-tool-use --root /elsewhere"}
+                ]}]}}
+            ),
+            encoding="utf-8",
+        )
+        assert any("drifted" in p for p in run_verify(tmp_path))
 
     def test_unreadable_settings_reports_not_crashes(self, tmp_path):
         hooks.provision(tmp_path)

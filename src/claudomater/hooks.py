@@ -13,9 +13,13 @@ measure is the run report's permission-stall count and the CLI's
 discipline, not a claim of completeness. A false DENY is as costly as a miss
 (it stalls legitimate work), so unrecognized input always passes.
 
-`omater init` provisions the hook into the consumer repo's
-`.claude/settings.json`; `omater init --verify` is the drift check run at
-every run start.
+The hook is RUN-SCOPED and AGENT-SCOPED (parity finding P1-1, 2026-08-30):
+`run.start_run` arms it into the consumer repo's `.claude/settings.json`,
+teardown (`omater teardown` / `deprovision`) removes it, and while armed the
+hook self-disarms (exit 0) for any session not carrying the AGENT_ENV
+marker that ClaudeCliExecutor injects - a project-level hook fires in EVERY
+Claude session in the repo, and fencing the human's own session inverts the
+sandbox contract.
 """
 
 from __future__ import annotations
@@ -34,6 +38,23 @@ HOOK_COMMAND = 'omater hook pre-tool-use --root "$CLAUDE_PROJECT_DIR"'
 HOOK_MARKER = "omater hook pre-tool-use"
 SCRATCH_SUBDIR = ".omater/scratch"
 SCRATCH_ENV = "OMATER_SCRATCH_DIR"
+# The marker only omater-spawned phase agents carry (injected by
+# ClaudeCliExecutor). Project-level hooks apply to EVERY Claude session in
+# the repo - including the human's - so the fence must self-disarm when the
+# marker is absent. Parity finding P1-1 (2026-08-30): the ui3 run's fence
+# denied an unrelated interactive session's legitimate out-of-repo write -
+# the run fencing the HUMAN's environment, the exact inversion of the
+# sandbox contract (the fence exists to contain bypassed-permissions agents,
+# design §3/§12, never to constrain a person).
+AGENT_ENV = "OMATER_PHASE_AGENT"
+
+
+def fence_active(env: dict[str, str] | None = None) -> bool:
+    """True only inside an omater-spawned phase agent's session. The hook
+    process inherits the Claude session's environment, so a human session
+    (no marker) reads False and the fence stays inert for it."""
+    source = env if env is not None else os.environ
+    return bool(source.get(AGENT_ENV))
 
 # Paths that are never a stall risk.
 _ALWAYS_ALLOWED = ("/dev/null", "/dev/stdout", "/dev/stderr", "/dev/tty")
@@ -2020,22 +2041,53 @@ def provision(project_root: Path | str) -> bool:
     return True
 
 
-def verify(project_root: Path | str) -> list[str]:
-    """Drift detection, run at every run start. Empty list = healthy."""
+def deprovision(project_root: Path | str) -> bool:
+    """Remove the write-fence hook from `.claude/settings.json`, preserving
+    everything else (the exact inverse of provision). Returns True if the
+    file changed. Run teardown calls this so the fence exists only while a
+    run is live - a hook left behind is inert for human sessions thanks to
+    the AGENT_ENV gate, but leaving it installed at all is the P1-1 shape:
+    the project-level hook fires in every session in the repo."""
+    path = settings_path(project_root)
+    if not path.exists():
+        return False
+    settings = _load_settings(path)
+    entry = _find_entry(settings)
+    if entry is None:
+        return False
+    pre = settings["hooks"]["PreToolUse"]
+    pre.remove(entry)
+    if not pre:
+        del settings["hooks"]["PreToolUse"]
+    if not settings["hooks"]:
+        del settings["hooks"]
+    path.write_text(json.dumps(settings, indent=2) + "\n", encoding="utf-8")
+    return True
+
+
+def verify(project_root: Path | str, require: bool = True) -> list[str]:
+    """Drift detection. Empty list = healthy. With `require=True` (the run
+    path, called after provision arms the fence) a missing hook is a
+    problem; with `require=False` (between-runs checks like
+    `omater init --verify`) missing is the HEALTHY state - the fence is
+    run-scoped since P1-1 - and only a present-but-drifted entry reports."""
     problems: list[str] = []
     path = settings_path(project_root)
     if not path.exists():
-        return [f"{path} does not exist — run `omater init`"]
+        if require:
+            problems.append(f"{path} does not exist — the fence is not armed")
+        return problems
     try:
         settings = _load_settings(path)
     except HookProvisionError as exc:
         return [str(exc)]
     entry = _find_entry(settings)
     if entry is None:
-        problems.append("write-fence PreToolUse hook missing — run `omater init`")
+        if require:
+            problems.append("write-fence PreToolUse hook missing — fence not armed")
     elif entry != _our_entry():
         problems.append(
             "write-fence PreToolUse hook drifted from the provisioned form — "
-            "run `omater init` to restore it"
+            "re-arm it (provision) or remove it (teardown)"
         )
     return problems
