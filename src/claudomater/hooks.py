@@ -585,7 +585,11 @@ _CREATE = re.compile(
     + _CMD_PATH
     + r"(?P<cmd>mkdir|touch)[ \t]+(?:-[a-zA-Z=]+[ \t]+)*(?P<ops>(?:[^\s;|&<>()]+[ \t]*)+)"
 )
-_DD_OF = re.compile(_CMD_ANCHOR + _CMD_PATH + r"dd\b[^;|&\n]*\bof=([^\s;|&<>()]+)")
+# shell-token boundary, not \b: a hyphen is a non-word char, so \b let
+# `dd-not of=/f` read as dd and falsely denied a write dd never performs
+_DD_OF = re.compile(
+    _CMD_ANCHOR + _CMD_PATH + r"dd(?=[\s;&|<>()])[^;|&\n]*\bof=([^\s;|&<>()]+)"
+)
 # the verb is CAPTURED: searching the whole match for a verb name found
 # one inside an assignment prefix (`X=cp rsync -t ...`) and applied cp's
 # -t semantics to rsync, letting the real destination through

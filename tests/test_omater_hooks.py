@@ -553,6 +553,19 @@ class TestBashFence:
             allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
             assert allow, (cmd, reason)
 
+    def test_dd_requires_a_token_boundary(self, tmp_path):
+        """`dd-not of=/f` is not dd — \\b fired after the hyphen and
+        falsely denied a write dd never performs. Real dd keeps
+        denying."""
+        p = payload("Bash", command="dd-not of=/tmp_probe/x")
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+        p = payload("Bash", command="dd if=/dev/zero of=/tmp_probe/x")
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+
     def test_child_scope_assignments_do_not_persist(self, tmp_path):
         """A pipeline, subshell, or backgrounded assignment runs in a
         CHILD shell — the parent's HOME is unchanged and the later ~
