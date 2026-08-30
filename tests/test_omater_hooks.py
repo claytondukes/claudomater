@@ -553,6 +553,21 @@ class TestBashFence:
             allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
             assert allow, (cmd, reason)
 
+    def test_prefixed_writer_invocations_stay_recognized(self, tmp_path):
+        """`!`, `env VAR=x`, and `sudo -u root` prefixes run the writer
+        with the same argv — the command-position anchor must accept
+        them (a rigid prefix order regressed these statically
+        recognizable absolute writes to unrecognized)."""
+        for cmd in (
+            "! touch /tmp_probe/x",
+            "env MODE=x touch /tmp_probe/x",
+            "sudo -u root touch /tmp_probe/x",
+        ):
+            p = payload("Bash", command=cmd)
+            p["cwd"] = str(tmp_path)
+            allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+            assert not allow, cmd
+
     def test_writer_operands_stop_at_newlines(self, tmp_path):
         """Operand separators are HORIZONTAL: a newline ends the command,
         and absorbing the next command's words as operands falsely denied

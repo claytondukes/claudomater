@@ -429,10 +429,20 @@ _REDIRECT = re.compile(r"(?<![<>&\d])\d?>{1,2}\s*([^\s;|&<>()]+)")
 # prefixes and same-argv wrappers allowed): `echo mkdir passwd` PRINTS
 # words, and matching the argument resolved a phantom target against the
 # tracked cwd (false deny). Wrapped forms beyond the list fail open.
+# The prefix grammar accepts `!`, INTERLEAVED assignments and wrappers
+# (`env MODE=x touch ...` puts the assignment after the wrapper), and a
+# wrapper flag's argument (`sudo -u root touch ...` — backtracking
+# decides whether the word after a flag is its argument or the command).
+# A rigid assignments-then-wrappers order dropped these statically
+# recognizable writer invocations to unrecognized (missed absolute
+# writes the unanchored patterns used to deny).
 _CMD_ANCHOR = (
-    r"(?:^|[\n;&|(])\s*"
-    r"(?:[A-Za-z_][A-Za-z0-9_]*=[^\s;|&<>()]*[ \t]+)*"
-    r"(?:(?:command|builtin|nohup|sudo|env|time)[ \t]+(?:-[^\s;|&<>()]+[ \t]+)*)*"
+    r"(?:^|[\n;&|(])\s*(?:![ \t]+)*"
+    r"(?:"
+    r"[A-Za-z_][A-Za-z0-9_]*=[^\s;|&<>()]*[ \t]+"
+    r"|(?:command|builtin|nohup|sudo|env|time)[ \t]+"
+    r"(?:-[^\s;|&<>()]+[ \t]+(?:[^\s;|&<>()=-][^\s;|&<>()]*[ \t]+)?)*"
+    r")*"
 )
 # tee/mkdir/touch accept MULTIPLE operands — group 1 captures the whole
 # list (checking only the first let `tee <root>/ok passwd` open
