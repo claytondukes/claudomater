@@ -509,8 +509,11 @@ _REDIRECT = re.compile(r"(?<![<>&\d])\d?>{1,2}\s*([^\s;|&<>()]+)")
 # bash rejects `builtin touch` without running it, and recognizing the
 # shape falsely denied a write that never happens (it stays a cd wrapper,
 # where cd IS a builtin).
+# `)` anchors are refined per match: only an UNMATCHED close (a case
+# ARM's terminator — `case x in x) touch /f;;` runs its writer) counts;
+# a substitution/subshell close does not (`echo $(x) touch /f` prints).
 _CMD_ANCHOR = (
-    r"(?:^|[\n;&|(]|\{(?=[ \t\n]))\s*"
+    r"(?:^|[\n;&|()]|\{(?=[ \t\n]))\s*"
     r"(?:(?:if|elif|while|until|then|else|do)[ \t]+)*"
     r"(?:![ \t]+)*"
     r"(?:"
@@ -891,10 +894,25 @@ def _positioned_write_targets(scannable: str) -> list[tuple[int, str]]:
         if token and not token.startswith("&"):
             targets.append((pos, token))
 
+    unmatched_close: set[int] = set()
+    depth = 0
+    for k, ch in enumerate(scannable):
+        if ch == "(" and _escape_parity(scannable, k) == 0:
+            depth += 1
+        elif ch == ")" and _escape_parity(scannable, k) == 0:
+            if depth:
+                depth -= 1
+            else:
+                unmatched_close.add(k)
+
     def anchored_on_syntax(m: re.Match) -> bool:
         first = scannable[m.start()]
-        if first in ";&|(" and _escape_parity(scannable, m.start()) == 1:
+        if first in ";&|()" and _escape_parity(scannable, m.start()) == 1:
             return True  # escaped separator: word data (`echo \; mkdir x`)
+        if first == ")" and m.start() not in unmatched_close:
+            # a substitution/subshell close is not a command anchor
+            # (`echo $(x) touch /f` prints); an unmatched case-ARM `)` is
+            return True
         if (
             first == "&"
             and m.start() > 0
@@ -982,28 +1000,7 @@ def resolved_bash_targets(
     # targets bypass CDPATH per bash and keep tracking.
     env = env if env is not None else dict(os.environ)
 
-    # A COMMAND-POSITION assignment only (plus export/declare forms): a
-    # mere argument (`printf CDPATH=/tmp`, `printf HOME=/tmp`) assigns
-    # nothing, and the old command-wide substring flags made later cds
-    # and `~` targets untrackable — hiding recognized escapes. The
-    # position is kept so the flag applies only to events AFTER it: a
-    # write before the assignment resolves under the ORIGINAL value.
-    def _first_assignment(pattern: re.Pattern) -> int | None:
-        for am in pattern.finditer(scannable):
-            first = scannable[am.start()]
-            if first in ";&|({" and _escape_parity(scannable, am.start()) == 1:
-                continue
-            return am.end()
-        return None
-
     cdpath_env = bool(env.get("CDPATH"))
-    cdpath_pos = _first_assignment(_CDPATH_ASSIGN)
-    # An in-command HOME assignment changes what `~` means to bash, while
-    # expanduser reads the HOOK's environment — resolving `~` through the
-    # stale HOME falsely denied in-root writes (`HOME=<root>; echo > ~/f`
-    # and `HOME=<root>; cd ~`). No HOME tracking (frozen): `~`-leading
-    # targets AFTER the assignment are unresolved, fail open.
-    home_pos = _first_assignment(_HOME_ASSIGN)
     arith = _arith_spans(scannable)
     # `(( x > passwd ))` and `[[ x > passwd ]]` are COMPARISONS — no write
     # happens, and the phantom targets were falsely denied against the
@@ -1385,6 +1382,33 @@ def resolved_bash_targets(
         # definition time — targets, cds, and opacity alike are data
         _in_dead = _span_lookup(dead_spans)
         events = [e for e in events if not _in_dead(e[0])]
+    else:
+        _in_dead = None
+
+    # A COMMAND-POSITION assignment only (plus export/declare forms): a
+    # mere argument (`printf CDPATH=/tmp`, `printf HOME=/tmp`) assigns
+    # nothing; one inside a dead function body (`f() { HOME=/tmp; }`) or
+    # arithmetic never runs. The position is kept so the flag applies only
+    # to events AFTER it: a write before the assignment resolves under
+    # the ORIGINAL value.
+    def _first_assignment(pattern: re.Pattern) -> int | None:
+        for am in pattern.finditer(scannable):
+            first = scannable[am.start()]
+            if first in ";&|({" and _escape_parity(scannable, am.start()) == 1:
+                continue
+            if _in_arith(am.end() - 1):
+                continue
+            if _in_dead is not None and _in_dead(am.end() - 1):
+                continue
+            return am.end()
+        return None
+
+    cdpath_pos = _first_assignment(_CDPATH_ASSIGN)
+    # An in-command HOME assignment changes what `~` means to bash, while
+    # expanduser reads the HOOK's environment — resolving `~` through the
+    # stale HOME falsely denied in-root writes. No HOME tracking (frozen):
+    # `~`-leading targets AFTER the assignment are unresolved, fail open.
+    home_pos = _first_assignment(_HOME_ASSIGN)
     events.sort(key=lambda e: (e[0], priority[e[1]]))
 
     current: Path | None = cwd

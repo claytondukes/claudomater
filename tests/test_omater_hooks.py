@@ -553,6 +553,31 @@ class TestBashFence:
             allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
             assert allow, (cmd, reason)
 
+    def test_case_arm_writers_stay_recognized(self, tmp_path):
+        """`case x in x) touch /tmp_probe/x;; esac` RUNS its writer when
+        the arm matches — the arm's unmatched `)` is a command position.
+        A substitution-closing `)` is NOT one: `echo $(true) touch
+        /tmp_probe/x` only prints (no false deny)."""
+        p = payload("Bash", command="case x in x) touch /tmp_probe/x;; esac")
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+        p = payload("Bash", command="echo $(true) touch /tmp_probe/x")
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+
+    def test_assignments_inside_function_bodies_are_inert(self, tmp_path):
+        """`f() { HOME=/tmp; }; echo hi > ~/outside` never assigns —
+        arming HOME from the dead body made the later recognizable tilde
+        write unresolved (miss)."""
+        p = payload(
+            "Bash", command="f() { HOME=/tmp; }; echo hi > ~/omater-probe5.txt"
+        )
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+
     def test_env_var_mentions_as_arguments_do_not_disarm(self, tmp_path):
         """`printf CDPATH=/tmp` / `printf HOME=/tmp` assign NOTHING — the
         command-wide substring flags made later cds and `~` targets
