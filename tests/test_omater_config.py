@@ -375,6 +375,17 @@ class TestUserConfig:
             with pytest.raises(ConfigError, match="must be a mapping"):
                 load_user_config(path)
 
+    def test_non_positive_max_stale_is_a_config_error(self, tmp_path):
+        """Round-7 finding: 0/negative marks EVERY cache entry stale, and
+        the stale carve-out would then proceed on any low reading — config
+        garbage silently weakening the guardrail instead of failing at
+        load."""
+        for bad in (0, -300):
+            path = tmp_path / "config.yaml"
+            path.write_text(f"usage:\n  max_stale_seconds: {bad}\n", encoding="utf-8")
+            with pytest.raises(ConfigError, match="must be >= 1"):
+                load_user_config(path)
+
     def test_non_integer_knobs_are_config_errors(self, tmp_path):
         for text in (
             "usage:\n  degrade_scoped_at: soon\n",

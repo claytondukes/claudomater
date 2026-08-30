@@ -452,6 +452,13 @@ def load_user_config(path: Path | str | None = None) -> UserConfig:
         "usage.max_stale_seconds",
         usage_raw.get("max_stale_seconds", DEFAULT_MAX_STALE_S),
     )
+    if usage.max_stale_seconds < 1:
+        # 0/negative marks EVERY cache entry stale, and the stale carve-out
+        # would then proceed on any low reading — config garbage silently
+        # weakening the guardrail instead of failing at load.
+        raise ConfigError(
+            f"usage.max_stale_seconds must be >= 1, got {usage.max_stale_seconds}"
+        )
 
     for window, pct in usage.pause_at.items():
         if window not in ("five_hour", "seven_day"):
