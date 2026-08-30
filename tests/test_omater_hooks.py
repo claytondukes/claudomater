@@ -553,6 +553,36 @@ class TestBashFence:
             allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
             assert allow, (cmd, reason)
 
+    def test_export_operands_do_not_cut_the_range_short(self, tmp_path):
+        """`export HOME=<root> OTHER` persists HOME — OTHER is another
+        export OPERAND, and reading it as a prefixed command cut the
+        range at the semicolon and resolved the later ~ under the stale
+        home (false deny)."""
+        p = payload(
+            "Bash", command=f"export HOME={tmp_path} OTHER; echo hi > ~/out.txt"
+        )
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+
+    def test_assignment_range_lookup_is_logarithmic(self, tmp_path):
+        """A linear range scan per tilde target was quadratic against
+        many one-shot assignments in the synchronous hook; the bisect
+        lookup keeps it linear overall."""
+        import time
+
+        cmd = "".join(
+            f"HOME=/tmp printf x; echo hi > ~/f{i}.txt; " for i in range(9000)
+        )
+        p = payload("Bash", command=cmd)
+        p["cwd"] = str(tmp_path)
+        started = time.monotonic()
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert time.monotonic() - started < 2.0
+        # every ~ write is OUTSIDE each one-shot range: original home,
+        # out-of-tree, recognized
+        assert not allow
+
     def test_invocation_before_definition_is_not_a_call(self, tmp_path):
         """In `cd /etc; f; cat > passwd; f() {{ :; }}` the early f is
         UNDEFINED when it runs — nothing moves the cwd, and voiding on it

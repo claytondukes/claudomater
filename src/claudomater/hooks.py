@@ -665,7 +665,7 @@ _ASSIGN_PREFIX = (
     r"(?:^|[\n;&|({])\s*(?:![ \t]+)*"
     # `declare -x HOME=...` really assigns — option words between the
     # builtin and the assignment were missed (false deny via stale ~)
-    r"(?:(?:export|declare|local|readonly)[ \t]+(?:-[A-Za-z]+[ \t]+)*)?"
+    r"(?:(?P<decl>export|declare|local|readonly)[ \t]+(?:-[A-Za-z]+[ \t]+)*)?"
     r"(?:[A-Za-z_][A-Za-z0-9_]*=[^\s;|&<>()]*[ \t]+)*"
 )
 _CDPATH_ASSIGN = re.compile(_ASSIGN_PREFIX + r"CDPATH=")
@@ -1487,22 +1487,29 @@ def resolved_bash_targets(
             tail = re.sub(
                 r"^(?:[ \t]+[A-Za-z_][A-Za-z0-9_]*=[^\s;|&<>()]*)*", "", tail
             )
-            if tail.strip():
-                ranges.append((am.end(), seg_end))
-            else:
+            # a declaration builtin's trailing words are its OPERANDS
+            # (`export HOME=<root> OTHER` persists HOME — treating OTHER
+            # as a prefixed command cut the range short and falsely
+            # denied a later ~ write)
+            if am.group("decl") is not None or not tail.strip():
                 ranges.append((am.end(), len(scannable)))
+            else:
+                ranges.append((am.end(), seg_end))
         return ranges
 
-    def _in_ranges(ranges: list[tuple[int, int]], p: int) -> bool:
-        return any(start < p <= end for start, end in ranges)
+    def _range_lookup(ranges: list[tuple[int, int]]) -> Callable[[int], bool]:
+        # (start, end] containment as a bisect lookup — a linear scan per
+        # tilde target / tracked cd was quadratic against many one-shot
+        # assignment ranges in the synchronous hook
+        return _span_lookup([(s + 1, e + 1) for s, e in ranges])
 
-    cdpath_ranges = _assignment_ranges(_CDPATH_ASSIGN)
+    _in_cdpath_range = _range_lookup(_assignment_ranges(_CDPATH_ASSIGN))
     # An in-command HOME assignment changes what `~` means to bash, while
     # expanduser reads the HOOK's environment — resolving `~` through the
     # stale HOME falsely denied in-root writes. No HOME tracking (frozen):
     # `~`-leading targets in an assignment's effective range are
     # unresolved, fail open.
-    home_ranges = _assignment_ranges(_HOME_ASSIGN)
+    _in_home_range = _range_lookup(_assignment_ranges(_HOME_ASSIGN))
     events.sort(key=lambda e: (e[0], priority[e[1]]))
 
     current: Path | None = cwd
@@ -1521,7 +1528,7 @@ def resolved_bash_targets(
                 out.append((raw, None))
                 continue
             if _resolved_target(raw) is None or (
-                raw.startswith("~") and _in_ranges(home_ranges, _pos)
+                raw.startswith("~") and _in_home_range(_pos)
             ):
                 out.append((raw, None))
             elif Path(os.path.expanduser(raw)).is_absolute():
@@ -1629,7 +1636,7 @@ def resolved_bash_targets(
             # entry this scan cannot know. All -> unknown, fail open.
             current = None
             continue
-        if target.startswith("~") and _in_ranges(home_ranges, _pos):
+        if target.startswith("~") and _in_home_range(_pos):
             # same stale-HOME rule as write targets: `HOME=<root>; cd ~`
             # returns IN-root while expanduser tracked the old home
             current = None
@@ -1662,7 +1669,7 @@ def resolved_bash_targets(
         if step.is_absolute():
             new_cwd = str(step)
         elif (
-            cdpath_env or _in_ranges(cdpath_ranges, _pos)
+            cdpath_env or _in_cdpath_range(_pos)
         ) and not (
             target in (".", "..") or target.startswith(("./", "../"))
         ):
