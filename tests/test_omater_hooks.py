@@ -2754,6 +2754,22 @@ class TestFenceScopeP11:
         notes = getattr(excinfo.value, "__notes__", [])
         assert any("omater teardown" in n for n in notes)
 
+    def test_between_runs_verify_reports_malformed_settings(self, tmp_path):
+        """Copilot round-4 finding: a present-but-structurally-invalid
+        settings file made _find_entry return None, which require=False
+        read as healthy - so `omater init --verify` passed on the exact
+        file the next start_run's provision() would refuse. Structural
+        invariants report in BOTH modes."""
+        path = hooks.settings_path(tmp_path)
+        path.parent.mkdir(parents=True)
+        for malformed, needle in (
+            ({"hooks": "oops"}, "not a mapping"),
+            ({"hooks": {"PreToolUse": {}}}, "not a list"),
+        ):
+            path.write_text(json.dumps(malformed), encoding="utf-8")
+            (problem,) = hooks.verify(tmp_path, require=False)
+            assert needle in problem, malformed
+
     def test_teardown_cli_disarms(self, tmp_path, capsys):
         from claudomater.cli import EXIT_OK, main
 

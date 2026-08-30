@@ -2098,6 +2098,23 @@ def verify(project_root: Path | str, require: bool = True) -> list[str]:
         settings = _load_settings(path)
     except HookProvisionError as exc:
         return [str(exc)]
+    # Structural invariants provisioning relies on are reported in BOTH
+    # modes: a present-but-malformed settings file would make _find_entry
+    # return None, and in require=False mode that read as "healthy" while
+    # the next start_run's provision() failed on the same file.
+    hooks_cfg = settings.get("hooks")
+    if "hooks" in settings and not isinstance(hooks_cfg, dict):
+        return [
+            f"{path}: 'hooks' is not a mapping — arming the fence would "
+            "fail; fix it by hand"
+        ]
+    if isinstance(hooks_cfg, dict) and "PreToolUse" in hooks_cfg and not isinstance(
+        hooks_cfg["PreToolUse"], list
+    ):
+        return [
+            f"{path}: hooks.PreToolUse is not a list — arming the fence "
+            "would fail; fix it by hand"
+        ]
     entry = _find_entry(settings)
     if entry is None:
         if require:
