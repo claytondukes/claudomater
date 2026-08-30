@@ -620,9 +620,14 @@ class RunLog:
             # read_controls() tolerates a torn FINAL command (never issued),
             # but appending right after the fragment would weld it to this
             # record and corrupt BOTH — repair the control tail under this
-            # same lock, exactly like the event log's append path. The
-            # repair is itself history.
+            # same lock, exactly like the event log's append path. Then
+            # validate the REPAIRED prefix before recording anything
+            # (events-log discipline): a command accepted into unreadable
+            # history would be unusable — every later read_controls() would
+            # raise — so corrupt middle damage refuses the command loudly,
+            # naming the damaged line. The repair is itself history.
             discarded = self._repair_torn_tail(CONTROL_JSONL, "action")
+            self.read_controls()
             if discarded:
                 self._append_event(
                     "run", "control-tail-repaired", {"discarded_bytes": discarded}

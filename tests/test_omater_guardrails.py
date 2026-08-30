@@ -51,6 +51,12 @@ def snapshot(five=10.0, seven=10.0, scoped=10.0, account=None, **kw):
     )
 
 
+def iso_utc(epoch):
+    return datetime.fromtimestamp(epoch, tz=timezone.utc).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+
+
 def write_fake(tmp_path, monkeypatch, data, age_s=0):
     path = tmp_path / "fake-usage.json"
     path.write_text(json.dumps(data), encoding="utf-8")
@@ -391,16 +397,10 @@ class TestStaleTtlAndNearLimitRule:
         class the staleness-AND-near-limit rule exists to avoid). The reset
         is a known zero point strictly better than the expired reading:
         projection rebases from 0% at the reset."""
-
-        def iso(epoch):
-            return datetime.fromtimestamp(epoch, tz=timezone.utc).strftime(
-                "%Y-%m-%dT%H:%M:%SZ"
-            )
-
         now = time.time()
         snap = snapshot(five=90.0)
         snap.fetched_at = now - 4000  # stale past the TTL
-        snap.five_hour_resets_at = iso(now - 600)  # reset 10 min ago
+        snap.five_hour_resets_at = iso_utc(now - 600)  # reset 10 min ago
         exc = UsageUnavailable("stale-cache", snapshot=snap, age_s=4000.0)
         d = evaluate(exc, UserConfig())
         assert d.action == "ok"
@@ -408,11 +408,29 @@ class TestStaleTtlAndNearLimitRule:
         # a reset grants no free pass: drift from the reset's zero point
         # still self-caps once enough stale time passes
         snap.fetched_at = now - 200000
-        snap.five_hour_resets_at = iso(now - 190000)
+        snap.five_hour_resets_at = iso_utc(now - 190000)
         exc = UsageUnavailable("stale-cache", snapshot=snap, age_s=200000.0)
         d = evaluate(exc, UserConfig())
         assert d.action == "pause" and d.window == "five_hour"
         assert "rebased from 0%" in d.reasons[0]
+
+    def test_reading_taken_after_the_reset_is_not_rebased(self):
+        """Round-14 finding: rebasing keyed only on `reset <= now`, so a
+        resets_at OLDER than the reading itself (incoherent cache, an API
+        reporting the LAST reset) discarded a valid 90% reading for a lower
+        from-zero projection — fail OPEN. Rebasing requires the reset
+        strictly inside the stale interval (fetched_at < reset <= now); a
+        reading taken after the reset already belongs to the current window
+        and projects normally."""
+        now = time.time()
+        for reset_offset in (5000, 4000):  # before the reading; exactly at it
+            snap = snapshot(five=90.0)
+            snap.fetched_at = now - 4000
+            snap.five_hour_resets_at = iso_utc(now - reset_offset)
+            exc = UsageUnavailable("stale-cache", snapshot=snap, age_s=4000.0)
+            d = evaluate(exc, UserConfig())
+            assert d.action == "pause" and d.window == "five_hour"
+            assert "rebased" not in d.reasons[0]
 
     def test_unparseable_reset_keeps_the_conservative_projection(self):
         """Garbage resets_at maps to 'cannot detect a reset' (the

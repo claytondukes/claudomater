@@ -146,6 +146,19 @@ class TestStaleNumericClaims:
         # a malformed numerator keeps the whole construct a non-claim
         assert stale_numeric_claims("1,2 of 486 tests passed", 999) == []
 
+    def test_slash_ratio_claims_select_the_numerator(self):
+        """Round-14 finding: '398/486 tests passed' fell through to the
+        generic matcher, which claimed the DENOMINATOR (a slash is not in
+        the count token's lookbehind class) — the same hidden-failures
+        shape the 'of' grammar closed. '/' is a ratio separator; a count
+        preceded by a slash is a total, never a claim."""
+        (msg,) = stale_numeric_claims("398/486 tests passed", 486)
+        assert '"398/486 tests passed"' in msg
+        assert stale_numeric_claims("486/486 tests passed", 486) == []
+        assert stale_numeric_claims("398 / 486 passed", 398) == []
+        # a malformed numerator cannot fall through to the generic matcher
+        assert stale_numeric_claims("1,2/486 tests passed", 999) == []
+
     def test_garbage_counts_fail_loudly(self):
         for bad in (True, -1, "486", None, 4.86):
             with pytest.raises(MergeSeamError):

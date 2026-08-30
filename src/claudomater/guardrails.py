@@ -139,7 +139,7 @@ def _stale_decision(
             )
         threshold = cfg.usage.pause_at[window]
         reset_epoch = _reset_epoch_or_none(resets)
-        if reset_epoch is not None and reset_epoch <= now:
+        if reset_epoch is not None and snap.fetched_at < reset_epoch <= now:
             # The reading predates its window's reset: that percentage
             # belongs to the EXPIRED window, and drifting it forward would
             # pause a window that has already restarted — a false deny, the
@@ -147,7 +147,11 @@ def _stale_decision(
             # zero point strictly better than the pre-reset reading, so the
             # projection rebases from 0% there. (A stale interval spanning
             # several reset cycles rebases from the FIRST — over-projecting,
-            # i.e. erring toward pause.)
+            # i.e. erring toward pause.) The reset must fall STRICTLY inside
+            # the stale interval: a resets_at at or before fetched_at means
+            # the reading was taken after that reset and is already the
+            # current window's — rebasing on it would discard a valid high
+            # reading for a lower from-zero projection and fail OPEN.
             projected = STALE_DRIFT_PP_PER_MIN * ((now - reset_epoch) / 60.0)
             reading = (
                 f"{WINDOW_LABELS[window]} {pct:.0f}% pre-reset (window reset "

@@ -324,6 +324,22 @@ class TestControl:
         assert [c["action"] for c in log.read_controls()] == ["resume", "approve"]
         assert "control-tail-repaired" in [e["event"] for e in log.events()]
 
+    def test_corrupt_middle_control_history_refuses_new_commands(self, tmp_path):
+        """Round-14 finding: the tail repair alone still let write_control
+        append a valid command after corrupt MIDDLE control history —
+        accepted but unusable, since every later read_controls() raises.
+        The repaired prefix is validated under the same lock (events-log
+        discipline): the command is refused loudly, naming the damage, and
+        nothing lands in either channel."""
+        log = RunLog.create(tmp_path)
+        with open(log.run_dir / "control.jsonl", "a", encoding="utf-8") as fh:
+            fh.write("garbage not json\n")  # middle damage, written directly
+            fh.write('{"ts": "2026-08-28T22:00:00Z", "action": "resume"}\n')
+        with pytest.raises(RunError, match="corrupt control.jsonl at line 1"):
+            log.write_control("approve")
+        # the refused command left the event stream untouched too
+        assert "control-approve" not in [e["event"] for e in log.events()]
+
     def test_corrupt_middle_events_damage_is_not_reported_as_ended(self, tmp_path):
         """Round-12 finding (suppressed): write_control caught EVERY RunError
         from the liveness check — including a corrupt middle events.jsonl
