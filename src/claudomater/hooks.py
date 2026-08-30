@@ -1264,11 +1264,14 @@ def resolved_bash_targets(
         if parent_scope and _paren_depth_at[def_start]:
             parent_scope = False
         if parent_scope and end is not None:
+            # the boundary AFTER the body: a trailing `&` backgrounds the
+            # definition and a trailing `|` pipelines it (`f() { :; } |
+            # true` — the internal `;` fooled the match-anchored check) —
+            # either way the parent never defines the name
             b = _segment_boundary(scannable, end)
-            if (
-                b < len(scannable)
-                and scannable[b] == "&"
-                and not scannable.startswith("&&", b)
+            if b < len(scannable) and (
+                (scannable[b] == "&" and not scannable.startswith("&&", b))
+                or (scannable[b] == "|" and not scannable.startswith("||", b))
             ):
                 parent_scope = False
         if name_m and parent_scope:
@@ -1570,13 +1573,20 @@ def resolved_bash_targets(
     # arithmetic never runs. The position is kept so the flag applies only
     # to events AFTER it: a write before the assignment resolves under
     # the ORIGINAL value.
-    def _assignment_ranges(pattern: re.Pattern) -> list[tuple[int, int]]:
+    def _assignment_ranges(
+        pattern: re.Pattern, include_oneshot: bool
+    ) -> list[tuple[int, int]]:
         # An assignment-only statement (or export/declare form) is
         # PERSISTENT; a command-prefix assignment (`CDPATH=/x printf y`)
         # is TEMPORARY — bash scopes it to that one command, and treating
         # it as persistent hid recognizable denies after it. A one-shot
         # range ends at the segment boundary, which still covers the
-        # one-shot `CDPATH=/x cd t` itself.
+        # one-shot `CDPATH=/x cd t` itself. HOME skips one-shots entirely
+        # (include_oneshot=False): tilde expansion uses the shell's
+        # CURRENT home before the child env applies, so `HOME=x tee ~/f`
+        # writes under the ORIGINAL home and must keep denying. Child
+        # scopes — subshells, pipelines, backgrounded statements — never
+        # register: they cannot change the parent's variable.
         ranges: list[tuple[int, int]] = []
         for am in pattern.finditer(scannable):
             first = scannable[am.start()]
@@ -1586,7 +1596,15 @@ def resolved_bash_targets(
                 continue
             if _in_dead is not None and _in_dead(am.end() - 1):
                 continue
+            if _paren_depth_at[am.end() - 1] or _pipeline_scoped(am):
+                continue
             seg_end = _segment_boundary(scannable, am.end())
+            if (
+                seg_end < len(scannable)
+                and scannable[seg_end] == "&"
+                and not scannable.startswith("&&", seg_end)
+            ):
+                continue
             tail = scannable[am.end() : seg_end]
             # drop this assignment's value, then any further assignment
             # words; a remaining word is the prefixed COMMAND
@@ -1605,7 +1623,7 @@ def resolved_bash_targets(
             # denied a later ~ write)
             if am.group("decl") is not None or not tail.strip():
                 ranges.append((am.end(), len(scannable)))
-            else:
+            elif include_oneshot:
                 ranges.append((am.end(), seg_end))
         return ranges
 
@@ -1615,13 +1633,13 @@ def resolved_bash_targets(
         # assignment ranges in the synchronous hook
         return _span_lookup([(s + 1, e + 1) for s, e in ranges])
 
-    _in_cdpath_range = _range_lookup(_assignment_ranges(_CDPATH_ASSIGN))
+    _in_cdpath_range = _range_lookup(_assignment_ranges(_CDPATH_ASSIGN, include_oneshot=True))
     # An in-command HOME assignment changes what `~` means to bash, while
     # expanduser reads the HOOK's environment — resolving `~` through the
     # stale HOME falsely denied in-root writes. No HOME tracking (frozen):
     # `~`-leading targets in an assignment's effective range are
     # unresolved, fail open.
-    _in_home_range = _range_lookup(_assignment_ranges(_HOME_ASSIGN))
+    _in_home_range = _range_lookup(_assignment_ranges(_HOME_ASSIGN, include_oneshot=False))
     events.sort(key=lambda e: (e[0], priority[e[1]]))
 
     current: Path | None = cwd

@@ -553,6 +553,32 @@ class TestBashFence:
             allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
             assert allow, (cmd, reason)
 
+    def test_child_scope_assignments_do_not_persist(self, tmp_path):
+        """A pipeline, subshell, or backgrounded assignment runs in a
+        CHILD shell — the parent's HOME is unchanged and the later ~
+        write resolves under the original home (deny; each shape used to
+        fail open)."""
+        for cmd in (
+            "HOME=/tmp | true; echo hi > ~/omater-probe7.txt",
+            "(HOME=/tmp); echo hi > ~/omater-probe7.txt",
+            "HOME=/tmp & echo hi > ~/omater-probe7.txt",
+        ):
+            p = payload("Bash", command=cmd)
+            p["cwd"] = str(tmp_path)
+            allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+            assert not allow, cmd
+
+    def test_pipelined_function_definitions_do_not_register(self, tmp_path):
+        """`f() { :; } | true` defines f in the pipeline's subshell only
+        — the body's internal `;` fooled the boundary check, and voiding
+        on the later (undefined) f hid the recognized write."""
+        p = payload(
+            "Bash", command="f() { :; } | true; cd /etc; f; cat > passwd"
+        )
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+
     def test_subshell_definitions_do_not_register_names(self, tmp_path):
         """`(f() { :; }); cd /etc; f; cat > passwd` runs an UNDEFINED f —
         the subshell definition never reaches the parent, and voiding on
@@ -857,10 +883,13 @@ class TestBashFence:
             p["cwd"] = str(tmp_path)
             allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
             assert not allow, cmd
+        # tilde expansion uses the shell's CURRENT home BEFORE the
+        # one-shot prefix applies to the child env: the write lands under
+        # the ORIGINAL home (out-of-tree) and must deny
         p = payload("Bash", command=f"HOME={tmp_path} tee ~/one-shot.txt")
         p["cwd"] = str(tmp_path)
-        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
-        assert allow, reason
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
 
     def test_unmatched_cd_fallback_is_linear(self, tmp_path):
         """Each unmatched cd word back-scanned and re-tokenized its
