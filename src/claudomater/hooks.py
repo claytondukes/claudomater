@@ -400,6 +400,12 @@ _GLUED_COMMAND = re.compile(
 # write against the STALE pre-cd cwd (false deny).
 _TRANSPARENT_PREFIX_WORD = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=\S*|\d*[<>]\S*|&>\S*|-\S*")
 _CD_WRAPPERS = frozenset({"command", "builtin", "time", "!"})
+# A redirect operator with NO glued operand (`>`, `2>>`, `>&`, `&>`) takes
+# the NEXT word as its file — `> /dev/null cd <root>` redirects and then
+# RUNS cd. Checking `/dev/null` as an independent word kept a stale cwd
+# and falsely denied the in-root write. Complete forms (`2>&1`, `2>&-`)
+# do not consume an operand and stay ordinary transparent words.
+_BARE_REDIRECT = re.compile(r"\d*[<>]{1,2}&?|&>{1,2}")
 def _segment_boundary(text: str, start: int) -> int:
     """Position of the control operator ending the command segment at
     `start` (or len(text)). An `&` inside redirection syntax — `>&`/`<&`
@@ -759,10 +765,18 @@ def resolved_bash_targets(
                     continue
                 break
             s -= 1
-        return all(
-            w in _CD_WRAPPERS or _TRANSPARENT_PREFIX_WORD.fullmatch(w)
-            for w in scannable[s:pos].split()
-        )
+        words = scannable[s:pos].split()
+        k = 0
+        while k < len(words):
+            w = words[k]
+            if _BARE_REDIRECT.fullmatch(w):
+                k += 2  # the next word is this redirect's file operand
+                continue
+            if w in _CD_WRAPPERS or _TRANSPARENT_PREFIX_WORD.fullmatch(w):
+                k += 1
+                continue
+            return False
+        return True
 
     for m in _CD_WORD.finditer(scannable):
         # a cd-ish token the parser did not positively match voids tracking

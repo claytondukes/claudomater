@@ -553,6 +553,24 @@ class TestBashFence:
             allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
             assert allow, (cmd, reason)
 
+    def test_spaced_redirect_prefix_keeps_cd_at_command_position(self, tmp_path):
+        """`> /dev/null cd <dir>` redirects and then RUNS cd — checking
+        the spaced operand as an independent command word rejected the
+        prefix, kept the stale /etc cwd, and falsely denied the in-root
+        write. The unmatched cd now voids (fail open), never goes stale;
+        a cd as a plain argument (`echo x 2>&1 cd`) still leaves tracking
+        alone."""
+        p = payload(
+            "Bash", command=f"cd /etc; > /dev/null cd {tmp_path}; cat > out.txt"
+        )
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+        p = payload("Bash", command="cd /etc; echo x 2>&1 cd; cat > passwd")
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+
     def test_redirect_ampersand_is_not_a_command_anchor(self, tmp_path):
         """`echo hi >& cd /etc` redirects to a FILE named cd — no chdir.
         Anchoring the chdir match on the redirect's & applied /etc and
