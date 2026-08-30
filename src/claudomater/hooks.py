@@ -20,12 +20,13 @@ every run start.
 
 from __future__ import annotations
 
+import bisect
 import json
 import os
 import posixpath
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 WRITE_TOOLS = ("Write", "Edit", "MultiEdit", "NotebookEdit")
 HOOK_MATCHER = "|".join((*WRITE_TOOLS, "Bash"))
@@ -284,6 +285,26 @@ def _arith_spans(
         spans.append((i - 1 if dollar else i, close + 1))
         i = close + 1
     return spans
+
+
+def _span_lookup(spans: list[tuple[int, int]]) -> Callable[[int], bool]:
+    """O(log n) containment over possibly-overlapping spans: bisect on
+    sorted starts, compared against the running max end (a nested span
+    must not mask its container). The per-item `any(...)` rescans this
+    replaces were O(N^2) in the synchronous PreToolUse hook."""
+    spans = sorted(spans)
+    starts = [start for start, _ in spans]
+    max_ends: list[int] = []
+    running = 0
+    for _, end in spans:
+        running = max(running, end)
+        max_ends.append(running)
+
+    def contains(pos: int) -> bool:
+        j = bisect.bisect_right(starts, pos) - 1
+        return j >= 0 and pos < max_ends[j]
+
+    return contains
 
 
 _COND_OPEN = re.compile(r"(?:^|[\n;&|({])\s*\[\[(?=[ \t\n])")
@@ -677,12 +698,13 @@ def resolved_bash_targets(
     # happens, and the phantom targets were falsely denied against the
     # (correctly) kept cwd. Redirects after the closing ))/]] are real
     # and stay (`((x)) > out` carries its redirect outside the span).
-    inert = sorted(arith + _cond_spans(scannable))
+    _in_inert = _span_lookup(arith + _cond_spans(scannable))
     events: list[tuple[int, str, Any]] = [
         (pos, "target", raw)
         for pos, raw in _positioned_write_targets(scannable)
-        if not any(start <= pos < end for start, end in inert)
+        if not _in_inert(pos)
     ]
+    _in_arith = _span_lookup(arith)
     # A paren inside PURE arithmetic — no nested command substitution
     # ($( or backtick) in the span — is the arithmetic's own delimiter
     # or grouping: evaluation cannot move the shell's cwd, and voiding
@@ -771,7 +793,7 @@ def resolved_bash_targets(
     # their marker blanked; a << in arithmetic is a SHIFT — `$((x<<2))`
     # walling off the rest of its own line hid a real redirect there.)
     for m in re.finditer(r"(?<!<)<<(?!<)", scannable):
-        if any(start <= m.start() < end for start, end in arith):
+        if _in_arith(m.start()):
             continue
         eol = scannable.find("\n", m.start())
         events.append((len(scannable) if eol == -1 else eol, "wall", None))
@@ -806,15 +828,12 @@ def resolved_bash_targets(
             return _escape_parity(scannable, m.start(1)) == 0
         return True
 
-    def _in_arith(pos: int) -> bool:
-        # identifiers inside arithmetic are VARIABLES, not builtins:
-        # `((cd /etc))` evaluates `cd / etc` and moves nothing — applying
-        # it falsely denied an in-root write, and voiding on the token
-        # would trade that for a miss. Neither: arithmetic cds are inert
-        # (one in a NESTED substitution is subshell-scoped, and the impure
-        # span's parens already void tracking).
-        return any(start <= pos < end for start, end in arith)
-
+    # _in_arith (bound above): identifiers inside arithmetic are
+    # VARIABLES, not builtins — `((cd /etc))` evaluates `cd / etc` and
+    # moves nothing. Applying it falsely denied an in-root write; voiding
+    # on the token would trade that for a miss. Neither: arithmetic cds
+    # are inert (one in a NESTED substitution is subshell-scoped, and the
+    # impure span's parens already void tracking).
     chdir_matches = [
         m
         for m in _CHDIR.finditer(scannable)

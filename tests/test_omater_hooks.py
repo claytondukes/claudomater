@@ -553,6 +553,24 @@ class TestBashFence:
             allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
             assert allow, (cmd, reason)
 
+    def test_span_containment_lookups_stay_subquadratic(self, tmp_path):
+        """Target filtering, the residual-<< wall skip, and the
+        arithmetic cd checks each rescanned the full span list per item —
+        O(N^2) in the synchronous hook for generated scripts mixing
+        arithmetic, redirects, cds, and unsupported heredoc markers. The
+        bisect span lookup keeps them logarithmic."""
+        import time
+
+        cmd = "".join(
+            f"echo $(({i}+1)) > f{i}; cd .; echo <<@{i}\n" for i in range(5000)
+        )
+        p = payload("Bash", command=cmd)
+        p["cwd"] = str(tmp_path)
+        started = time.monotonic()
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert time.monotonic() - started < 1.5
+        assert allow, reason  # in-root targets, then walls (fail open)
+
     def test_unbalanced_arithmetic_is_a_syntax_error_not_a_write(self, tmp_path):
         """`(( x > /tmp_probe/out` never closes: bash reads to EOF hunting
         for )) and rejects the whole input — nothing executes, so the
