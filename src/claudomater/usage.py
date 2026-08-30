@@ -331,7 +331,15 @@ def read_usage(
         # recorded provenance (a statusline-written cache) = unverifiable =
         # no carve-out, fail closed.
         provenance = payload.get("fetched_by")
-        current = account_identity(env=env)
+        # The active identity is the credential the refresh just ATTEMPTED
+        # with, when one was acquired: an env-token identity is a token
+        # fingerprint that a bare account_identity(env=env) recomputation
+        # cannot reproduce (it has no token), which would lock env-token
+        # users out of the carve-out forever. Fall back to the resolved
+        # login only when no credential was acquired at all.
+        current = (
+            fetch_account if fetch_account is not None else account_identity(env=env)
+        )
         stale_snapshot = None
         if isinstance(provenance, dict) and provenance == current:
             stale_snapshot = UsageSnapshot(

@@ -505,6 +505,41 @@ class TestStaleProvenance:
         assert excinfo.value.snapshot is None
         assert evaluate(excinfo.value, UserConfig()).action == "pause"
 
+    def test_env_token_identity_survives_a_failed_refresh(self, tmp_path):
+        """Round-2 finding: the carve-out compared provenance against a bare
+        account_identity(env=...) recomputation, which cannot reproduce an
+        env token's fingerprint (it has no token) — locking env-token users
+        out of the carve-out forever. The active identity is the credential
+        the failed refresh actually ACQUIRED."""
+        import urllib.error
+
+        from claudomater.credentials import EnvTokenProvider
+        from claudomater.usage import refresh_cache
+
+        provider = EnvTokenProvider(env={"OMATER_OAUTH_TOKEN": "tok"})
+        cache = tmp_path / "cache.json"
+        ok, _, account = refresh_cache(
+            cache,
+            providers=[provider],
+            http=lambda url, headers, timeout: json.dumps(
+                {"limits": self.LIMITS}
+            ).encode(),
+            env={},
+        )
+        assert ok is True
+        old = time.time() - 4000
+        os.utime(cache, (old, old))
+
+        def failing_http(url, headers, timeout):
+            raise urllib.error.URLError("429: Too Many Requests")
+
+        with pytest.raises(UsageUnavailable) as excinfo:
+            read_usage(cache_path=cache, providers=[provider], http=failing_http, env={})
+        exc = excinfo.value
+        assert exc.snapshot is not None  # fingerprint matched fingerprint
+        assert exc.snapshot.account == account
+        assert evaluate(exc, UserConfig()).action == "ok"
+
     def test_refresh_embeds_provenance_and_fresh_reads_prefer_it(self, tmp_path):
         """The write side of the contract: omater's refresh records who
         fetched, and an unrefreshed later read attributes the numbers to the

@@ -444,10 +444,49 @@ class TestPark:
         log.finish("run-aborted", {"reason": "operator decision"})  # allowed
 
     def test_a_resumed_run_can_fail_again(self, tmp_path):
-        """Any event after the park represents the run moving forward — a
-        re-driven phase that then genuinely fails may fail the run."""
+        """A progress signal after the park (a re-driven phase spawn) unparks
+        — a phase that then genuinely fails may fail the run."""
         log = RunLog.create(tmp_path)
         log.park("paused: guardrail", phase="lessons")
         log.event("lessons", "phase-spawn", {"model": "m", "attempt": 1})
         log.finish("run-failed", {"reason": "lessons did not verify: [gate]"})
+        assert not log.is_live()
+
+    def test_bookkeeping_and_sibling_events_do_not_unpark(self, tmp_path):
+        """Round-2 finding: adopt() appends run-adopted, so 'last event is
+        run-parked' stopped holding the moment anyone adopted the parked run
+        — and a sibling's evidence append would unpark it too. Parked is a
+        lifecycle fact: only phase-spawn / control-resume clear it."""
+        log = RunLog.create(tmp_path)
+        log.event("lessons", "phase-spawn", {"model": "m", "attempt": 1})
+        log.park("paused: guardrail", phase="lessons")
+        adopted = RunLog.adopt(tmp_path)  # run-adopted: bookkeeping
+        sibling = RunLog.attach(tmp_path)
+        sibling.event("merge", "copilot-round", {"round": 1})  # evidence
+        with pytest.raises(RunError, match="parked"):
+            adopted.finish("run-failed", {"reason": "x"})
+        assert log.is_live()
+
+    def test_operator_resume_unparks(self, tmp_path):
+        """control-resume is an explicit progress signal — after it, a
+        genuine failure may fail the run."""
+        log = RunLog.create(tmp_path)
+        log.park("paused: guardrail", phase="lessons")
+        log.write_control("resume")
+        log.finish("run-failed", {"reason": "resumed work failed: [gate]"})
+        assert not log.is_live()
+
+    def test_park_racing_a_concurrent_finish_is_refused(self, tmp_path):
+        """Round-2 finding (suppressed): park's ended-check lived OUTSIDE the
+        append lock, so a terminal event landing between check and append let
+        run-parked follow it and flip is_live() back on. The check now runs
+        inside event()'s locked section — this pins the observable contract;
+        the interleaving itself is closed by construction (one critical
+        section)."""
+        log = RunLog.create(tmp_path)
+        log.event("dev", "phase-spawn", {"model": "m", "attempt": 1})
+        sibling = RunLog.attach(tmp_path)
+        log.finish("run-complete")
+        with pytest.raises(RunError):
+            sibling.park("too late")
         assert not log.is_live()

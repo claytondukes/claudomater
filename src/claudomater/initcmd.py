@@ -57,7 +57,9 @@ ci:
   tier_on_merge: full
 
 gates:
-  copilot_max_rounds_kpi: 1
+  copilot_max_rounds_kpi: 1   # a target the run report scores
+  review_round_alarm: 15      # hard stop: past this, page the operator with a
+                              # surface diagnosis instead of grinding
   board_steps_required: false
 """
 

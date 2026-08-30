@@ -39,6 +39,25 @@ CREATE_LOCK_STALE_S = 60
 # Events that end a run; a run whose last event is none of these is live.
 TERMINAL_EVENTS = {"run-complete", "run-aborted", "run-failed"}
 
+# Parked state is a lifecycle fact, not "the literal last event": adoption,
+# attach bookkeeping, notification failures, and sibling evidence appends say
+# nothing about the run progressing, so none of them may unpark it. Only an
+# explicit progress signal clears a park — a new phase spawn or an operator
+# resume.
+_PARK_CLEARING_EVENTS = {"phase-spawn", "control-resume"}
+
+
+def _is_parked(events: list[dict[str, Any]]) -> bool:
+    """Walk back to the nearest park-vs-progress signal. run-parked with no
+    later progress = parked; anything else = not parked."""
+    for ev in reversed(events):
+        name = ev.get("event")
+        if name == "run-parked":
+            return True
+        if name in _PARK_CLEARING_EVENTS:
+            return False
+    return False
+
 CONTROL_ACTIONS = ("resume", "abort", "approve")
 
 
@@ -312,17 +331,22 @@ class RunLog:
         """Append one event (jsonl + progress line), flushed to disk before
         returning — call this BEFORE performing the action it describes.
 
-        Two rules are enforced HERE, under the append lock, because they are
-        only sound when checked atomically with the append:
+        Three rules are enforced HERE, under the append lock, because they
+        are only sound when checked atomically with the append:
         - an attached sibling (`attach()`) cannot append to a run that has
           ended — post-mortem history must not grow, and an append after the
           terminal record would flip `is_live()` back on;
-        - `run-failed` is refused while the run is parked (last event
-          `run-parked`): a parked run is live-and-waiting, and failing it is
-          exactly the Epic 9 empty-reasons death. Resume it (any event that
-          moves the run forward unparks it) or abort it."""
+        - `run-failed` is refused while the run is parked (`_is_parked`:
+          a run-parked with no later progress signal — bookkeeping like
+          run-adopted and sibling evidence appends do NOT unpark): a parked
+          run is live-and-waiting, and failing it is exactly the Epic 9
+          empty-reasons death. Resume it (phase-spawn / control-resume) or
+          abort it;
+        - `run-parked` is refused on an ended run — that would misrepresent
+          a closed run as waiting (and, appended after the terminal record,
+          would flip `is_live()` back on)."""
         with self._append_lock():
-            if self._require_live or event == "run-failed":
+            if self._require_live or event in ("run-failed", "run-parked"):
                 events = self.events()
                 last = events[-1]["event"] if events else None
                 if self._require_live and last in TERMINAL_EVENTS:
@@ -330,11 +354,15 @@ class RunLog:
                         f"run {self.run_id} has ended; an attached sibling "
                         "cannot append to it"
                     )
-                if event == "run-failed" and last == "run-parked":
+                if event == "run-failed" and _is_parked(events):
                     raise RunError(
                         f"run {self.run_id} is parked (live-and-waiting), not "
                         "failed — resume it or abort it; failing a parked run "
                         "recreates the Epic 9 empty-reasons death"
+                    )
+                if event == "run-parked" and last in TERMINAL_EVENTS:
+                    raise RunError(
+                        f"run {self.run_id} already ended; cannot park it"
                     )
             return self._append_event(phase, event, detail, story_key)
 
@@ -438,10 +466,9 @@ class RunLog:
         for the Epic 9 incident where a driver terminated a paused run as
         `run-failed` with empty reasons — the runner parks, and whoever reads
         the log sees the run is waiting, not dead. Parking an ended run
-        raises: that would misrepresent a closed run as waiting."""
-        events = self.events()
-        if events and events[-1]["event"] in TERMINAL_EVENTS:
-            raise RunError(f"run {self.run_id} already ended; cannot park it")
+        raises: that would misrepresent a closed run as waiting. The check
+        lives in `event()`'s locked section — a pre-check here would race a
+        concurrent terminal append (the same TOCTOU attach() had)."""
         return self.event(
             phase,
             "run-parked",
