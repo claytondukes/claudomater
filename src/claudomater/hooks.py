@@ -438,15 +438,20 @@ _CMD_ANCHOR = (
 # list (checking only the first let `tee <root>/ok passwd` open
 # /etc/passwd unrecognized); dash tokens inside are skipped per-operand.
 _TEE = re.compile(
-    _CMD_ANCHOR + r"tee\s+(?:-[a-zA-Z]+\s+)*((?:[^\s;|&<>()]+[ \t]*)+)"
+    _CMD_ANCHOR + r"tee\s+(?:-[a-zA-Z]+\s+)*(?P<ops>(?:[^\s;|&<>()]+[ \t]*)+)"
 )
 _CREATE = re.compile(
-    _CMD_ANCHOR + r"(?:mkdir|touch)\s+(?:-[a-zA-Z=]+\s+)*((?:[^\s;|&<>()]+[ \t]*)+)"
+    _CMD_ANCHOR
+    + r"(?P<cmd>mkdir|touch)\s+(?:-[a-zA-Z=]+\s+)*(?P<ops>(?:[^\s;|&<>()]+[ \t]*)+)"
 )
 _DD_OF = re.compile(_CMD_ANCHOR + r"dd\b[^;|&]*\bof=([^\s;|&<>()]+)")
+# the verb is CAPTURED: searching the whole match for a verb name found
+# one inside an assignment prefix (`X=cp rsync -t ...`) and applied cp's
+# -t semantics to rsync, letting the real destination through
 _COPY = re.compile(
     _CMD_ANCHOR
-    + r"(?:cp|mv|rsync|install)\s+(?:-[^\s]+\s+)*(?:[^\s;|&<>()]+\s+)+([^\s;|&<>()]+)"
+    + r"(?P<cmd>cp|mv|rsync|install)\s+(?:-[^\s]+\s+)*"
+    + r"(?:[^\s;|&<>()]+\s+)+(?P<dest>[^\s;|&<>()]+)"
 )
 
 
@@ -738,14 +743,18 @@ def _scannable(command: str) -> str:
 # cp/mv/install ONLY: rsync's -t means --times, and exempting it let a
 # recognized out-of-tree destination through.
 _TARGET_DIR_OPT = re.compile(r"(?:^|\s)(?:-\w*t\w*|--target-directory)(?:[=\s]|$)")
-_COPY_VERB = re.compile(r"\b(cp|mv|rsync|install)\b")
 # mkdir -m MODE / touch -r REF / touch -d DATE / touch -t STAMP consume
 # the NEXT operand as the option's argument — resolving it as a write
 # target falsely denied in-root-only commands (`mkdir -m 755 <root>/x`
-# read as writing /etc/755). Arg-taking shapes fail open.
-_CREATE_OPT_WITH_ARG = re.compile(
-    r"(?:^|\s)-[a-zA-Z]*[mrdt]\b|(?:^|\s)--(?:mode|reference|date)(?:[=\s]|$)"
-)
+# read as writing /etc/755). Arg-taking shapes fail open — PER VERB:
+# touch -m is a FLAG (mtime), and a shared letter set let
+# `touch -m /etc/passwd` through unrecognized.
+_CREATE_OPT_WITH_ARG = {
+    "mkdir": re.compile(r"(?:^|\s)-[a-zA-Z]*m\b|(?:^|\s)--mode(?:[=\s]|$)"),
+    "touch": re.compile(
+        r"(?:^|\s)-[a-zA-Z]*[rdt]\b|(?:^|\s)--(?:reference|date)(?:[=\s]|$)"
+    ),
+}
 
 
 def _positioned_write_targets(scannable: str) -> list[tuple[int, str]]:
@@ -781,25 +790,22 @@ def _positioned_write_targets(scannable: str) -> list[tuple[int, str]]:
         for m in pattern.finditer(scannable):
             if anchored_on_syntax(m):
                 continue
-            if pattern is _CREATE and _CREATE_OPT_WITH_ARG.search(m.group(0)):
-                continue  # -m 755 etc. consume the next operand: fail open
-            for operand in re.finditer(r"[^\s;|&<>()]+", m.group(1)):
+            if pattern is _CREATE and _CREATE_OPT_WITH_ARG[
+                m.group("cmd")
+            ].search(m.group(0)):
+                continue  # an arg-taking option consumes an operand: fail open
+            for operand in re.finditer(r"[^\s;|&<>()]+", m.group("ops")):
                 if not operand.group().startswith("-"):
-                    keep(m.start(1) + operand.start(), operand.group())
+                    keep(m.start("ops") + operand.start(), operand.group())
     for m in _DD_OF.finditer(scannable):
         if not anchored_on_syntax(m):
             keep(m.start(1), m.group(1))
     for m in _COPY.finditer(scannable):
         if anchored_on_syntax(m):
             continue
-        verb = _COPY_VERB.search(m.group(0))
-        if (
-            verb is not None
-            and verb.group(1) != "rsync"
-            and _TARGET_DIR_OPT.search(m.group(0))
-        ):
+        if m.group("cmd") != "rsync" and _TARGET_DIR_OPT.search(m.group(0)):
             continue
-        keep(m.start(1), m.group(1))
+        keep(m.start("dest"), m.group("dest"))
     return targets
 
 

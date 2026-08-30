@@ -553,6 +553,29 @@ class TestBashFence:
             allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
             assert allow, (cmd, reason)
 
+    def test_create_option_semantics_are_per_verb(self, tmp_path):
+        """touch -m is a FLAG (set mtime, no argument) — sharing mkdir's
+        -m exemption let `touch -m /etc/passwd` through unrecognized.
+        mkdir -m still takes an argument and fails open."""
+        p = payload("Bash", command="touch -m /etc/passwd")
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+        p = payload("Bash", command=f"cd /etc; mkdir -m 755 {tmp_path}/safe")
+        p["cwd"] = str(tmp_path)
+        allow, reason = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert allow, reason
+
+    def test_copy_verb_is_the_matched_command_not_prefix_text(self, tmp_path):
+        """`X=cp rsync -t src /tmp_probe/out`: the verb is rsync (-t =
+        --times) — finding 'cp' in the assignment prefix applied the
+        target-directory exemption and let the real destination
+        through."""
+        p = payload("Bash", command="X=cp rsync -t src /tmp_probe/out")
+        p["cwd"] = str(tmp_path)
+        allow, _ = hooks.evaluate_pre_tool_use(p, tmp_path)
+        assert not allow
+
     def test_escaped_backslash_newline_is_a_real_boundary(self, tmp_path):
         """`echo \\\\<nl>cd /etc; cat > passwd`: the first backslash
         escapes the second, so the newline is a REAL command boundary and
