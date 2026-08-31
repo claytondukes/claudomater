@@ -593,6 +593,58 @@ class TestUpdatedAtMeansWhenTheStatusChanged:
         ) is True
         assert SprintDoc.read(workfile).entry("4-3-being-worked").status == "in-progress"
 
+    def test_a_membership_only_move_does_not_bump_updated_at(self, store, tmp_path):
+        """PR #13 round 9. The UPSERT bumped `updated_at` when only the
+        EPIC changed, so a story moved between epic blocks looked like a
+        status change - the same column meaning two things again, which
+        round 4 fixed for set_status but not for import."""
+        p = tmp_path / "s.yaml"
+        p.write_text(
+            "development_status:\n  epic-1: done\n  9-1-a-story: backlog\n"
+            "  epic-2: backlog\n",
+            encoding="utf-8",
+        )
+        import_path(store, "sample", p)
+        before = store.conn.execute(
+            "SELECT epic, updated_at FROM story WHERE project='sample' "
+            "AND key='9-1-a-story'"
+        ).fetchone()
+        assert before["epic"] == "1"
+        # the same story, now listed under epic 2
+        p.write_text(
+            "development_status:\n  epic-1: done\n  epic-2: backlog\n"
+            "  9-1-a-story: backlog\n",
+            encoding="utf-8",
+        )
+        import_path(store, "sample", p)
+        after = store.conn.execute(
+            "SELECT epic, updated_at FROM story WHERE project='sample' "
+            "AND key='9-1-a-story'"
+        ).fetchone()
+        assert after["epic"] == "2"  # membership DID move
+        assert after["updated_at"] == before["updated_at"]  # the status did not
+
+    def test_a_status_change_during_import_still_bumps_updated_at(
+        self, store, workfile
+    ):
+        import_path(store, "sample", workfile)
+        before = store.conn.execute(
+            "SELECT updated_at FROM story WHERE project='sample' "
+            "AND key='4-3-being-worked'"
+        ).fetchone()[0]
+        workfile.write_text(
+            workfile.read_text(encoding="utf-8").replace(
+                "4-3-being-worked: in-progress", "4-3-being-worked: review"
+            ),
+            encoding="utf-8",
+        )
+        import_path(store, "sample", workfile)
+        after = store.conn.execute(
+            "SELECT updated_at FROM story WHERE project='sample' "
+            "AND key='4-3-being-worked'"
+        ).fetchone()[0]
+        assert after > before
+
     def test_a_key_in_the_file_but_not_the_db_is_refused_as_untracked(
         self, store, workfile
     ):
@@ -762,6 +814,32 @@ class TestTheWriterAndItsExportNeverDisagree:
         assert target.read_text(encoding="utf-8") == "writer-A\n"
         # the two writers staged to DIFFERENT paths
         assert len(seen) == 2 and seen[0] != seen[1]
+        assert [p.name for p in tmp_path.iterdir() if "omater-tmp" in p.name] == []
+
+    def test_a_failing_fdopen_does_not_leak_the_descriptor(
+        self, tmp_path, monkeypatch
+    ):
+        """PR #13 round 9. mkstemp hands back a RAW fd; until fdopen wraps
+        it, nothing owns it. If fdopen itself raises, the outer handler
+        unlinked the path but left the descriptor open."""
+        import claudomater.sprint as sprint_mod
+
+        target = tmp_path / "s.yaml"
+        target.write_text("original\n", encoding="utf-8")
+        captured: list[int] = []
+
+        def failing_fdopen(fd, *a, **kw):
+            captured.append(fd)
+            raise OSError("fdopen refused")
+
+        monkeypatch.setattr(sprint_mod.os, "fdopen", failing_fdopen)
+        with pytest.raises(OSError, match="fdopen refused"):
+            sprint_mod._write_atomically(target, "new\n")
+
+        assert captured, "fdopen was never reached"
+        with pytest.raises(OSError):  # EBADF: the descriptor was closed
+            os.fstat(captured[0])
+        assert target.read_text(encoding="utf-8") == "original\n"
         assert [p.name for p in tmp_path.iterdir() if "omater-tmp" in p.name] == []
 
     def test_the_files_mode_survives_a_rewrite(self, store, workfile):

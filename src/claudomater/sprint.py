@@ -353,10 +353,18 @@ def import_doc(
     rows = [(project, e.key, e.epic, e.status, now) for e in doc.entries]
     with store.conn:
         store.conn.executemany(
+            # `updated_at` moves ONLY on a status change, matching
+            # `set_status` and the meaning documented above. An
+            # epic-only edit (a story relisted under a different epic) is
+            # a membership move, not a status event, so the column keeps
+            # pointing at when the status actually last changed. The
+            # WHERE still skips rows where nothing changed at all.
             "INSERT INTO story(project, key, epic, status, updated_at) "
             "VALUES(?,?,?,?,?) ON CONFLICT(project, key) DO UPDATE SET "
             "epic=excluded.epic, status=excluded.status, "
-            "updated_at=excluded.updated_at WHERE story.status != excluded.status "
+            "updated_at=CASE WHEN story.status != excluded.status "
+            "THEN excluded.updated_at ELSE story.updated_at END "
+            "WHERE story.status != excluded.status "
             "OR story.epic != excluded.epic",
             rows,
         )
@@ -389,10 +397,18 @@ def _write_atomically(path: Path, text: str) -> None:
     )
     tmp = Path(tmp_name)
     try:
+        # mkstemp returns a RAW fd that nothing owns until fdopen wraps
+        # it, so an fdopen that raises has to close the fd itself — the
+        # outer handler below only knows about the path.
         # newline="" for the same reason `_read_exact` uses it: the text
         # already carries the source's own line endings, and translating
-        # them here would rewrite every line
-        with os.fdopen(fd, "w", encoding="utf-8", newline="") as fh:
+        # them here would rewrite every line.
+        try:
+            handle = os.fdopen(fd, "w", encoding="utf-8", newline="")
+        except BaseException:
+            os.close(fd)
+            raise
+        with handle as fh:
             fh.write(text)
         os.chmod(tmp, stat.S_IMODE(path.stat().st_mode))
         os.replace(tmp, path)
