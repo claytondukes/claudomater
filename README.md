@@ -52,6 +52,19 @@ Phase 0 skeleton — the pieces every pipeline run stands on:
 - **Slack notifications** — `PAUSED-QUOTA`, `DEGRADED`, `ESCALATED`,
   `RUN-COMPLETE`, `PROMPT-BLOCKED`, sent the moment the state changes so an
   overnight run never saves its bad news for the morning.
+- **Learning store** (`omater learn`) — cross-project lessons in a local
+  SQLite index (`learning.db_path`, never committed: FTS retrieval and the
+  volatile use-counters live here) with a **deterministic JSONL export as
+  the source of truth** (`learning.export_path`, git-carried: one file per
+  scope, rows sorted, byte-reproducible, volatile counters excluded, written
+  through on every DB write). Writes are classified — `add` refuses an
+  existing live key, `refine` merges wording, `supersede` writes a new
+  judgment and keeps the old row as audit trail — and lesson content passes
+  the same `secrets_deny` scrub as transcripts: the corpus outlives the run
+  that produced it. `omater learn sync` = pull → import (latest `updated_at`
+  wins, supersession chains relinked) → export → commit with an
+  `omater-learn:` prefix; the local index is fully reconstructible from the
+  JSONL at any time.
 - **`omater init`** — writes a starter `.omater.yaml` and gitignores the
   runs dir. The PreToolUse write fence (denies Write/Edit outside the
   project root, pattern-matches Bash for out-of-tree writes) is RUN-SCOPED
@@ -87,6 +100,11 @@ omater usage         # guardrail snapshot + decision
 | `omater usage [--json]` | Fetch usage, evaluate guardrails; exit 0 ok / 3 pause / 4 degrade |
 | `omater policy [ROOT] [--json]` | Show the resolved policy (model chain, review floor, CI tier) for the project's `deployment_type` |
 | `omater notify KIND MESSAGE` | Send a Slack notification through the configured webhook |
+| `omater learn add\|supersede --scope S --domain D --topic T --rule R --why W` | Classified lesson writes (scrubbed via `--project`'s `secrets_deny`) |
+| `omater learn refine --scope S --domain D --topic T [--rule R] [--why W]` | Merge better wording into the existing lesson (at least one of `--rule`/`--why`) |
+| `omater learn list [--scope S] [--domain D]` | Live lessons (superseded rows never surface) |
+| `omater learn search QUERY [--scope S]` | FTS over rule+why, live rows only |
+| `omater learn export\|import\|sync [--push]` | Deterministic per-scope JSONL export; import (latest wins); pull→import→export→commit |
 | `omater resume\|abort\|approve [--run ID]` | Write a control event a paused/escalated run consumes (also under `omater control …`) |
 | `omater hook pre-tool-use --root PATH` | The provisioned PreToolUse write fence (reads the hook payload on stdin) |
 
