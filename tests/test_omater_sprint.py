@@ -531,6 +531,16 @@ class TestOnDiskBytesSurviveExactly:
         assert [e.key for e in doc.entries] == ["epic-1", "epic-2"]
         assert doc.render().encode("utf-8") == raw
 
+    def test_a_non_utf8_file_raises_a_typed_error_at_the_library_boundary(
+        self, tmp_path
+    ):
+        """Converted in `_read_exact`, not in the CLI, so a driver calling
+        the library directly gets the same typed failure."""
+        p = tmp_path / "not-text.yaml"
+        p.write_bytes(b"development_status:\n  epic-1: d\xff\xfeone\n")
+        with pytest.raises(SprintError, match="not valid UTF-8"):
+            SprintDoc.read(p)
+
     def test_a_file_with_no_trailing_newline_round_trips_on_disk(self, tmp_path):
         p = tmp_path / "nonl.yaml"
         raw = b"development_status:\n  epic-1: done"
@@ -974,6 +984,16 @@ class TestSprintCli:
         assert main(self._args(tmp_path, "import", str(workfile), "--prune")) == EXIT_OK
         assert "pruned: 4-1-already-shipped" in capsys.readouterr().out
         assert main(self._args(tmp_path, "export", str(workfile))) == EXIT_OK
+
+    def test_a_non_utf8_file_is_a_cli_error_not_a_traceback(self, tmp_path, capsys):
+        """PR #13 round 10. A decode failure is a ValueError, not an
+        OSError, so it sailed past every I/O handler."""
+        binary = tmp_path / "not-text.yaml"
+        binary.write_bytes(b"development_status:\n  epic-1: d\xff\xfeone\n")
+        rc = main(self._args(tmp_path, "import", str(binary)))
+        assert rc == EXIT_ERROR
+        err = capsys.readouterr().err
+        assert "not valid UTF-8" in err and "not-text.yaml" in err
 
     def test_importing_the_wrong_file_is_a_cli_error(self, tmp_path, capsys):
         wrong = tmp_path / "some-other.yaml"

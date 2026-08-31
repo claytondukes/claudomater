@@ -120,8 +120,18 @@ class SprintError(Exception):
 # compared normalized text to normalized text and so returned True while
 # the on-disk bytes changed.
 def _read_exact(path: Path) -> str:
-    with path.open("r", encoding="utf-8", newline="") as fh:
-        return fh.read()
+    try:
+        with path.open("r", encoding="utf-8", newline="") as fh:
+            return fh.read()
+    except UnicodeDecodeError as exc:
+        # A decode failure is a ValueError, not an OSError, so it would
+        # sail past every I/O handler and surface as a traceback. It also
+        # has one overwhelmingly likely cause worth saying out loud: the
+        # path points at something that is not a sprint file.
+        raise SprintError(
+            f"{path} is not valid UTF-8 ({exc.reason} at byte {exc.start}) — "
+            "a sprint-status.yaml is a UTF-8 text file; check the path"
+        ) from exc
 
 
 @dataclass(frozen=True)
@@ -320,9 +330,11 @@ def import_doc(
     store: LearnStore, project: str, doc: SprintDoc, prune: bool = False
 ) -> int:
     """Seed/refresh the `story` rows from the file. Returns the number of
-    entries READ (not the number that changed — `updated_at` deliberately
-    only moves when a row's status or epic actually changed, so it keeps
-    meaning "when this status last changed" across repeated imports).
+    entries READ, not the number that changed: `updated_at` moves only
+    when a row's STATUS changed, so it keeps meaning "when the status
+    last changed" across repeated imports. An epic-only edit updates
+    membership without touching it, and a row where nothing changed is
+    not written at all.
 
     The file is the seed, so its values land VERBATIM — a legacy
     `optional` retro line imports as `optional`, because the DB is a
