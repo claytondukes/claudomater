@@ -196,6 +196,10 @@ class LearnStore:
         try:
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA busy_timeout=5000")
+            # off by default in SQLite: without this the declared
+            # superseded_by REFERENCES is decorative and a future bug could
+            # write dangling links unnoticed
+            conn.execute("PRAGMA foreign_keys=ON")
             check = conn.execute("PRAGMA integrity_check").fetchone()[0]
         except sqlite3.DatabaseError as exc:
             # heavy corruption raises before integrity_check can even report

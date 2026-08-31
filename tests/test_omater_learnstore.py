@@ -767,3 +767,16 @@ class TestOpenLeavesNoOpenTransaction:
         s = LearnStore.open(tmp_path / "l.db")
         assert s.conn.in_transaction is False
         s.close()
+
+
+class TestForeignKeysEnforced:
+    """PR #11 round 7: SQLite leaves foreign_keys OFF per connection, so
+    the declared superseded_by REFERENCES was decorative - a future bug
+    writing a dangling link would pass silently."""
+
+    def test_dangling_superseded_by_is_refused_at_write_time(self, store):
+        seed(store)
+        with pytest.raises(sqlite3.IntegrityError):
+            store.conn.execute(
+                "UPDATE lesson SET superseded_by=99999 WHERE topic='copilot-suppressed-block'"
+            )
