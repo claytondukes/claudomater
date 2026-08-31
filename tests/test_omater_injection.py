@@ -243,3 +243,72 @@ class TestHumanGatedPromotion:
         assert "promoted: lesson" in capsys.readouterr().out
         assert main(args("promote", "--scope", "global", "--domain", "ci",
                          "--topic", "t")) == EXIT_ERROR
+
+
+class TestRound1Hardening:
+    """PR #12 round 1."""
+
+    def test_every_content_line_is_a_true_blockquote(self, store):
+        """Mid-line '> ' renders as plain text - lesson prose would read as
+        normal instructions and defeat the framing. Metadata gets its own
+        line; every rule/why line starts a real blockquote."""
+        lesson(store, "k", rule="first line\nsecond line")
+        block = injection_block(store.lessons_for_phase(["global"], ["review"]))
+        content_lines = [
+            l for l in block.splitlines()
+            if l and not l.startswith(("#", "- [L"))
+            and l not in INJECTION_FRAME.splitlines()
+        ]
+        body = [l for l in content_lines if l.strip() and "reference data" not in l]
+        assert body, block
+        assert all(l.startswith("  > ") for l in body), body
+        # rule text never shares a line with metadata
+        meta_lines = [l for l in block.splitlines() if l.startswith("- [L")]
+        assert all("first line" not in l for l in meta_lines)
+
+    def test_quote_bearing_domain_cannot_break_the_fts_query(self, store):
+        lesson(store, "k", domain='we"ird')
+        rows = store.lessons_for_phase(["global"], domains=['we"ird'])
+        assert [r["topic"] for r in rows] == ["k"]
+
+    def test_promoted_matches_cannot_crowd_active_out_of_the_fts_tier(self, store):
+        """Tier 3 asks for active-only: promoted rows are already chosen,
+        and letting them occupy the FTS LIMIT starved fresh matches."""
+        for i in range(3):
+            lesson(store, f"p{i}", rule="charts guidance everywhere")
+            store.promote("global", "review", f"p{i}")
+        active = lesson(store, "fresh", domain="misc",
+                        rule="charts need a click handler")
+        rows = store.lessons_for_phase(["global"], domains=["charts"], budget=4)
+        assert active in [r["id"] for r in rows]
+
+    def test_null_entries_land_in_rejected_and_reporting_is_flagged(
+        self, tmp_path, store
+    ):
+        lid = lesson(store, "k")
+        log = RunLog.create(tmp_path)
+
+        class OneShot:
+            def run(self, spec, model):
+                return ExecutionResult(
+                    text='x\n```json\n{"status": "ok", "lessons_applied": [null]}\n```'
+                )
+
+        PhaseRunner(tmp_path, log, OneShot(), learn_store=store).run_phase(
+            PhaseSpec("dev", "m", "p", injected_lessons=(lid,))
+        )
+        (ev,) = [e for e in log.events() if e["event"] == "lessons-applied"]
+        assert ev["detail"]["rejected"] == [None]
+        assert ev["detail"]["reported"] is True
+        # absent field with injections: an honest "no report", not malformed
+        log2 = RunLog.create(tmp_path / "r2")
+
+        class Silent:
+            def run(self, spec, model):
+                return ExecutionResult(text='x\n```json\n{"status": "ok"}\n```')
+
+        PhaseRunner(tmp_path / "r2", log2, Silent(), learn_store=store).run_phase(
+            PhaseSpec("dev", "m", "p", injected_lessons=(lid,))
+        )
+        (ev2,) = [e for e in log2.events() if e["event"] == "lessons-applied"]
+        assert ev2["detail"] == {"applied": [], "rejected": [], "reported": False}

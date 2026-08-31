@@ -780,18 +780,24 @@ class PhaseRunner:
         if claimed is None and not spec.injected_lessons:
             return
         injected = set(spec.injected_lessons)
+        # an absent field is "no report" (recorded as reported=False), but
+        # every ENTRY that is present and not a validly-injected id — null
+        # included — lands in `rejected`: the contract is that malformed
+        # claims are logged, never silently dropped
+        reported = isinstance(claimed, list)
+        items: list[Any] = claimed if reported else ([] if claimed is None else [claimed])
         applied: list[int] = []
         rejected: list[Any] = []
-        for item in claimed if isinstance(claimed, list) else [claimed]:
+        for item in items:
             if isinstance(item, int) and not isinstance(item, bool) and item in injected:
                 if item not in applied:
                     applied.append(item)
-            elif item is not None:
+            else:
                 rejected.append(item)
         self.runlog.event(
             spec.name,
             "lessons-applied",
-            {"applied": applied, "rejected": rejected},
+            {"applied": applied, "rejected": rejected, "reported": reported},
             story_key=spec.story_key,
         )
         if self.learn_store is not None and applied:

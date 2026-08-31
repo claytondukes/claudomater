@@ -462,23 +462,34 @@ class LearnStore:
         return [dict(r) for r in self.conn.execute(query, params).fetchall()]
 
     def search(
-        self, query: str, scopes: Sequence[str], limit: int = 20
+        self,
+        query: str,
+        scopes: Sequence[str],
+        limit: int = 20,
+        statuses: Sequence[str] = LIVE_STATUSES,
     ) -> list[dict[str, Any]]:
-        """FTS over rule+why, live rows only, ranked by refs then relevance
-        (design: 'ranked by refs'). The query is passed to FTS5 as a plain
-        string; a syntactically invalid query is a loud error, not a silent
-        empty result."""
+        """FTS over rule+why, live rows only by default, ranked by refs then
+        relevance (design: 'ranked by refs'). The query is passed to FTS5 as
+        a plain string; a syntactically invalid query is a loud error, not a
+        silent empty result. `statuses` narrows within the live set (the
+        injection read path asks for active-only in its FTS tier, so
+        already-chosen promoted rows cannot crowd the LIMIT out of fresh
+        matches); superseded rows never surface regardless."""
         if not scopes:
             return []
+        statuses = tuple(s for s in statuses if s in LIVE_STATUSES)
+        if not statuses:
+            return []
         try:
+            smarks = ",".join("?" * len(statuses))
             rows = self.conn.execute(
                 "SELECT lesson.* FROM lesson_fts JOIN lesson "
                 "ON lesson.id = lesson_fts.rowid "
                 "WHERE lesson_fts MATCH ? "
-                "AND lesson.status IN ('active','promoted') "
+                f"AND lesson.status IN ({smarks}) "
                 f"AND lesson.scope IN ({','.join('?' * len(scopes))}) "
                 "ORDER BY lesson.refs DESC, rank LIMIT ?",
-                (query, *scopes, limit),
+                (query, *statuses, *scopes, limit),
             ).fetchall()
         except sqlite3.OperationalError as exc:
             raise LearnStoreError(f"FTS query {query!r} failed: {exc}") from exc
@@ -535,9 +546,14 @@ class LearnStore:
                     (*scopes, *domains),
                 ).fetchall()
             )
-            # FTS terms are quoted: domain names are data, not query syntax
-            query = " OR ".join(f'"{d}"' for d in domains)
-            take(self.search(query, scopes, limit=budget))
+            # FTS terms are phrase-quoted with embedded quotes doubled:
+            # domain names are data, never query syntax. Tier 3 asks for
+            # ACTIVE rows only — promoted rows are already chosen, and
+            # letting them occupy the LIMIT would crowd out fresh matches.
+            query = " OR ".join('"' + d.replace('"', '""') + '"' for d in domains)
+            take(
+                self.search(query, scopes, limit=budget, statuses=("active",))
+            )
         return chosen
 
     def record_applied(self, lesson_ids: Sequence[int], run_id: str) -> None:
@@ -895,13 +911,13 @@ def injection_block(lessons: Sequence[dict[str, Any]]) -> str:
         return ""
     entries = []
     for lesson in lessons:
-        first, *rest = str(lesson["rule"]).splitlines() or [""]
-        lines = [f"- [L{lesson['id']}] ({lesson['scope']}/{lesson['domain']}/"
-                 f"{lesson['topic']}) > {first}"]
-        lines += [f"  > {line}" for line in rest]
-        why_first, *why_rest = str(lesson["why"]).splitlines() or [""]
-        lines.append(f"  why: > {why_first}")
-        lines += [f"  > {line}" for line in why_rest]
+        # metadata on its own line; EVERY content line is a real blockquote
+        # (mid-line "> " renders as plain text, which would let lesson prose
+        # read as normal instructions and defeat the framing)
+        lines = [f"- [L{lesson['id']}] {lesson['scope']}/{lesson['domain']}/"
+                 f"{lesson['topic']}"]
+        for text in (str(lesson["rule"]), "why: " + str(lesson["why"])):
+            lines += [f"  > {line}" for line in text.splitlines() or [""]]
         entries.append("\n".join(lines))
     return (
         f"{INJECTION_HEADER}\n\n{INJECTION_FRAME}\n\n" + "\n".join(entries) + "\n"
