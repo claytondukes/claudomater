@@ -287,11 +287,14 @@ def post_step(cfg: QaBoardConfig, section_id: int, step: dict) -> dict:
     # the returned id anchors the audit trail (the run log records it);
     # a response without one either crashed untyped (non-dict) or
     # silently recorded None - refuse it instead
-    if not isinstance(posted, dict) or "id" not in posted:
+    try:
+        posted_id = int(posted["id"])  # type: ignore[index]
+    except (TypeError, KeyError, ValueError):
         raise QaBoardError(
-            f"board response to the step POST has no 'id' "
+            f"board response to the step POST has no usable 'id' "
             f"({str(posted)[:200]!r}) - cannot anchor the audit trail"
-        )
+        ) from None
+    posted["id"] = posted_id
     return posted
 
 

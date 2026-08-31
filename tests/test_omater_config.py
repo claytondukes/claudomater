@@ -558,10 +558,14 @@ class TestQaBoardAdapterConfig:
     adapter's own loader."""
 
     def test_null_and_absent_stay_legal(self, tmp_path):
-        cfg = load_project_config(
+        explicit = load_project_config(
             write_project(tmp_path, "project: p\nadapters:\n  qa_board: null\n")
         )
-        assert cfg.adapters["qa_board"] is None
+        assert explicit.adapters["qa_board"] is None
+        absent = load_project_config(
+            write_project(tmp_path, "project: p\nadapters:\n  issue_tracker: null\n")
+        )
+        assert absent.adapters["qa_board"] is None
 
     def test_a_full_mapping_loads(self, tmp_path):
         cfg = load_project_config(

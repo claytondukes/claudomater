@@ -413,9 +413,10 @@ class TestRoundTwoHardening:
         try:
             with pytest.raises(QaBoardError, match="board response"):
                 post_step(cfg, 7, {"step_key": "34-3-01", "label": "34-3 x"})
-            _StubBoard.post_body_override = '{"ok": true}'
-            with pytest.raises(QaBoardError, match="board response"):
-                post_step(cfg, 7, {"step_key": "34-3-01", "label": "34-3 x"})
+            for bad in ('{"ok": true}', '{"id": null}', '{"id": "abc"}'):
+                _StubBoard.post_body_override = bad
+                with pytest.raises(QaBoardError, match="board response"):
+                    post_step(cfg, 7, {"step_key": "34-3-01", "label": "34-3 x"})
         finally:
             _StubBoard.post_body_override = None
 
