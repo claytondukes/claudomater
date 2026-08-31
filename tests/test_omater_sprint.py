@@ -1018,3 +1018,454 @@ def _line_for(doc: SprintDoc, key: str) -> str:
         if stripped.startswith(f"{key}:"):
             return line
     raise AssertionError(f"no rendered line for {key!r}")
+
+
+# ---- slice B: epic creation + the retro-vocabulary gate --------------------
+
+
+class TestAddEpicWritesTheBlock:
+    """Phase 3 deliverable 2: epic creation writes the retro line at
+    CREATION, always `fable-review-required`, with the file's every
+    existing byte surviving the insertion exactly."""
+
+    def _create(self, store, workfile, stories=("5-1-first", "5-2-second")):
+        import_path(store, "sample", workfile)
+        from claudomater.sprint import add_epic
+
+        return add_epic(store, "sample", workfile, "5", stories=stories)
+
+    def test_every_existing_byte_survives_the_insertion(self, store, workfile):
+        """Total equality against a hand-built expectation: the new bytes
+        are EXACTLY the old bytes with one block spliced in right after
+        the last epic's retro line - nothing reformatted, nothing moved."""
+        before = workfile.read_bytes()
+        self._create(store, workfile)
+        anchor = b"epic-4-retrospective: fable-review-required\n"
+        cut = before.index(anchor) + len(anchor)
+        assert workfile.read_bytes() == (
+            before[:cut]
+            + b"\n"
+            + b"  epic-5: backlog\n"
+            + b"  5-1-first: backlog\n"
+            + b"  5-2-second: backlog\n"
+            + b"  epic-5-retrospective: fable-review-required\n"
+            + before[cut:]
+        )
+
+    def test_the_block_lands_before_the_project_scoped_tail(self, store, workfile):
+        self._create(store, workfile)
+        doc = SprintDoc.read(workfile)
+        keys = [e.key for e in doc.entries]
+        assert keys.index("epic-5") > keys.index("epic-4-retrospective")
+        assert keys.index("epic-5-retrospective") < keys.index("project-retrospective")
+        # membership is positional, so the parse must attribute the new
+        # stories to the new epic
+        assert doc.entry("5-1-first").epic == "5"
+
+    def test_the_retro_line_is_pre_registered_and_constant(self, store, workfile):
+        """The real files carry `fable-review-required` on epics that are
+        still backlog (pre-registered at creation, not at close) - and
+        add_epic has NO parameter that could write anything else."""
+        import inspect
+
+        from claudomater.sprint import add_epic
+
+        self._create(store, workfile)
+        assert (
+            SprintDoc.read(workfile).entry("epic-5-retrospective").status
+            == "fable-review-required"
+        )
+        params = inspect.signature(add_epic).parameters
+        assert "retro_status" not in params  # unrepresentable, not defaulted
+
+    def test_db_and_file_agree_after_creation(self, store, workfile):
+        new_keys = self._create(store, workfile)
+        assert new_keys == [
+            "epic-5",
+            "5-1-first",
+            "5-2-second",
+            "epic-5-retrospective",
+        ]
+        db = statuses(store, "sample")
+        file_statuses = SprintDoc.read(workfile).statuses()
+        for key in new_keys:
+            assert db[key] == file_statuses[key]
+        assert export(store, "sample", workfile) is False  # already in sync
+
+    def test_an_epic_with_no_stories_is_legal(self, store, workfile):
+        """The real files pre-register epics with a retro line and no
+        stories yet - creation must support exactly that shape."""
+        new_keys = self._create(store, workfile, stories=())
+        assert new_keys == ["epic-5", "epic-5-retrospective"]
+
+    def test_a_crlf_file_gains_crlf_lines(self, store, tmp_path):
+        crlf = tmp_path / "crlf.yaml"
+        crlf.write_bytes(
+            b"development_status:\r\n"
+            b"  epic-1: done\r\n"
+            b"  epic-1-retrospective: done\r\n"
+        )
+        import_path(store, "sample", crlf)
+        from claudomater.sprint import add_epic
+
+        add_epic(store, "sample", crlf, "2", stories=("2-1-x",))
+        assert crlf.read_bytes() == (
+            b"development_status:\r\n"
+            b"  epic-1: done\r\n"
+            b"  epic-1-retrospective: done\r\n"
+            b"\r\n"
+            b"  epic-2: backlog\r\n"
+            b"  2-1-x: backlog\r\n"
+            b"  epic-2-retrospective: fable-review-required\r\n"
+        )
+
+    def test_indent_and_gap_are_copied_from_the_anchor(self, store, tmp_path):
+        wide = tmp_path / "wide.yaml"
+        wide.write_text(
+            "development_status:\n"
+            "    epic-1:   done\n"
+            "    epic-1-retrospective:   done\n",
+            encoding="utf-8",
+        )
+        import_path(store, "sample", wide)
+        from claudomater.sprint import add_epic
+
+        add_epic(store, "sample", wide, "2")
+        assert "    epic-2:   backlog\n" in wide.read_text(encoding="utf-8")
+
+    def test_sub_epic_ids_work(self, store, workfile):
+        import_path(store, "sample", workfile)
+        from claudomater.sprint import add_epic
+
+        new_keys = add_epic(
+            store, "sample", workfile, "5-1", stories=("5-1-1-nested",)
+        )
+        assert new_keys[-1] == "epic-5-1-retrospective"
+        assert SprintDoc.read(workfile).entry("5-1-1-nested").epic == "5-1"
+
+    def test_the_result_reparses_and_round_trips(self, store, workfile):
+        from claudomater.sprint import round_trip_ok
+
+        self._create(store, workfile)
+        assert round_trip_ok(workfile)
+
+
+class TestAddEpicRefusals:
+    @pytest.fixture(autouse=True)
+    def _seed(self, store, workfile):
+        import_path(store, "sample", workfile)
+        self.store = store
+        self.workfile = workfile
+
+    def _add(self, epic, **kwargs):
+        from claudomater.sprint import add_epic
+
+        return add_epic(self.store, "sample", self.workfile, epic, **kwargs)
+
+    def test_bad_epic_ids_are_refused(self):
+        for bad in ("abc", "5-", "-5", "5.1", "epic-5", ""):
+            with pytest.raises(SprintError, match="epic id"):
+                self._add(bad)
+
+    def test_an_existing_epic_is_refused(self):
+        with pytest.raises(SprintError, match="already in the status map"):
+            self._add("4")
+
+    def test_story_keys_must_carry_the_epics_prefix(self):
+        with pytest.raises(SprintError, match="prefix"):
+            self._add("5", stories=("6-1-wrong-epic",))
+
+    def test_story_keys_that_classify_as_other_kinds_are_refused(self):
+        with pytest.raises(SprintError, match="retro"):
+            self._add("5", stories=("5-x-retrospective",))
+        with pytest.raises(SprintError, match="not a legal story key|epic"):
+            self._add("5", stories=("epic-5-1",))
+
+    def test_duplicate_story_keys_are_refused(self):
+        with pytest.raises(SprintError, match="duplicate"):
+            self._add("5", stories=("5-1-a", "5-1-a"))
+
+    def test_statuses_are_validated_against_the_write_vocabulary(self):
+        with pytest.raises(SprintError, match="not a writable epic status"):
+            self._add("5", epic_status="open")
+        with pytest.raises(SprintError, match="not a writable story status"):
+            self._add("5", stories=("5-1-a",), story_status="started")
+
+    def test_a_document_with_no_epics_is_refused(self, store, tmp_path):
+        bare = tmp_path / "bare.yaml"
+        bare.write_text(
+            "development_status:\n  project-retrospective: done\n",
+            encoding="utf-8",
+        )
+        import_path(store, "bareproj", bare)
+        from claudomater.sprint import add_epic
+
+        with pytest.raises(SprintError, match="no epic entries"):
+            add_epic(store, "bareproj", bare, "1")
+
+    def test_a_missing_final_newline_at_the_anchor_is_refused(self, store, tmp_path):
+        clipped = tmp_path / "clipped.yaml"
+        clipped.write_bytes(
+            b"development_status:\n  epic-1: done\n  epic-1-retrospective: done"
+        )
+        import_path(store, "clipproj", clipped)
+        before = clipped.read_bytes()
+        from claudomater.sprint import add_epic
+
+        with pytest.raises(SprintError, match="final newline"):
+            add_epic(store, "clipproj", clipped, "2")
+        assert clipped.read_bytes() == before  # nothing rewritten
+
+    def test_an_orphaned_db_row_is_a_loud_refusal_and_the_file_is_untouched(
+        self, store, workfile
+    ):
+        """The DB already tracks a key the file lost (the orphan shape
+        import/export refuse to paper over): creation must not resolve
+        that divergence as a side effect - and because the DB insert and
+        the file write share one transaction, neither side moves."""
+        store.conn.execute(
+            "INSERT INTO story(project, key, epic, status, updated_at) "
+            "VALUES('sample', 'epic-5', '5', 'backlog', 'x')"
+        )
+        store.conn.commit()
+        before = workfile.read_bytes()
+        with pytest.raises(SprintError, match="already tracked in the DB"):
+            self._add("5")
+        assert workfile.read_bytes() == before
+
+    def test_an_unwritable_file_rolls_the_db_back(self, store, workfile):
+        workfile.chmod(0o444)
+        try:
+            # os.replace onto a read-only FILE succeeds (the directory
+            # grants the rename), so pin the transaction the other way:
+            # make the temp-file creation fail via a read-only DIRECTORY.
+            workfile.parent.chmod(0o555)
+            try:
+                with pytest.raises((SprintError, OSError)):
+                    self._add("5")
+            finally:
+                workfile.parent.chmod(0o755)
+        finally:
+            workfile.chmod(0o644)
+        assert "epic-5" not in statuses(self.store, "sample")
+
+
+class TestRetroBanScan:
+    """The independent gate: raw-line scan, deliberately NOT the entry
+    parser, with the on_complete gate's existence guard as a hard error."""
+
+    def test_a_missing_file_is_a_loud_failure_not_a_pass(self, tmp_path):
+        from claudomater.sprint import retro_ban_scan
+
+        with pytest.raises(SprintError, match="never read"):
+            retro_ban_scan(tmp_path / "nowhere.yaml")
+
+    def test_an_injected_optional_is_caught_with_its_line_number(self, workfile):
+        """The verifier must FAIL on an injected violation - a check that
+        cannot fail is decoration (the 2026-08 convention lesson). The
+        injection is raw bytes, not the writer API, which cannot express
+        it."""
+        from claudomater.sprint import retro_ban_scan
+
+        raw = workfile.read_bytes().replace(
+            b"epic-4-retrospective: fable-review-required",
+            b"epic-4-retrospective: optional",
+        )
+        workfile.write_bytes(raw)
+        violations, _ = retro_ban_scan(workfile)
+        assert len(violations) == 2  # the injected one + the fixture's legacy line
+        lines = {line_no for line_no, _ in violations}
+        legacy_line = next(
+            e.line_no
+            for e in SprintDoc.read(workfile).entries
+            if e.key == "epic-3-retrospective"
+        )
+        assert legacy_line in lines
+
+    def test_the_fixture_legacy_line_is_the_only_violation_at_rest(self, workfile):
+        from claudomater.sprint import retro_ban_scan
+
+        violations, distribution = retro_ban_scan(workfile)
+        assert [v for _, v in violations] == [
+            "  epic-3-retrospective: optional  # LEGACY value, banned "
+            "2026-02-14 in THIS FIXTURE'S invented timeline - preserved as "
+            "audit trail"
+        ]
+        assert distribution["fable-review-required"] == 2  # epic-4 + project
+        assert distribution["done"] == 2
+        assert distribution["optional"] == 1
+
+    def test_sub_epic_and_project_retros_are_in_scope(self, tmp_path):
+        """The LZ gate's `epic-[0-9]+-retrospective` cannot match a
+        sub-epic's retro (`[0-9]+` cannot span the inner hyphen) or the
+        project-scoped line - this scan is deliberately wider, because a
+        banned value on those lines is the same rot."""
+        from claudomater.sprint import retro_ban_scan
+
+        f = tmp_path / "s.yaml"
+        f.write_text(
+            "development_status:\n"
+            "  epic-4-5: done\n"
+            "  epic-4-5-retrospective: optional\n"
+            "  project-retrospective: optional\n",
+            encoding="utf-8",
+        )
+        violations, _ = retro_ban_scan(f)
+        assert len(violations) == 2
+
+    def test_creation_output_passes_the_gate_it_feeds(self, store, workfile):
+        """add_epic's own output must satisfy the verifier that gates it -
+        the two sides of deliverable 2 meeting in one test."""
+        import_path(store, "sample", workfile)
+        from claudomater.sprint import add_epic, retro_ban_scan
+
+        add_epic(store, "sample", workfile, "5", stories=("5-1-a",))
+        violations, distribution = retro_ban_scan(workfile)
+        assert len(violations) == 1  # still only the fixture's legacy line
+        assert distribution["fable-review-required"] == 3
+
+
+class TestSprintCliSliceB:
+    def _seeded(self, tmp_path, workfile):
+        db = tmp_path / "learn.db"
+        assert (
+            main(
+                [
+                    "sprint",
+                    "import",
+                    str(workfile),
+                    "--db",
+                    str(db),
+                    "--export-dir",
+                    str(tmp_path / "exp"),
+                    "--sprint-project",
+                    "sample",
+                ]
+            )
+            == EXIT_OK
+        )
+        return db
+
+    def test_add_epic_cli_creates_and_reports(self, tmp_path, workfile, capsys):
+        db = self._seeded(tmp_path, workfile)
+        rc = main(
+            [
+                "sprint",
+                "add-epic",
+                "5",
+                str(workfile),
+                "--story",
+                "5-1-first",
+                "--story",
+                "5-2-second",
+                "--db",
+                str(db),
+                "--export-dir",
+                str(tmp_path / "exp"),
+                "--sprint-project",
+                "sample",
+            ]
+        )
+        out = capsys.readouterr().out
+        assert rc == EXIT_OK
+        assert "created epic-5 (4 line(s))" in out
+        assert "epic-5-retrospective" in out
+
+    def test_add_epic_cli_refusals_are_clean_errors(self, tmp_path, workfile, capsys):
+        db = self._seeded(tmp_path, workfile)
+        rc = main(
+            [
+                "sprint",
+                "add-epic",
+                "4",  # exists
+                str(workfile),
+                "--db",
+                str(db),
+                "--export-dir",
+                str(tmp_path / "exp"),
+                "--sprint-project",
+                "sample",
+            ]
+        )
+        assert rc == EXIT_ERROR
+        assert "already in the status map" in capsys.readouterr().err
+
+    def test_check_retros_cli_flags_the_legacy_line(self, workfile, capsys):
+        rc = main(["sprint", "check-retros", str(workfile)])
+        captured = capsys.readouterr()
+        assert rc == EXIT_ERROR
+        assert "epic-3-retrospective: optional" in captured.out
+        assert "FATAL" in captured.err
+
+    def test_check_retros_cli_passes_a_clean_file_with_the_distribution(
+        self, tmp_path, capsys
+    ):
+        f = tmp_path / "clean.yaml"
+        f.write_text(
+            "development_status:\n"
+            "  epic-1: done\n"
+            "  epic-1-retrospective: done\n"
+            "  epic-2: backlog\n"
+            "  epic-2-retrospective: fable-review-required\n",
+            encoding="utf-8",
+        )
+        rc = main(["sprint", "check-retros", str(f)])
+        out = capsys.readouterr().out
+        assert rc == EXIT_OK
+        assert "OK: no banned retrospective statuses" in out
+        assert "1 done" in out and "1 fable-review-required" in out
+
+    def test_check_retros_cli_fails_loudly_on_a_missing_file(self, tmp_path, capsys):
+        rc = main(["sprint", "check-retros", str(tmp_path / "nope.yaml")])
+        assert rc == EXIT_ERROR
+        assert "never read" in capsys.readouterr().err
+
+
+class TestUi3RetroGateProof:
+    """READ-ONLY against the real ui3 file, like TestUi3AcceptanceProof:
+    the wider scan (sub-epic + project retros included) must agree with
+    the file's own hygiene rule. Measured at slice B build time: 46 retro
+    lines, all in the legal write vocabulary."""
+
+    @pytest.mark.skipif(
+        not UI3_SPRINT_STATUS.is_file(), reason="ui3 sprint-status.yaml not present"
+    )
+    def test_the_real_file_is_clean_under_the_wider_scan(self):
+        from claudomater.sprint import retro_ban_scan
+
+        violations, distribution = retro_ban_scan(UI3_SPRINT_STATUS)
+        assert violations == []
+        assert set(distribution) <= {"fable-review-required", "done"}
+
+
+class TestRetroBanScanRoundTwo:
+    """Copilot round-1 findings on the gate itself."""
+
+    def test_a_retro_line_with_no_status_token_fails_loudly(self, tmp_path):
+        """`epic-1-retrospective:` (bare, or comment-only) is a line the
+        gate cannot meaningfully evaluate - recording an empty-string
+        status in the distribution read as CLEAN, the silent-pass shape
+        this module refuses everywhere else."""
+        from claudomater.sprint import retro_ban_scan
+
+        for tail in ("", " ", " # comment only"):
+            f = tmp_path / "bare.yaml"
+            f.write_text(
+                f"development_status:\n  epic-1-retrospective:{tail}\n",
+                encoding="utf-8",
+            )
+            with pytest.raises(SprintError, match="no status token"):
+                retro_ban_scan(f)
+
+    def test_check_retros_prints_the_line_exactly_as_on_disk(
+        self, workfile, capsys
+    ):
+        """The CLI stripped leading indentation off the violation line,
+        hiding the exact on-disk content the operator is about to fix."""
+        rc = main(["sprint", "check-retros", str(workfile)])
+        assert rc == EXIT_ERROR
+        out = capsys.readouterr().out
+        assert "  epic-3-retrospective: optional" in out  # indent intact
+        # the STRIPPED form (separator's single space glued straight onto
+        # the key) must not appear - that's what hiding the indent looks like
+        assert ": epic-3-retrospective" not in out

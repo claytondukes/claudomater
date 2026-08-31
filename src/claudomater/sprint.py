@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import os
 import re
+import sqlite3
 import stat
 import tempfile
 from dataclasses import dataclass
@@ -62,6 +63,14 @@ _WRITABLE: dict[str, tuple[str, ...]] = {
     "story": STORY_STATUSES,
     "retro": RETRO_STATUSES,
 }
+
+# The ONLY retro status epic creation can write. A constant, not a
+# parameter, on purpose: `optional` was banned as a retro status
+# (2026-08-21 rule) after a generator kept emitting it for four days with
+# the rule held only in memory - the adapter's API must make the banned
+# value unrepresentable at creation, not merely discouraged.
+RETRO_CREATION_STATUS = "fable-review-required"
+BANNED_RETRO_STATUS = "optional"
 
 DATA_BLOCK_KEY = "development_status"
 _RETRO_SUFFIX = "-retrospective"
@@ -560,3 +569,209 @@ def unknown_statuses(doc: SprintDoc) -> list[SprintEntry]:
     tool surfaces them for a human instead of correcting them.
     """
     return [e for e in doc.entries if e.status not in _WRITABLE[e.kind]]
+
+
+# ---- epic creation (the planning-tool seam) ------------------------------
+#
+# `export`'s contract says adding lines "stays with the planning tool";
+# this IS that seam. Creation is a deliberate planning act with a known
+# placement rule, so - unlike export, which refuses to guess - it may add
+# lines: one new epic block, inserted after the last epic's block and
+# before the project-scoped tail, every existing byte untouched.
+
+_EPIC_ID_RE = re.compile(r"^[0-9]+(-[0-9]+)*$")
+_KEY_CHARSET_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+
+
+def add_epic(
+    store: LearnStore,
+    project: str,
+    path: Path,
+    epic: str,
+    stories: tuple[str, ...] | list[str] = (),
+    epic_status: str = "backlog",
+    story_status: str = "backlog",
+) -> list[str]:
+    """Create `epic-{epic}` in the file AND the DB: the epic line, the
+    story lines in the given order, and - always, last inside the block -
+    `epic-{epic}-retrospective: {RETRO_CREATION_STATUS}`. The retro line
+    is pre-registered at CREATION (the real files carry it on epics that
+    are still `backlog`), and its status is a constant this function has
+    no parameter to override.
+
+    Insertion is byte-exact per the span model's discipline: the new text
+    is `source[:cut] + block + source[cut:]`, so every existing byte
+    survives by construction. The cut sits immediately after the last
+    line whose entry belongs to an epic - i.e. after the final epic
+    block, before any project-scoped tail (`project-retrospective`, the
+    change-log comments). Indentation, the `: ` gap, and the line ending
+    are copied from that anchor line, so a CRLF file gains CRLF lines and
+    a four-space file gains four-space lines.
+
+    An empty `stories` tuple is legal and real: epics are pre-registered
+    at planning time with their retro line and no stories yet.
+
+    Returns the new keys in file order. The DB insert and the file write
+    share one transaction (`set_status` discipline): if the file cannot
+    be written, the DB keeps no record of the phantom epic.
+    """
+    if not _EPIC_ID_RE.match(epic):
+        raise SprintError(
+            f"epic id must be digits with optional sub-epic segments "
+            f"(e.g. '47' or '4-5'), got {epic!r}"
+        )
+    epic_key = f"epic-{epic}"
+    retro_key = f"{epic_key}{_RETRO_SUFFIX}"
+    _validate_status("epic", epic_status, epic_key)
+    seen_stories: set[str] = set()
+    for skey in stories:
+        if not isinstance(skey, str) or not _KEY_CHARSET_RE.match(skey or ""):
+            raise SprintError(f"not a legal story key: {skey!r}")
+        if not skey.startswith(f"{epic}-"):
+            # membership is POSITIONAL in the file, so a key that does not
+            # visibly belong to its block would parse fine and mislead
+            # every human reader
+            raise SprintError(
+                f"story key {skey!r} must carry its epic's prefix "
+                f"{epic + '-'!r} - it is being created under {epic_key}"
+            )
+        if skey.endswith(_RETRO_SUFFIX) or skey.startswith("epic-"):
+            raise SprintError(
+                f"story key {skey!r} would classify as a "
+                f"{'retro' if skey.endswith(_RETRO_SUFFIX) else 'epic'} line, "
+                "not a story"
+            )
+        if skey in seen_stories:
+            raise SprintError(f"duplicate story key {skey!r}")
+        seen_stories.add(skey)
+        _validate_status("story", story_status, skey)
+
+    source = _read_exact(path)
+    doc = SprintDoc.parse(source)
+    new_keys = [epic_key, *stories, retro_key]
+    known = doc.statuses()
+    already = sorted(k for k in new_keys if k in known)
+    if already:
+        raise SprintError(
+            f"already in the status map: {', '.join(already)} - "
+            "add_epic creates, it never rewrites"
+        )
+
+    anchor_idx = None
+    for i, line in enumerate(doc._lines):
+        if line.entry is not None and line.entry.epic != "":
+            anchor_idx = i
+    if anchor_idx is None:
+        raise SprintError(
+            f"{path} has no epic entries to anchor on - refusing to guess "
+            "where the first epic block belongs in a document this tool "
+            "did not author"
+        )
+    anchor = doc._lines[anchor_idx]
+    m = _ENTRY_RE.match(anchor.raw)
+    assert m is not None  # it parsed as an entry
+    eol = m.group("eol")
+    if eol is None:
+        # inserting "after" a line with no newline would have to rewrite
+        # that line's bytes - the one thing this module promises never to
+        # do to existing content
+        raise SprintError(
+            f"{path} ends without a final newline at the insertion anchor "
+            f"(line {anchor.entry.line_no}: {anchor.entry.key}) - add one, "
+            "then re-run"
+        )
+    indent = m.group("indent")
+    gap = m.group("gap")
+    block = [eol]  # one blank separator line, matching the file's blocks
+    block.append(f"{indent}{epic_key}:{gap}{epic_status}{eol}")
+    for skey in stories:
+        block.append(f"{indent}{skey}:{gap}{story_status}{eol}")
+    block.append(f"{indent}{retro_key}:{gap}{RETRO_CREATION_STATUS}{eol}")
+    cut = sum(len(line.raw) for line in doc._lines[: anchor_idx + 1])
+    new_text = source[:cut] + "".join(block) + source[cut:]
+
+    # The insertion must parse back as entries of the intended kinds - a
+    # malformed key that slipped validation fails HERE, before anything
+    # is written anywhere.
+    new_doc = SprintDoc.parse(new_text)
+    now = utc_now()
+    rows = []
+    for key in new_keys:
+        entry = new_doc.entry(key)
+        if entry.epic != epic:
+            raise SprintError(
+                f"{key!r} landed under epic {entry.epic!r}, not {epic!r} - "
+                "insertion bug, nothing was written"
+            )
+        rows.append((project, key, entry.epic, entry.status, now))
+
+    with store.conn:
+        try:
+            store.conn.executemany(
+                "INSERT INTO story(project, key, epic, status, updated_at) "
+                "VALUES(?,?,?,?,?)",
+                rows,
+            )
+        except sqlite3.IntegrityError as exc:
+            # tracked in the DB but absent from the file: an orphan row
+            # (the divergence import/export already refuses to paper over)
+            raise SprintError(
+                f"a new key is already tracked in the DB for {project!r} "
+                f"({exc}) - if the file legitimately lost it, clear the "
+                "orphan with `omater sprint import --prune` first"
+            ) from exc
+        _write_atomically(path, new_text)
+    return new_keys
+
+
+# ---- the retro-vocabulary gate -------------------------------------------
+
+
+# Deliberately NOT the entry parser: a verifier that shares the writer's
+# code path shares its blind spots. This is the on_complete gate's grep,
+# reimplemented line-by-line over the raw bytes - and widened, because
+# `epic-[0-9]+-retrospective` cannot match a sub-epic's retro line
+# (`epic-4-5-retrospective`: `[0-9]+` cannot span the inner hyphen) or the
+# project-scoped one. Any `*-retrospective:` line is in scope here.
+_RETRO_SCAN_RE = re.compile(
+    r"^[ \t]*[A-Za-z0-9][A-Za-z0-9._-]*" + _RETRO_SUFFIX + r":[ \t]*(?P<status>[^\s#]*)"
+)
+
+
+def retro_ban_scan(path: Path) -> tuple[list[tuple[int, str]], dict[str, int]]:
+    """(violations, distribution) for every `*-retrospective:` line.
+
+    A violation is a line whose status is the banned `optional`;
+    the distribution counts every retro status seen, so a clean result is
+    legible ("0 violations across these values") rather than assumed.
+
+    The existence check is part of the contract, not a nicety: the gate
+    this reimplements documents that a missing file makes a bare grep
+    print nothing and exit 2 - indistinguishable from "no violations".
+    A file that was never read must never read as a pass.
+    """
+    if not path.exists():
+        raise SprintError(
+            f"{path} not found - refusing to report on a file that was "
+            "never read (a missing file must not look like a pass)"
+        )
+    violations: list[tuple[int, str]] = []
+    distribution: dict[str, int] = {}
+    for i, raw in enumerate(_split_keepends(_read_exact(path)), start=1):
+        m = _RETRO_SCAN_RE.match(raw)
+        if m is None:
+            continue
+        status = m.group("status")
+        if not status:
+            # a retro line with NO status token (bare colon, comment-only)
+            # is one the gate cannot meaningfully evaluate - recording an
+            # empty status read as CLEAN, the silent-pass shape this
+            # module refuses everywhere else
+            raise SprintError(
+                f"{path}:{i}: retrospective line has no status token "
+                f"({raw.rstrip()!r}) - the gate cannot evaluate it"
+            )
+        distribution[status] = distribution.get(status, 0) + 1
+        if status == BANNED_RETRO_STATUS:
+            violations.append((i, raw.rstrip("\r\n")))
+    return violations, distribution

@@ -372,6 +372,19 @@ def _cmd_sprint(args: argparse.Namespace) -> int:
                 for r in rows:
                     print(f"{r['key']}: {r['status']}")
                 print(f"{len(rows)} tracked row(s)")
+        elif args.sprint_cmd == "add-epic":
+            new_keys = sprint_mod.add_epic(
+                store,
+                args.sprint_project,
+                path,
+                args.epic,
+                stories=tuple(args.story or ()),
+                epic_status=args.epic_status,
+                story_status=args.story_status,
+            )
+            print(f"created epic-{args.epic} ({len(new_keys)} line(s)):")
+            for key in new_keys:
+                print(f"  {key}")
     except sprint_mod.SprintError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return EXIT_ERROR
@@ -389,6 +402,42 @@ def _cmd_sprint(args: argparse.Namespace) -> int:
         return EXIT_ERROR
     finally:
         store.close()
+    return EXIT_OK
+
+
+def _cmd_sprint_check_retros(args: argparse.Namespace) -> int:
+    """The retro-vocabulary gate, as a command a verifier or a workflow's
+    on_complete can run. Exit 0 ONLY after actually reading the file and
+    finding no banned value; a missing file is a loud failure, because a
+    grep over a missing file prints nothing and reads exactly like a pass."""
+    from claudomater import sprint as sprint_mod
+
+    try:
+        path = Path(args.path).resolve()
+        violations, distribution = sprint_mod.retro_ban_scan(path)
+    except sprint_mod.SprintError as exc:
+        print(f"FATAL: {exc}", file=sys.stderr)
+        return EXIT_ERROR
+    except OSError as exc:
+        print(f"FATAL: cannot read {getattr(args, 'path', None)}: {exc}", file=sys.stderr)
+        return EXIT_ERROR
+    if violations:
+        for line_no, raw in violations:
+            # the line exactly as on disk (scan strips only the EOL):
+            # trimming indentation would hide the content the operator is
+            # about to go fix
+            print(f"{path}:{line_no}: {raw}")
+        print(
+            f"FATAL: {len(violations)} banned "
+            f"'{sprint_mod.BANNED_RETRO_STATUS}' retrospective status(es) "
+            "listed above",
+            file=sys.stderr,
+        )
+        return EXIT_ERROR
+    print("OK: no banned retrospective statuses")
+    # the distribution makes a clean result legible rather than assumed
+    for status in sorted(distribution):
+        print(f"  {distribution[status]:>4} {status}")
     return EXIT_OK
 
 
@@ -562,6 +611,39 @@ def build_parser() -> argparse.ArgumentParser:
     sp = _sprint_parser("status", "the sprint view, rendered from the tables")
     sp.add_argument("--epic", default=None, help="restrict to one epic")
     sp.add_argument("--json", action="store_true")
+
+    sp = _sprint_parser(
+        "add-epic",
+        "create a new epic block in the DB and the file (retro line "
+        "pre-registered as fable-review-required, always)",
+    )
+    sp.add_argument("epic", help="epic id, e.g. 47 (sub-epics like 4-5 allowed)")
+    sp.add_argument("path", help="path to sprint-status.yaml")
+    sp.add_argument(
+        "--story",
+        action="append",
+        default=None,
+        metavar="KEY",
+        help="full story key (repeatable, in order); must carry the epic's prefix",
+    )
+    sp.add_argument(
+        "--epic-status", default="backlog", help="initial epic status (default: backlog)"
+    )
+    sp.add_argument(
+        "--story-status",
+        default="backlog",
+        help="initial status for every listed story (default: backlog)",
+    )
+
+    # No store, no DB side effects: a pure read gate over the file, so it
+    # gets its own handler instead of _cmd_sprint's store-opening path.
+    sp = sprint_sub.add_parser(
+        "check-retros",
+        help="fail if any *-retrospective line carries the banned 'optional' "
+        "(missing file fails loudly - it must never read as a pass)",
+    )
+    sp.add_argument("path", help="path to sprint-status.yaml")
+    sp.set_defaults(fn=_cmd_sprint_check_retros)
 
     p = sub.add_parser(
         "start", help="start a run (drift check + run log + policy record)"
