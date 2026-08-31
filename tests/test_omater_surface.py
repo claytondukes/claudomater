@@ -286,3 +286,11 @@ class TestWindowsShapedInputs:
         for bad in ("C:/app/src/App.tsx", "C:\\app\\x.ts", "app\\src\\App.tsx"):
             with pytest.raises(SurfaceError, match="not repo-relative"):
                 classify_path(bad, RULES)
+
+    def test_whitespace_padded_patterns_are_refused(self):
+        """Round-4: 'docs/** ' passed validation (strip() is non-empty)
+        but never matches anything - a silently disabled rule, same class
+        as the Windows shapes."""
+        for bad in ("docs/** ", " app/src/**", "app\t"):
+            with pytest.raises(SurfaceError, match="whitespace"):
+                SurfaceRules(surface=(bad,))

@@ -84,6 +84,14 @@ class SurfaceRules:
                     raise SurfaceError(
                         f"{name} patterns must be non-empty strings, got {pattern!r}"
                     )
+                if pattern != pattern.strip():
+                    # 'docs/** ' passes an emptiness check but never
+                    # matches anything - a silently disabled rule, same
+                    # class as the Windows shapes below
+                    raise SurfaceError(
+                        f"{name} pattern {pattern!r} carries leading/"
+                        "trailing whitespace and would never match"
+                    )
                 why = _non_repo_relative(pattern)
                 if why is not None:
                     raise SurfaceError(
@@ -167,10 +175,12 @@ def classify_changed_files(paths: list[str], rules: SurfaceRules) -> SurfaceVerd
     """Classify a story's changed-file set, refusing an input that is
     empty either literally or after trimming blanks.
 
-    The blank case is checked SEPARATELY from `if not paths` on purpose
-    (the predecessor's review caught this door): `["  "]` skipped every
-    loop iteration and produced a confident 'no surface' off a file set
-    that had resolved to nothing."""
+    One check covers both doors on purpose: the predecessor's review
+    caught that guarding only the literal empty list left `["  "]` a way
+    in - every entry skipped the loop and a confident 'no surface' came
+    back off a file set that had resolved to nothing. Filtering blanks
+    FIRST and then refusing an empty result closes the literal and the
+    all-blank case with one refusal."""
     cleaned = [raw.strip() for raw in paths if raw and raw.strip()]
     if not cleaned:
         raise SurfaceError(
