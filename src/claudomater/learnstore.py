@@ -153,7 +153,7 @@ TIMESTAMP_FORMAT = "%Y-%m-%dT%H:%M:%S.%fZ"
 _TIMESTAMP_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z")
 
 
-def _utc_now() -> str:
+def utc_now() -> str:
     return datetime.now(timezone.utc).strftime(TIMESTAMP_FORMAT)
 
 
@@ -205,7 +205,7 @@ class LearnStore:
         conn: sqlite3.Connection,
         export_dir: Path | None = None,
         secrets_deny: Sequence[str] = (),
-        now: Callable[[], str] = _utc_now,
+        now: Callable[[], str] = utc_now,
     ):
         self.conn = conn
         self.export_dir = export_dir
@@ -220,7 +220,7 @@ class LearnStore:
         db_path: Path | str,
         export_dir: Path | str | None = None,
         secrets_deny: Sequence[str] = (),
-        now: Callable[[], str] = _utc_now,
+        now: Callable[[], str] = utc_now,
     ) -> "LearnStore":
         """Open (creating if needed) with the design's operational care:
         `PRAGMA integrity_check` at open — the DB is a rebuildable index, so

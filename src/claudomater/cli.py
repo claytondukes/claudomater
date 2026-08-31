@@ -257,6 +257,84 @@ def _cmd_learn(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def _cmd_sprint(args: argparse.Namespace) -> int:
+    from claudomater import learnstore, sprint as sprint_mod
+
+    try:
+        store = _open_store(args)
+    except (ConfigError, learnstore.LearnStoreError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return EXIT_ERROR
+    path = None
+    try:
+        # resolve() INSIDE the try: it reads the filesystem (and calls
+        # getcwd() for a relative path), so it can raise OSError — a
+        # deleted working directory does exactly that — and outside the
+        # try that escapes as a traceback
+        if getattr(args, "path", None):
+            path = Path(args.path).resolve()
+        if args.sprint_cmd == "import":
+            doc = sprint_mod.SprintDoc.read(path)
+            stale = sprint_mod.orphaned_keys(store, args.sprint_project, doc)
+            count = sprint_mod.import_doc(
+                store, args.sprint_project, doc, prune=args.prune
+            )
+            print(f"imported {count} row(s) from {path}")
+            for entry in sprint_mod.unknown_statuses(doc):
+                # surfaced, never corrected: legacy values are audit trail
+                print(
+                    f"  legacy value (left untouched): line {entry.line_no} "
+                    f"{entry.key}: {entry.status}"
+                )
+            if stale:
+                print(
+                    f"  {'pruned' if args.prune else 'tracked but absent from the file'}: "
+                    f"{', '.join(stale)}"
+                )
+                if not args.prune:
+                    print(
+                        "  export will refuse until these are resolved; "
+                        "clear them with --prune if the removal was deliberate"
+                    )
+        elif args.sprint_cmd == "export":
+            changed = sprint_mod.export(store, args.sprint_project, path)
+            print(f"{path}: {'rewritten' if changed else 'already in sync'}")
+        elif args.sprint_cmd == "set":
+            changed = sprint_mod.set_status(
+                store, args.sprint_project, args.key, args.status, path
+            )
+            print(
+                f"{args.key} -> {args.status} "
+                f"({'file rewritten' if changed else 'file already in sync'})"
+            )
+        elif args.sprint_cmd == "status":
+            rows = sprint_mod.stories(store, args.sprint_project, epic=args.epic)
+            if args.json:
+                print(json.dumps(rows, indent=2, sort_keys=True))
+            else:
+                for r in rows:
+                    print(f"{r['key']}: {r['status']}")
+                print(f"{len(rows)} tracked row(s)")
+    except sprint_mod.SprintError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return EXIT_ERROR
+    except OSError as exc:
+        # `export`/`set` write as well as read, so a fixed "cannot read"
+        # would misdirect triage on a full disk or a failed rename.
+        # Fall back to the RAW argument: resolve() itself can raise, and
+        # reporting "(None)" would drop the one detail that identifies
+        # which file the operator meant.
+        shown = path if path is not None else getattr(args, "path", None)
+        print(f"error: status file I/O failed ({shown}): {exc}", file=sys.stderr)
+        return EXIT_ERROR
+    except sqlite3.DatabaseError as exc:
+        print(f"error: learning DB failure: {exc}", file=sys.stderr)
+        return EXIT_ERROR
+    finally:
+        store.close()
+    return EXIT_OK
+
+
 def _cmd_start(args: argparse.Namespace) -> int:
     from claudomater.run import start_run
 
@@ -382,6 +460,48 @@ def build_parser() -> argparse.ArgumentParser:
     _learn_parser("import", "import per-scope JSONL (latest updated_at wins)")
     lp = _learn_parser("sync", "git pull -> import -> export -> commit")
     lp.add_argument("--push", action="store_true", help="push after committing")
+
+    p = sub.add_parser(
+        "sprint", help="sprint tracking (DB writer, sprint-status.yaml export)"
+    )
+    sprint_sub = p.add_subparsers(dest="sprint_cmd", required=True)
+
+    def _sprint_parser(name: str, help_text: str) -> argparse.ArgumentParser:
+        sp = sprint_sub.add_parser(name, help=help_text)
+        sp.add_argument("--user-config", default=None, help=argparse.SUPPRESS)
+        sp.add_argument("--db", default=None, help="override learning.db_path")
+        sp.add_argument(
+            "--export-dir", default=None, help=argparse.SUPPRESS
+        )
+        sp.add_argument("--project", default=None, help=argparse.SUPPRESS)
+        sp.add_argument(
+            "--sprint-project",
+            default="ui3",
+            help="project name the story rows are keyed by",
+        )
+        sp.set_defaults(fn=_cmd_sprint)
+        return sp
+
+    sp = _sprint_parser("import", "seed the DB from an existing sprint-status.yaml")
+    sp.add_argument("path", help="path to sprint-status.yaml")
+    sp.add_argument(
+        "--prune",
+        action="store_true",
+        help="also DELETE tracked rows the file no longer carries "
+        "(off by default: an accidentally truncated file would drop real tracking)",
+    )
+
+    sp = _sprint_parser("export", "write the DB's statuses through to the file")
+    sp.add_argument("path", help="path to sprint-status.yaml")
+
+    sp = _sprint_parser("set", "flip one status in the DB and write through")
+    sp.add_argument("key", help="epic / story / retrospective key")
+    sp.add_argument("status", help="the new status (validated for the key's kind)")
+    sp.add_argument("path", help="path to sprint-status.yaml")
+
+    sp = _sprint_parser("status", "the sprint view, rendered from the tables")
+    sp.add_argument("--epic", default=None, help="restrict to one epic")
+    sp.add_argument("--json", action="store_true")
 
     p = sub.add_parser(
         "start", help="start a run (drift check + run log + policy record)"

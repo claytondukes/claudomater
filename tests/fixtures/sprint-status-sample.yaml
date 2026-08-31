@@ -1,0 +1,86 @@
+# sprint-status.yaml - SYNTHETIC sample epic/story state-of-the-world
+#
+# This fixture is INVENTED. It carries no real project's content: every
+# epic, story, date and narrative line below is made up for the express
+# purpose of exercising the export's byte-exactness against the SHAPES a
+# curated status file actually takes. The dates below are this fictional
+# project's OWN chronology and deliberately do not track any real
+# project's calendar; they are internally consistent (the `optional` ban
+# precedes epic 4, which is why epic 4 carries the post-ban retro value).
+#
+# RULES:
+# - This file is the status map only. One line per epic, one line per
+#   story, one line per retrospective.
+# - The "STRUCTURAL CHANGE LOG" section below records ONLY structural
+#   events: epic add/close, story renumbering, scope re-slices, rule
+#   changes - one dated line per event.
+#
+# Status definitions:
+#   Epic:  backlog | in-progress | done
+#   Story: backlog | ready-for-dev | in-progress | review | done | deferred | scrapped | superseded
+#   Retro: fable-review-required | done
+#          - LEGACY: `optional` was the retro default until the rule
+#            change below banned it. Existing `optional` lines are audit
+#            trail and are NEVER rewritten by the exporter - see
+#            epic-3-retrospective.
+#
+# Project meta:
+project: sample
+project_key: NOKEY
+tracking_system: file-system
+story_location: artifacts
+
+# DATA BLOCK
+# ==========
+development_status:
+  # Epic 1: Foundations
+  epic-1: done
+  1-1-scaffold-the-widget-registry: done
+  1-2-wire-the-config-loader: done
+  epic-1-retrospective: done  # close review run 2026-01-09; 4 findings, all fixed at close
+
+  # Epic 2-3: a SUB-EPIC. Its stories are `2-3-N-...`, which is ambiguous
+  # with "epic 2, story 3-N" from the key alone - epic membership comes
+  # from document position, not from parsing the key.
+  epic-2-3: done
+  2-3-1-sub-epic-first-story: done
+  2-3-2-sub-epic-second-story: superseded
+  2-3-2-1-a-four-segment-story-key: done
+  epic-2-3-retrospective: done
+
+  # Epic 3: legacy retro value, and a non-numeric story segment
+  epic-3: done
+  3-1-normal-story: done
+  3-T-truth-up-pass-with-a-letter-segment: done
+  3-2-cancelled-work: scrapped
+  3-3-blocked-on-another-team: deferred
+  epic-3-retrospective: optional  # LEGACY value, banned 2026-02-14 in THIS FIXTURE'S invented timeline - preserved as audit trail
+
+  # Epic 4: the live epic - the statuses a run actually flips
+  epic-4: in-progress
+  4-1-already-shipped: done
+  4-2-awaiting-review: review
+  4-3-being-worked: in-progress
+  4-4-drafted-not-started: ready-for-dev
+  4-5-not-yet-drafted: backlog
+  4-6-tight-comment-gap: backlog #single-space gap before the comment, unlike the two-space lines
+  epic-4-retrospective: fable-review-required
+
+  # Project-scoped: this retro belongs to the PROJECT, not to epic 4 -
+  # positional attribution must not sweep it into the last epic block.
+  project-retrospective: fable-review-required  # held until ship-ready
+
+# STRUCTURAL CHANGE LOG (chronological; structural events only)
+# =============================================================
+# 2026-01-09: EPIC-1 CLOSED. Two stories done. Close review run, 4
+#             paperwork findings fixed at close. This multi-line comment
+#             shape - a dated first line plus deeply-indented
+#             continuations - is the shape the real change logs use, and
+#             every byte of it has to survive an export untouched.
+# 2026-02-14: RULE CHANGE - every epic retrospective is blind/adversarial
+#             fable-review-required; `optional` is no longer a valid retro
+#             status for NEW epics. epic-3-retrospective keeps its
+#             `optional` value: rewriting it would falsify the record of
+#             what the rule was when that epic closed.
+# 2026-03-02: EPIC-2-3 CREATED as a sub-epic of epic 2 and closed the same week. Single-line entries like this one run long and unwrapped in the real files, so the exporter must not reflow them.
+# 2026-03-20: EPIC-4 OPENED (in-progress). Six stories, spanning every story status the vocabulary allows so the round-trip proof covers all of them.

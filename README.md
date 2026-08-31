@@ -75,6 +75,30 @@ Phase 0 skeleton — the pieces every pipeline run stands on:
   times across 2+ runs, and only an operator's `omater learn promote`
   (scope-budgeted) makes a lesson always-loaded — the tool never
   self-promotes; auto-promotion is an instruction-injection channel.
+- **Sprint tracking** (`omater sprint`) — the DB is the writer and
+  `sprint-status.yaml` is a **byte-exact write-through export** until the
+  file retires. That file is not a data file with comments on it: it is a
+  curated audit record (rules preamble, per-line justifications, a
+  STRUCTURAL CHANGE LOG that is the only account of why epics were
+  re-sliced) that happens to carry a status map, so a regenerating
+  exporter would destroy it and read as success. Instead the export is a
+  **span model**: every line keeps its raw bytes, an entry line also
+  records the character offsets of its status token, and a flip is
+  `raw[:start] + new + raw[end:]`. Indentation, separator spacing, inline
+  comments and their exact gap survive *by construction* — there is no
+  code path that could reformat them. Reading NEVER validates a status:
+  `optional` was banned as a retro value in 2026-08-21, and historical
+  `optional` lines are audit trail an exporter must carry through, not
+  correct — the vocabulary gates writes only, and `import` reports legacy
+  values instead of fixing them. Epic membership is read POSITIONALLY,
+  because a story key cannot be parsed (a sub-epic `epic-4-5` makes
+  `4-5-1-...` ambiguous between epic 4 and epic 4-5). A key the DB tracks
+  but the file lacks is a loud failure, never an appended line: choosing
+  where a new story belongs is a planning decision the exporter has no
+  basis to make. A key the file drops is the mirror case: reported, and
+  removed only by an explicit `import --prune`, because the DB is on its
+  way to being the writer and a truncated file must not delete real
+  tracking as a side effect.
 - **`omater init`** — writes a starter `.omater.yaml` and gitignores the
   runs dir. The PreToolUse write fence (denies Write/Edit outside the
   project root, pattern-matches Bash for out-of-tree writes) is RUN-SCOPED
@@ -117,6 +141,10 @@ omater usage         # guardrail snapshot + decision
 | `omater learn candidates` | Promotion candidates (3+ uses across 2+ runs) for human review |
 | `omater learn promote --scope S --domain D --topic T` | HUMAN-gated: make a lesson always-loaded for its scope (line-budgeted) |
 | `omater learn export\|import\|sync [--push]` | Deterministic per-scope JSONL export; import (latest wins); pull→import→export→commit |
+| `omater sprint import PATH [--prune]` | Seed the DB from a `sprint-status.yaml`; `--prune` also drops tracked rows the file no longer carries (opt-in, never automatic) |
+| `omater sprint export PATH` | Write the DB's statuses back through the file (byte-exact apart from flipped tokens) |
+| `omater sprint set KEY STATUS PATH` | Flip one status: validated for the key's kind, written to the DB, then written through to the file |
+| `omater sprint status [--epic N] [--json]` | The sprint view, rendered on demand from the tables |
 | `omater resume\|abort\|approve [--run ID]` | Write a control event a paused/escalated run consumes (also under `omater control …`) |
 | `omater hook pre-tool-use --root PATH` | The provisioned PreToolUse write fence (reads the hook payload on stdin) |
 
