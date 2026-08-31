@@ -446,9 +446,14 @@ class LearnStore:
         identity (scope, domain, topic, created_at), latest `updated_at`
         wins mutable fields, local counters untouched, and supersession
         chains RELINKED from generation order afterwards (row ids are
-        machine-local and never travel)."""
-        src = Path(import_dir or self.export_dir or "").expanduser()
-        if not src or not src.is_dir():
+        machine-local and never travel). Ends with the write-through
+        export: every DB write keeps the export current, imports included."""
+        if import_dir is None and self.export_dir is None:
+            # never fall back to the cwd — importing whatever directory the
+            # process happened to start in is a silent wrong-corpus load
+            raise LearnStoreError("no import directory configured")
+        src = Path(import_dir if import_dir is not None else self.export_dir).expanduser()
+        if not src.is_dir():
             raise LearnStoreError(f"no import directory at {src}")
         stats = ImportStats()
         # intended status per GENERATION: statuses cannot be applied row-by-
@@ -479,10 +484,22 @@ class LearnStore:
                     raise LearnStoreError(
                         f"{path.name}:{lineno}: unknown status {row['status']!r}"
                     )
+                for field in ("created_at", "updated_at"):
+                    # winner selection and chain order are lexicographic
+                    # comparisons that are only sound for this exact format —
+                    # a malformed timestamp would silently pick wrong winners
+                    try:
+                        datetime.strptime(row[field], "%Y-%m-%dT%H:%M:%SZ")
+                    except ValueError:
+                        raise LearnStoreError(
+                            f"{path.name}:{lineno}: {field} {row[field]!r} is "
+                            "not a YYYY-MM-DDTHH:MM:SSZ timestamp"
+                        ) from None
                 self._import_row(row, stats, intended)
         for key in {k[:3] for k in intended}:
             self._settle_key(*key, intended)
         self.conn.commit()
+        self._write_through()
         return stats
 
     def _import_row(
@@ -610,10 +627,16 @@ def sync(
             )
     stats = store.import_dir()
     store.export()
-    _git(repo, "add", "--", str(export_dir))
+    add = _git(repo, "add", "--", str(export_dir))
+    if add.returncode != 0:
+        raise LearnStoreError(f"git add failed: {add.stderr.strip()}")
     staged = _git(repo, "diff", "--cached", "--quiet", "--", str(export_dir))
+    # --quiet exit codes: 0 = no changes, 1 = changes, >1 = the diff itself
+    # failed — conflating an error with "changes present" would commit blind
+    if staged.returncode > 1:
+        raise LearnStoreError(f"git diff failed: {staged.stderr.strip()}")
     committed = False
-    if staged.returncode != 0:  # non-zero = there are staged changes
+    if staged.returncode == 1:
         message = (
             f"omater-learn: sync ({stats.new} new, {stats.updated} updated)"
         )

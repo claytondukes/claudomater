@@ -459,3 +459,108 @@ class TestLearnCli:
         assert rc == EXIT_OK
         exported = (tmp_path / "cli-lessons" / "global.jsonl").read_text()
         assert "tok-123-secret" not in exported
+
+
+class TestImportBoundaryHardening:
+    """PR #11 round 1: the import path is the untrusted boundary."""
+
+    def test_unconfigured_import_never_falls_back_to_cwd(self, tmp_path, monkeypatch):
+        """With no directory configured anywhere, import must fail loudly -
+        the cwd may well CONTAIN importable jsonl (a silent wrong-corpus
+        load), which is exactly why it must not be used."""
+        trap = tmp_path / "cwd-trap"
+        trap.mkdir()
+        (trap / "global.jsonl").write_text(
+            json.dumps({
+                "scope": "global", "domain": "ci", "topic": "trap",
+                "rule": "r", "why": "w", "status": "active",
+                "created_at": "2026-01-01T00:00:00Z",
+                "updated_at": "2026-01-01T00:00:00Z",
+            }) + "\n", encoding="utf-8",
+        )
+        monkeypatch.chdir(trap)
+        s = LearnStore.open(tmp_path / "bare.db")
+        with pytest.raises(LearnStoreError, match="no import directory configured"):
+            s.import_dir()
+        assert s.lessons(["global"]) == []
+        s.close()
+
+    def test_import_is_write_through_like_every_other_db_write(self, store, tmp_path):
+        foreign = tmp_path / "foreign"
+        foreign.mkdir()
+        (foreign / "global.jsonl").write_text(
+            json.dumps({
+                "scope": "global", "domain": "ci", "topic": "from-foreign",
+                "rule": "r", "why": "w", "status": "active",
+                "created_at": "2026-01-01T00:00:00Z",
+                "updated_at": "2026-01-01T00:00:00Z",
+            }, sort_keys=True) + "\n", encoding="utf-8",
+        )
+        store.import_dir(foreign)  # no explicit export() call
+        exported = (tmp_path / "lessons" / "global.jsonl").read_text(encoding="utf-8")
+        assert "from-foreign" in exported
+
+    def test_malformed_timestamps_fail_closed_with_location(self, store, tmp_path):
+        """Winner selection and chain order are lexicographic - only sound
+        for the exact ISO-Z format, so anything else is refused by name."""
+        bad = tmp_path / "bad-ts"
+        bad.mkdir()
+        row = {
+            "scope": "global", "domain": "ci", "topic": "t",
+            "rule": "r", "why": "w", "status": "active",
+            "created_at": "yesterday", "updated_at": "2026-01-01T00:00:00Z",
+        }
+        (bad / "global.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
+        with pytest.raises(LearnStoreError, match=r"global\.jsonl:1: created_at"):
+            store.import_dir(bad)
+
+
+class TestSyncGitErrorHandling:
+    """PR #11 round 1: exit codes >1 from `git diff --quiet` are errors, not
+    'changes present', and a failed `git add` must never be shrugged off."""
+
+    def _sync_with_patched_git(self, synced_store, monkeypatch, fail_on):
+        import subprocess as sp
+
+        from claudomater import learnstore
+
+        s, repo = synced_store
+        seed(s)
+        real_git = learnstore._git
+
+        def flaky_git(cwd, *args):
+            if args[0] == fail_on:
+                return sp.CompletedProcess(args, 2, stdout="", stderr="simulated failure")
+            return real_git(cwd, *args)
+
+        monkeypatch.setattr(learnstore, "_git", flaky_git)
+        return s
+
+    @pytest.fixture
+    def synced_store(self, tmp_path):
+        origin = tmp_path / "origin.git"
+        subprocess.run(["git", "init", "-q", "--bare", str(origin)], check=True)
+        repo = tmp_path / "dotfiles"
+        subprocess.run(["git", "clone", "-q", str(origin), str(repo)], check=True)
+        git(repo, "config", "user.email", "t@t")
+        git(repo, "config", "user.name", "t")
+        (repo / "seed.txt").write_text("x", encoding="utf-8")
+        git(repo, "add", "-A")
+        git(repo, "commit", "-q", "-m", "seed")
+        git(repo, "push", "-q")
+        s = LearnStore.open(
+            tmp_path / "l.db", export_dir=repo / "omater" / "lessons",
+            now=ticking_now(),
+        )
+        yield s, repo
+        s.close()
+
+    def test_diff_error_is_not_treated_as_changes(self, synced_store, monkeypatch):
+        s = self._sync_with_patched_git(synced_store, monkeypatch, fail_on="diff")
+        with pytest.raises(LearnStoreError, match="git diff failed"):
+            sync(s)
+
+    def test_add_failure_fails_loudly(self, synced_store, monkeypatch):
+        s = self._sync_with_patched_git(synced_store, monkeypatch, fail_on="add")
+        with pytest.raises(LearnStoreError, match="git add failed"):
+            sync(s)
