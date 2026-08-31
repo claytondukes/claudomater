@@ -604,3 +604,63 @@ class TestTopicScrubIdentity:
         assert "hunter2-secret" not in imported["topic"]
         exported = (tmp_path / "lessons" / "global.jsonl").read_text(encoding="utf-8")
         assert "hunter2-secret" not in exported
+
+
+class TestRound3Hardening:
+    """PR #11 round 3: the terminal is a retention surface too; empty
+    filters select nothing; sync's commit carries ONLY the lessons export."""
+
+    def test_cli_success_message_echoes_the_scrubbed_topic(
+        self, tmp_path, capsys, monkeypatch
+    ):
+        project = tmp_path / "proj"
+        project.mkdir()
+        (project / ".omater.yaml").write_text(
+            "project: demo\nsecrets_deny:\n  - MY_TOKEN\n", encoding="utf-8"
+        )
+        monkeypatch.setenv("MY_TOKEN", "tok-123-secret")
+        rc = main([
+            "learn", "add", "--scope", "global", "--domain", "ci",
+            "--topic", "rotate-tok-123-secret-monthly", "--rule", "r", "--why", "w",
+            "--user-config", str(tmp_path / "missing.yaml"),
+            "--db", str(tmp_path / "cli.db"),
+            "--export-dir", str(tmp_path / "cli-lessons"),
+            "--project", str(project),
+        ])
+        assert rc == EXIT_OK
+        out = capsys.readouterr().out
+        assert "tok-123-secret" not in out
+        assert "[REDACTED:MY_TOKEN]" in out
+
+    def test_empty_domain_filter_selects_nothing(self, store):
+        seed(store)
+        assert store.lessons(["global"], domains=[]) == []
+        assert len(store.lessons(["global"], domains=None)) == 1
+        assert len(store.lessons(["global"], domains=["review"])) == 1
+
+    def test_sync_refuses_a_dirty_index(self, tmp_path):
+        """Pre-existing staged edits in the dotfiles repo must never ride
+        the omater-learn: commit - and the refusal leaves them untouched."""
+        origin = tmp_path / "origin.git"
+        subprocess.run(["git", "init", "-q", "--bare", str(origin)], check=True)
+        repo = tmp_path / "dotfiles"
+        subprocess.run(["git", "clone", "-q", str(origin), str(repo)], check=True)
+        git(repo, "config", "user.email", "t@t")
+        git(repo, "config", "user.name", "t")
+        (repo / "seed.txt").write_text("x", encoding="utf-8")
+        git(repo, "add", "-A")
+        git(repo, "commit", "-q", "-m", "seed")
+        (repo / "unrelated-wip.txt").write_text("half-done dotfile edit", encoding="utf-8")
+        git(repo, "add", "unrelated-wip.txt")
+        s = LearnStore.open(
+            tmp_path / "l.db", export_dir=repo / "omater" / "lessons",
+            now=ticking_now(),
+        )
+        seed(s)
+        head_before = git(repo, "rev-parse", "HEAD").stdout
+        with pytest.raises(LearnStoreError, match="already has staged changes"):
+            sync(s)
+        assert git(repo, "rev-parse", "HEAD").stdout == head_before  # no commit
+        staged = git(repo, "diff", "--cached", "--name-only").stdout.split()
+        assert staged == ["unrelated-wip.txt"]  # untouched, and nothing else
+        s.close()

@@ -374,12 +374,16 @@ class LearnStore:
         never returns superseded rows (design §6)."""
         if not scopes:
             return []
+        if domains is not None and not domains:
+            # an EMPTY domain filter selects nothing — same contract as
+            # scopes; None alone means "no domain filter"
+            return []
         query = (
             "SELECT * FROM lesson WHERE status IN ('active','promoted') "
             f"AND scope IN ({','.join('?' * len(scopes))})"
         )
         params: list[Any] = list(scopes)
-        if domains:
+        if domains is not None:
             query += f" AND domain IN ({','.join('?' * len(domains))})"
             params += list(domains)
         query += " ORDER BY scope, domain, topic"
@@ -631,6 +635,18 @@ def sync(
             f"export directory {export_dir} is not inside a git repository"
         )
     repo = Path(top.stdout.strip())
+    pre = _git(repo, "diff", "--cached", "--quiet")
+    if pre.returncode == 1:
+        # `git commit` commits the whole index: pre-existing staged edits in
+        # the dotfiles repo would ride the omater-learn: commit, misfiling
+        # unrelated work under lesson history. Refuse before touching git.
+        raise LearnStoreError(
+            "the export repo already has staged changes; commit or unstage "
+            "them before `omater learn sync` (its commit must carry only "
+            "the lessons export)"
+        )
+    if pre.returncode > 1:
+        raise LearnStoreError(f"git diff failed: {pre.stderr.strip()}")
     has_remote = bool(_git(repo, "remote").stdout.strip())
     if has_remote:
         pull = _git(repo, "pull", "--ff-only", "-q")

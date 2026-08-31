@@ -188,7 +188,16 @@ def _cmd_learn(args: argparse.Namespace) -> int:
             if args.learn_cmd == "refine":
                 kwargs = {k: v for k, v in kwargs.items() if v is not None}
             lesson_id = fn(args.scope, args.domain, args.topic, **kwargs)
-            print(f"{args.learn_cmd}: lesson {lesson_id} ({args.scope}/{args.domain}/{args.topic})")
+            # echo the STORED (scrubbed) key, never the raw --topic: the
+            # terminal/CI log is a retention surface like any other
+            stored = store.conn.execute(
+                "SELECT scope, domain, topic FROM lesson WHERE id=?",
+                (lesson_id,),
+            ).fetchone()
+            print(
+                f"{args.learn_cmd}: lesson {lesson_id} "
+                f"({stored['scope']}/{stored['domain']}/{stored['topic']})"
+            )
         elif args.learn_cmd == "list":
             rows = store.lessons(args.scope or ["global"], domains=args.domain or None)
             if args.json:
