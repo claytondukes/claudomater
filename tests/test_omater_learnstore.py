@@ -31,7 +31,7 @@ def ticking_now():
 
     def now():
         t = next(counter)
-        return f"2026-08-30T{t // 3600:02d}:{(t // 60) % 60:02d}:{t % 60:02d}Z"
+        return f"2026-08-30T{t // 3600:02d}:{(t // 60) % 60:02d}:{t % 60:02d}.000000Z"
 
     return now
 
@@ -160,7 +160,7 @@ class TestScrubDiscipline:
             "scope": "global", "domain": "ci", "topic": "t",
             "rule": "value hunter2-secret arrived from another machine",
             "why": "w", "status": "active",
-            "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
+            "created_at": "2026-01-01T00:00:00.000000Z", "updated_at": "2026-01-01T00:00:00.000000Z",
         }
         (foreign / "global.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
         store.import_dir(foreign)
@@ -275,7 +275,7 @@ class TestImportRoundTrip:
         foreign.mkdir()
         (row,) = store.lessons(["global"])
         newer = {f: row[f] for f in EXPORT_FIELDS}
-        newer["rule"], newer["updated_at"] = "the other machine refined this", "2027-01-01T00:00:00Z"
+        newer["rule"], newer["updated_at"] = "the other machine refined this", "2027-01-01T00:00:00.000000Z"
         (foreign / "global.jsonl").write_text(
             json.dumps(newer, sort_keys=True) + "\n", encoding="utf-8"
         )
@@ -299,7 +299,7 @@ class TestImportRoundTrip:
         remote_head = {
             "scope": "global", "domain": "review", "topic": "copilot-suppressed-block",
             "rule": "remote judgment", "why": "remote why", "status": "active",
-            "created_at": "2027-06-01T00:00:00Z", "updated_at": "2027-06-01T00:00:00Z",
+            "created_at": "2027-06-01T00:00:00.000000Z", "updated_at": "2027-06-01T00:00:00.000000Z",
         }
         (foreign / "global.jsonl").write_text(
             json.dumps(remote_head, sort_keys=True) + "\n", encoding="utf-8"
@@ -473,8 +473,8 @@ class TestImportBoundaryHardening:
             json.dumps({
                 "scope": "global", "domain": "ci", "topic": "trap",
                 "rule": "r", "why": "w", "status": "active",
-                "created_at": "2026-01-01T00:00:00Z",
-                "updated_at": "2026-01-01T00:00:00Z",
+                "created_at": "2026-01-01T00:00:00.000000Z",
+                "updated_at": "2026-01-01T00:00:00.000000Z",
             }) + "\n", encoding="utf-8",
         )
         monkeypatch.chdir(trap)
@@ -491,8 +491,8 @@ class TestImportBoundaryHardening:
             json.dumps({
                 "scope": "global", "domain": "ci", "topic": "from-foreign",
                 "rule": "r", "why": "w", "status": "active",
-                "created_at": "2026-01-01T00:00:00Z",
-                "updated_at": "2026-01-01T00:00:00Z",
+                "created_at": "2026-01-01T00:00:00.000000Z",
+                "updated_at": "2026-01-01T00:00:00.000000Z",
             }, sort_keys=True) + "\n", encoding="utf-8",
         )
         store.import_dir(foreign)  # no explicit export() call
@@ -507,7 +507,7 @@ class TestImportBoundaryHardening:
         row = {
             "scope": "global", "domain": "ci", "topic": "t",
             "rule": "r", "why": "w", "status": "active",
-            "created_at": "yesterday", "updated_at": "2026-01-01T00:00:00Z",
+            "created_at": "yesterday", "updated_at": "2026-01-01T00:00:00.000000Z",
         }
         (bad / "global.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
         with pytest.raises(LearnStoreError, match=r"global\.jsonl:1: created_at"):
@@ -595,7 +595,7 @@ class TestTopicScrubIdentity:
         row = {
             "scope": "global", "domain": "ci", "topic": self.SECRET_TOPIC,
             "rule": "r", "why": "w", "status": "active",
-            "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
+            "created_at": "2026-01-01T00:00:00.000000Z", "updated_at": "2026-01-01T00:00:00.000000Z",
         }
         (foreign / "global.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
         store.import_dir(foreign)
@@ -680,7 +680,7 @@ class TestScopeFilenameContract:
         bad.mkdir()
         base = {
             "rule": "r", "why": "w", "status": "active",
-            "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
+            "created_at": "2026-01-01T00:00:00.000000Z", "updated_at": "2026-01-01T00:00:00.000000Z",
         }
         (bad / "x.jsonl").write_text(
             json.dumps({**base, "scope": "global", "domain": "ci", "topic": "  "}) + "\n",
@@ -710,13 +710,13 @@ class TestChainLinksWhenAnEarlierGenerationWins:
                 "rule": "r", "why": "w"}
         rows = [
             {**base, "status": "superseded",
-             "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z"},
+             "created_at": "2026-01-01T00:00:00.000000Z", "updated_at": "2026-01-01T00:00:00.000000Z"},
             # older generation, refined LATE: wins the head on updated_at
             {**base, "rule": "old generation, heavily refined", "status": "active",
-             "created_at": "2026-02-01T00:00:00Z", "updated_at": "2026-09-01T00:00:00Z"},
+             "created_at": "2026-02-01T00:00:00.000000Z", "updated_at": "2026-09-01T00:00:00.000000Z"},
             # newest generation, loses: must point back at the winner
             {**base, "rule": "newest but loses", "status": "active",
-             "created_at": "2026-03-01T00:00:00Z", "updated_at": "2026-03-02T00:00:00Z"},
+             "created_at": "2026-03-01T00:00:00.000000Z", "updated_at": "2026-03-02T00:00:00.000000Z"},
         ]
         (foreign / "global.jsonl").write_text(
             "\n".join(json.dumps(r, sort_keys=True) for r in rows) + "\n",
@@ -741,8 +741,8 @@ class TestChainLinksWhenAnEarlierGenerationWins:
         base = {"scope": "global", "domain": "review", "topic": "retired",
                 "rule": "r", "why": "w", "status": "superseded"}
         rows = [
-            {**base, "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z"},
-            {**base, "created_at": "2026-02-01T00:00:00Z", "updated_at": "2026-02-01T00:00:00Z"},
+            {**base, "created_at": "2026-01-01T00:00:00.000000Z", "updated_at": "2026-01-01T00:00:00.000000Z"},
+            {**base, "created_at": "2026-02-01T00:00:00.000000Z", "updated_at": "2026-02-01T00:00:00.000000Z"},
         ]
         (foreign / "global.jsonl").write_text(
             "\n".join(json.dumps(r, sort_keys=True) for r in rows) + "\n",
@@ -780,3 +780,100 @@ class TestForeignKeysEnforced:
             store.conn.execute(
                 "UPDATE lesson SET superseded_by=99999 WHERE topic='copilot-suppressed-block'"
             )
+
+
+class TestTimestampResolution:
+    """PR #11 round 8: created_at is the generation IDENTITY on import and
+    both timestamps drive deterministic ordering lexicographically - at
+    1-second resolution, same-key writes inside one second collided the
+    identity and tied the sort. The canonical format is fixed-width
+    microseconds."""
+
+    def test_real_clock_timestamps_are_fixed_width_microseconds(self, tmp_path):
+        import re as re_mod
+
+        s = LearnStore.open(tmp_path / "l.db")  # real _utc_now
+        s.add("global", "ci", "t", "r", "w")
+        (row,) = s.lessons(["global"])
+        assert re_mod.fullmatch(
+            r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z", row["created_at"]
+        ), row["created_at"]
+        s.close()
+
+    def test_same_second_generations_keep_distinct_identities(self, tmp_path):
+        """add + supersede land within one wall-clock second almost always;
+        both generations must survive a fresh-index round-trip as TWO rows."""
+        export_dir = tmp_path / "lessons"
+        s = LearnStore.open(tmp_path / "l.db", export_dir=export_dir)
+        s.add("global", "ci", "t", "first judgment", "w")
+        s.supersede("global", "ci", "t", "second judgment", "w2")
+        s.close()
+        fresh = LearnStore.open(tmp_path / "fresh.db")
+        fresh.import_dir(export_dir)
+        rows = fresh.conn.execute("SELECT * FROM lesson WHERE topic='t'").fetchall()
+        assert len(rows) == 2
+        fresh.close()
+
+    def test_seconds_only_timestamps_are_refused_at_import(self, store, tmp_path):
+        bad = tmp_path / "narrow"
+        bad.mkdir()
+        row = {
+            "scope": "global", "domain": "ci", "topic": "t", "rule": "r",
+            "why": "w", "status": "active",
+            "created_at": "2026-01-01T00:00:00Z",  # 1s resolution: refused
+            "updated_at": "2026-01-01T00:00:00.000000Z",
+        }
+        (bad / "global.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
+        with pytest.raises(LearnStoreError, match="ffffff"):
+            store.import_dir(bad)
+
+
+class TestImportFileScopeContract:
+    """PR #11 round 8: one file per scope is the export contract - a
+    misnamed file would be re-canonicalized by export and stay behind as a
+    stray, forever re-imported."""
+
+    def test_scope_must_match_the_filename(self, store, tmp_path):
+        stray = tmp_path / "stray"
+        stray.mkdir()
+        row = {
+            "scope": "global", "domain": "ci", "topic": "t", "rule": "r",
+            "why": "w", "status": "active",
+            "created_at": "2026-01-01T00:00:00.000000Z",
+            "updated_at": "2026-01-01T00:00:00.000000Z",
+        }
+        (stray / "wrong-name.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
+        with pytest.raises(LearnStoreError, match="one file per scope"):
+            store.import_dir(stray)
+
+
+class TestSyncRemoteErrors:
+    def test_git_remote_failure_is_not_no_remotes(self, tmp_path, monkeypatch):
+        """PR #11 round 8: an erroring `git remote` must raise, not read as
+        'no remotes configured' and silently skip the pull."""
+        import subprocess as sp
+
+        from claudomater import learnstore
+
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        git(repo, "config", "user.email", "t@t")
+        git(repo, "config", "user.name", "t")
+        (repo / "seed.txt").write_text("x", encoding="utf-8")
+        git(repo, "add", "-A")
+        git(repo, "commit", "-q", "-m", "seed")
+        s = LearnStore.open(tmp_path / "l.db", export_dir=repo / "lessons",
+                            now=ticking_now())
+        seed(s)
+        real_git = learnstore._git
+
+        def flaky_git(cwd, *args):
+            if args[0] == "remote":
+                return sp.CompletedProcess(args, 128, stdout="", stderr="boom")
+            return real_git(cwd, *args)
+
+        monkeypatch.setattr(learnstore, "_git", flaky_git)
+        with pytest.raises(LearnStoreError, match="git remote failed"):
+            sync(s)
+        s.close()

@@ -127,8 +127,30 @@ class LearnStoreError(Exception):
     pass
 
 
+# Fixed-width microseconds: created_at is the generation IDENTITY on
+# import and both timestamps drive deterministic ordering (export sort,
+# winner selection, chain order) via LEXICOGRAPHIC comparison — which is
+# only chronologically sound when every value has the same width. Plain
+# 1-second resolution let same-key writes inside one second collide the
+# identity and tie the sort.
+TIMESTAMP_FORMAT = "%Y-%m-%dT%H:%M:%S.%fZ"
+_TIMESTAMP_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z")
+
+
 def _utc_now() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return datetime.now(timezone.utc).strftime(TIMESTAMP_FORMAT)
+
+
+def _validate_timestamp(value: str) -> bool:
+    """Fixed-width (regex) AND a real calendar instant (strptime — %f alone
+    would accept 1-5 fractional digits, breaking lexicographic order)."""
+    if not _TIMESTAMP_RE.fullmatch(value):
+        return False
+    try:
+        datetime.strptime(value, TIMESTAMP_FORMAT)
+    except ValueError:
+        return False
+    return True
 
 
 # scope names map 1:1 to export filenames, so they must BE filename-safe —
@@ -531,15 +553,23 @@ class LearnStore:
                 _validate_scope(row["scope"], context=f"{path.name}:{lineno}")
                 for field in ("created_at", "updated_at"):
                     # winner selection and chain order are lexicographic
-                    # comparisons that are only sound for this exact format —
-                    # a malformed timestamp would silently pick wrong winners
-                    try:
-                        datetime.strptime(row[field], "%Y-%m-%dT%H:%M:%SZ")
-                    except ValueError:
+                    # comparisons that are only sound for this exact fixed-
+                    # width format — a malformed or narrower timestamp would
+                    # silently pick wrong winners
+                    if not _validate_timestamp(row[field]):
                         raise LearnStoreError(
                             f"{path.name}:{lineno}: {field} {row[field]!r} is "
-                            "not a YYYY-MM-DDTHH:MM:SSZ timestamp"
-                        ) from None
+                            "not a YYYY-MM-DDTHH:MM:SS.ffffffZ timestamp"
+                        )
+                if row["scope"] != path.stem:
+                    # one file per scope is the export contract; a misnamed
+                    # file would be re-canonicalized by export and leave a
+                    # stray forever-reimported file mixing corpora
+                    raise LearnStoreError(
+                        f"{path.name}:{lineno}: scope {row['scope']!r} does "
+                        f"not match the file (one file per scope; expected "
+                        f"{path.stem!r})"
+                    )
                 self._import_row(row, stats, intended)
         for key in {k[:3] for k in intended}:
             self._settle_key(*key, intended)
@@ -689,7 +719,12 @@ def sync(
         )
     if pre.returncode > 1:
         raise LearnStoreError(f"git diff failed: {pre.stderr.strip()}")
-    has_remote = bool(_git(repo, "remote").stdout.strip())
+    remotes = _git(repo, "remote")
+    if remotes.returncode != 0:
+        # an error is not "no remotes": proceeding would silently skip the
+        # pull and commit on top of an unknown repo state
+        raise LearnStoreError(f"git remote failed: {remotes.stderr.strip()}")
+    has_remote = bool(remotes.stdout.strip())
     if has_remote:
         pull = _git(repo, "pull", "--ff-only", "-q")
         if pull.returncode != 0:
