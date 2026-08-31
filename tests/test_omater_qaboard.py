@@ -417,3 +417,15 @@ class TestRoundTwoHardening:
                 post_step(cfg, 7, {"step_key": "34-3-01", "label": "34-3 x"})
         finally:
             _StubBoard.post_body_override = None
+
+    def test_a_sub_story_id_cannot_credit_the_parent_either(self, cfg):
+        """Round-3: '34-3' with a '34-3-1 ...' label passed the bare digit
+        guard (the next char is '-'). Compound ids are real in this grammar,
+        so the boundary must refuse a continuing '-<digit>' segment too."""
+        with pytest.raises(QaBoardError, match="must start with its story id"):
+            author_step(cfg, "34", "34-3", "34-3-1 nested walkthrough", "x.ts:1")
+
+    def test_non_object_section_elements_are_a_typed_stop(self, cfg):
+        _StubBoard.sections = ["oops", {"epic_id": "34", "id": 7}]
+        with pytest.raises(QaBoardError, match="section"):
+            section_id_for_epic(cfg, "34")

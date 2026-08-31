@@ -166,7 +166,7 @@ def author_step(
     without one, so authoring such a step here would strand it."""
     if not label.strip():
         raise QaBoardError("a walkthrough step needs a non-empty label")
-    if not re.match(rf"{re.escape(story_id)}(?!\d)", label.strip()):
+    if not re.match(rf"{re.escape(story_id)}(?!\d|-\d)", label.strip()):
         # the digit boundary is load-bearing (the coverage regex's own
         # lesson): a bare startswith('34-3') matches a '34-36 ...' label,
         # crediting a step to its sibling story
@@ -228,6 +228,14 @@ def section_id_for_epic(cfg: QaBoardConfig, epic_id: str) -> int:
     sections = _http_json(f"{cfg.board_url}/sections")
     if not isinstance(sections, list):
         raise QaBoardError(f"board /sections returned {type(sections).__name__}")
+    for entry in sections:
+        if not isinstance(entry, dict):
+            # a corrupt listing must stop loudly, not AttributeError - and
+            # not silently skip past an element that might BE our section
+            raise QaBoardError(
+                f"board /sections carries a non-object section entry "
+                f"({str(entry)[:80]!r})"
+            )
     matches = [s for s in sections if str(s.get("epic_id")) == str(epic_id)]
     if not matches:
         raise QaBoardError(
