@@ -776,16 +776,23 @@ class PhaseRunner:
         counted; only verified phases reach here, so a failed attempt's
         claim mints nothing. Counting is best-effort: a learn-store failure
         is logged, never a verified phase turned into a failure."""
+        present = "lessons_applied" in result
         claimed = result.get("lessons_applied")
-        if claimed is None and not spec.injected_lessons:
+        if not present and not spec.injected_lessons:
             return
         injected = set(spec.injected_lessons)
-        # an absent field is "no report" (recorded as reported=False), but
-        # every ENTRY that is present and not a validly-injected id — null
-        # included — lands in `rejected`: the contract is that malformed
-        # claims are logged, never silently dropped
-        reported = isinstance(claimed, list)
-        items: list[Any] = claimed if reported else ([] if claimed is None else [claimed])
+        # an ABSENT field is "no report" (recorded as reported=False); a
+        # PRESENT field that is not a list — an explicit null included — is
+        # a malformed claim whose value lands in `rejected`: the contract is
+        # that malformed claims are logged, never silently dropped, and
+        # `in result` is what tells the two apart
+        reported = present and isinstance(claimed, list)
+        if not present:
+            items: list[Any] = []
+        elif isinstance(claimed, list):
+            items = claimed
+        else:
+            items = [claimed]
         applied: list[int] = []
         rejected: list[Any] = []
         for item in items:

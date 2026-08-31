@@ -540,7 +540,7 @@ class LearnStore:
                 (*scopes,),
             ).fetchall()
         )
-        if domains:
+        if domains and len(chosen) < budget:
             dmarks = ",".join("?" * len(domains))
             take(
                 dict(r)
@@ -555,19 +555,24 @@ class LearnStore:
             # domain names are data, never query syntax. Tier 3 asks for
             # ACTIVE rows only — promoted rows are already chosen, and
             # letting them occupy the LIMIT would crowd out fresh matches.
-            query = " OR ".join('"' + d.replace('"', '""') + '"' for d in domains)
-            # the LIMIT covers budget PLUS every already-chosen row: dupes
-            # (tier-2 domain rows also FTS-match) consume limit slots after
-            # dedupe, and the fill guarantee should be obvious, not an
-            # inequality argument
-            take(
-                self.search(
-                    query,
-                    scopes,
-                    limit=budget + len(chosen),
-                    statuses=("active",),
+            if len(chosen) < budget:
+                # a full budget skips the FTS pass entirely — take() would
+                # discard every result anyway
+                query = " OR ".join(
+                    '"' + d.replace('"', '""') + '"' for d in domains
                 )
-            )
+                # the LIMIT covers budget PLUS every already-chosen row:
+                # dupes (tier-2 domain rows also FTS-match) consume limit
+                # slots after dedupe, and the fill guarantee should be
+                # obvious, not an inequality argument
+                take(
+                    self.search(
+                        query,
+                        scopes,
+                        limit=budget + len(chosen),
+                        statuses=("active",),
+                    )
+                )
         return chosen
 
     def record_applied(self, lesson_ids: Sequence[int], run_id: str) -> None:
@@ -932,9 +937,13 @@ def injection_block(lessons: Sequence[dict[str, Any]]) -> str:
     for lesson in lessons:
         # metadata on its own line; EVERY content line is a real blockquote
         # (mid-line "> " renders as plain text, which would let lesson prose
-        # read as normal instructions and defeat the framing)
-        lines = [f"- [L{lesson['id']}] {lesson['scope']}/{lesson['domain']}/"
-                 f"{lesson['topic']}"]
+        # read as normal instructions and defeat the framing). The metadata
+        # itself is collapsed to one line: a newline-bearing domain/topic
+        # would otherwise smuggle unquoted lines past the frame.
+        meta = "/".join(
+            " ".join(str(lesson[k]).split()) for k in ("scope", "domain", "topic")
+        )
+        lines = [f"- [L{lesson['id']}] {meta}"]
         for text in (str(lesson["rule"]), "why: " + str(lesson["why"])):
             lines += [f"  > {line}" for line in text.splitlines() or [""]]
         entries.append("\n".join(lines))
