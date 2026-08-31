@@ -99,6 +99,20 @@ Phase 0 skeleton — the pieces every pipeline run stands on:
   removed only by an explicit `import --prune`, because the DB is on its
   way to being the writer and a truncated file must not delete real
   tracking as a side effect.
+- **Surface classification** (`claudomater.surface`) — the QA-board gate's
+  first question, "did this story touch user-facing surface?", as a generic
+  exclusions-FIRST pattern engine with the project's SURFACE-TOUCHING /
+  exclusion lists in committed config (`.omater.yaml` `surface_rules:`).
+  The predecessor hardcoded the lists in skill code and they drifted from
+  the project's process document within days of it changing; config beside
+  the document makes drift visible in one repo's diffs. Engine semantics
+  are burn scars, preserved: exclusions beat surface globs (match
+  precedence is the contract), `**` matches on path-segment boundaries
+  (fnmatch's `*` crosses `/`), `neutral` is a real third outcome, a
+  non-repo-relative path is refused (it would match nothing and silently
+  waive the gate), and an empty-or-blank changed-file set is refused (a
+  broken lookup must not read as "no surface").
+
 - **`omater init`** — writes a starter `.omater.yaml` and gitignores the
   runs dir. The PreToolUse write fence (denies Write/Edit outside the
   project root, pattern-matches Bash for out-of-tree writes) is RUN-SCOPED

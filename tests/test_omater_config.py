@@ -516,3 +516,37 @@ class TestCommitScopeConfig:
             write_project(tmp_path, 'project: p\ncommit_scope:\n  ".": []\n')
         )
         assert cfg.commit_scope == {".": []}
+
+
+class TestSurfaceRulesConfig:
+    """Phase 3 deliverable 3: the surface-classification rules live in
+    committed config, validated at LOAD through the engine's own loader
+    (one source of truth for the block's grammar)."""
+
+    def test_absent_means_no_gate(self, tmp_path):
+        assert load_project_config(
+            write_project(tmp_path, "project: p\n")
+        ).surface_rules is None
+
+    def test_a_valid_block_loads_into_rules(self, tmp_path):
+        cfg = load_project_config(
+            write_project(
+                tmp_path,
+                "project: p\n"
+                "surface_rules:\n"
+                "  surface: [\"app/src/**\"]\n"
+                "  exclude: [\"docs/**\"]\n"
+                "  exclude_root_dotfiles: true\n",
+            )
+        )
+        assert cfg.surface_rules.surface == ("app/src/**",)
+        assert cfg.surface_rules.exclude_root_dotfiles is True
+
+    def test_garbage_fails_at_load_as_a_config_error(self, tmp_path):
+        for bad in (
+            "surface_rules: [x]\n",
+            "surface_rules:\n  surface: []\n",
+            "surface_rules:\n  surface: [\"a/**\"]\n  exlude: [\"d/**\"]\n",
+        ):
+            with pytest.raises(ConfigError, match="surface_rules|surface"):
+                load_project_config(write_project(tmp_path, f"project: p\n{bad}"))
