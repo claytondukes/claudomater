@@ -3053,3 +3053,26 @@ class TestDeclaredArtifactRoots:
             payload("Write", file_path=str(outside / "s.md")), root
         )
         assert allow, reason
+
+    def test_the_deny_hint_names_each_allowed_group_accurately(self, tmp_path):
+        """PR #14 round 4: the hint lumped artifact roots into the scratch
+        list under a wording that implied one group - misleading exactly
+        when a deny happens."""
+        root = tmp_path / "proj"
+        (root / ".claude").mkdir(parents=True)
+        outside = tmp_path / "artifacts"
+        outside.mkdir()
+        (root / "_bmad-output").symlink_to(outside)
+        (root / ".omater.yaml").write_text(
+            "project: p\nartifact_roots: [_bmad-output]\n", encoding="utf-8"
+        )
+        allow, reason = hooks.evaluate_pre_tool_use(
+            payload("Write", file_path="/somewhere/else/x.txt"), root
+        )
+        assert not allow
+        # each group carries its own parenthesized list
+        assert "declared scratch dir (" in reason
+        assert "declared artifact root (" in reason
+        scratch_part = reason.split("declared artifact root")[0]
+        assert str(outside) not in scratch_part  # not lumped into scratch
+        assert str(outside) in reason.split("declared artifact root")[1]

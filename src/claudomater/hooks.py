@@ -1949,8 +1949,10 @@ def evaluate_pre_tool_use(
         Path(os.path.realpath(d)) for d in scratch_dirs_for(root, env)
     ]
     # Declared artifact roots widen containment by exactly what the project
-    # committed to its config - see artifact_roots_for.
-    scratch.extend(artifact_roots_for(root))
+    # committed to its config - see artifact_roots_for. Kept as a separate
+    # list so the deny hint can name each group accurately.
+    artifact_roots = artifact_roots_for(root)
+    scratch = scratch + artifact_roots
     # A relative cwd would make relative tool paths resolve against the hook
     # PROCESS's working directory — environment-dependent decisions and an
     # avoidable bypass surface. Only an absolute cwd is trusted; anything
@@ -1968,11 +1970,16 @@ def evaluate_pre_tool_use(
     # Name every allowed scratch location, including an operator-declared
     # OMATER_SCRATCH_DIR — a hint pointing only at the default sends the
     # agent to the wrong place when a declared dir exists.
+    scratch_only = scratch[: len(scratch) - len(artifact_roots)]
     redirect_hint = (
-        f"write inside the project ({root}), a declared scratch dir, "
-        "or a declared artifact root "
-        f"({', '.join(str(d) for d in scratch)})"
+        f"write inside the project ({root}) or a declared scratch dir "
+        f"({', '.join(str(d) for d in scratch_only)})"
     )
+    if artifact_roots:
+        redirect_hint += (
+            f", or a declared artifact root "
+            f"({', '.join(str(d) for d in artifact_roots)})"
+        )
 
     if tool in WRITE_TOOLS:
         raw = tool_input.get("file_path") or tool_input.get("notebook_path")

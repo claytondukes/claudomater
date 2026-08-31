@@ -1022,12 +1022,15 @@ def sync(
         raise LearnStoreError(f"git remote failed: {remotes.stderr.strip()}")
     has_remote = bool(remotes.stdout.strip())
     if has_remote:
-        # `-c pull.rebase=false`: a plain `pull --ff-only` still HONORS the
+        # `--no-rebase`: a plain `pull --ff-only` still HONORS the
         # operator's pull.rebase, and this machine sets it globally - which
         # turned sync's pull into a rebase that refuses on any unstaged
         # change anywhere in the repo, even with nothing to fetch. The flag
         # pins what the pull MEANS to what this function documents.
-        pull = _git(repo, "-c", "pull.rebase=false", "pull", "--ff-only", "-q")
+        # (--no-rebase rather than `-c pull.rebase=false`: _git's error
+        # wrapper names args[0] as the subcommand, and "git -c timed out"
+        # would misname the operation exactly when the operator needs it.)
+        pull = _git(repo, "pull", "--no-rebase", "--ff-only", "-q")
         if pull.returncode != 0:
             raise LearnStoreError(
                 "git pull --ff-only failed - resolve the export repo by hand "
