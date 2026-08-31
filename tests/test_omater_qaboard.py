@@ -91,8 +91,14 @@ def board():
     server = HTTPServer(("127.0.0.1", 0), _StubBoard)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
-    yield f"http://127.0.0.1:{server.server_port}/api"
-    server.shutdown()
+    try:
+        yield f"http://127.0.0.1:{server.server_port}/api"
+    finally:
+        # shutdown stops the serve loop; server_close releases the
+        # listening socket - skipping it leaks fds across repeated runs
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
 
 
 @pytest.fixture
@@ -268,11 +274,17 @@ class TestFinishFlow:
         }
         assert [p for p, _ in _StubBoard.posted] == ["/api/sections/7/steps"]
         assert _StubBoard.posted[0][1]["step_key"] == "34-36-01"
+        # intent BEFORE each action, completion after (the run log's own
+        # write-ahead contract): a crash between any pair shows exactly
+        # what was in flight
         assert [e[1] for e in log.events] == [
             "qa-board-step",
+            "qa-board-post",
             "qa-board-posted",
+            "qa-board-gate",
             "qa-board-gate-pass",
         ]
+        assert log.events[0][2]["step_label"].startswith("34-36 ")
 
     def test_a_surface_story_without_step_content_is_a_loud_stop(self, cfg):
         with pytest.raises(QaBoardError, match="no walkthrough step content"):
@@ -294,7 +306,10 @@ class TestFinishFlow:
                 step_label="34-36 walkthrough",
                 surface_proof="app/src/Widget.tsx:1",
             )
-        assert "qa-board-gate-pass" not in [e[1] for e in log.events]
+        names = [e[1] for e in log.events]
+        assert "qa-board-post" in names  # the intent that was in flight
+        assert "qa-board-posted" not in names
+        assert "qa-board-gate-pass" not in names
 
     def test_a_failing_gate_blocks_the_ok(self, cfg):
         gate = cfg.gate_dir / "gate.sh"

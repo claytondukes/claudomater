@@ -83,9 +83,23 @@ class QaBoardConfig:
                 f"adapters.qa_board is missing {', '.join(missing)} - a "
                 "half-declared board adapter must not read as 'no board'"
             )
+        # every field TYPED here: a non-string path would escape as a raw
+        # TypeError from Path(), past load_project_config's typed catch
+        for key in ("authoring_dir", "board_url", "gate_dir"):
+            if not isinstance(raw[key], str):
+                raise QaBoardError(
+                    f"adapters.qa_board.{key} must be a string, got {raw[key]!r}"
+                )
         gate = raw["gate"]
-        if not isinstance(gate, list) or not all(isinstance(a, str) for a in gate):
-            raise QaBoardError("adapters.qa_board.gate must be a list of argv strings")
+        if (
+            not isinstance(gate, list)
+            or not gate
+            or not all(isinstance(a, str) and a for a in gate)
+        ):
+            raise QaBoardError(
+                "adapters.qa_board.gate must be a non-empty list of "
+                f"non-empty argv strings, got {gate!r}"
+            )
         root = Path(root)
         authoring = Path(raw["authoring_dir"])
         gate_dir = Path(raw["gate_dir"])
@@ -284,14 +298,30 @@ def finish_story(
             "merge phase must author step_label + surface_proof for a "
             "surface story"
         )
+    # run-log discipline: an INTENT event lands before each action (the
+    # log's own contract) and a completion event after it, so a crash
+    # between the two shows exactly what was being attempted - content
+    # included, because a retry needs the label/proof that were in flight
     runlog.event(
         "merge",
         "qa-board-step",
-        {"story": story_id, "epic": epic_id, "surface": verdict.surface},
+        {
+            "story": story_id,
+            "epic": epic_id,
+            "surface": verdict.surface,
+            "step_label": step_label,
+            "surface_proof": surface_proof,
+        },
         story_key=story_id,
     )
     step = author_step(cfg, epic_id, story_id, step_label, surface_proof)
     section_id = section_id_for_epic(cfg, epic_id)
+    runlog.event(
+        "merge",
+        "qa-board-post",
+        {"story": story_id, "step_key": step["step_key"], "section_id": section_id},
+        story_key=story_id,
+    )
     posted = post_step(cfg, section_id, step)
     runlog.event(
         "merge",
@@ -302,6 +332,12 @@ def finish_story(
             "section_id": section_id,
             "board_step_id": posted.get("id"),
         },
+        story_key=story_id,
+    )
+    runlog.event(
+        "merge",
+        "qa-board-gate",
+        {"story": story_id, "epic": epic_id},
         story_key=story_id,
     )
     run_gate(cfg, epic_id)
