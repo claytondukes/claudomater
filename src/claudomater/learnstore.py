@@ -125,9 +125,12 @@ CREATE TABLE IF NOT EXISTS run_event (
   detail     TEXT,
   created_at TEXT NOT NULL
 );
--- which runs used which lessons: LOCAL ONLY (like the counters it feeds).
--- `sessions` means DISTINCT runs, so the increment needs memory of who
--- already counted - refs alone cannot carry that.
+-- which runs APPLIED which lessons: LOCAL ONLY (like the counters it
+-- feeds), and the authoritative distinct-applied-runs count (candidacy
+-- reads it directly). The lesson.sessions column reads 1 + distinct
+-- applied runs - its DEFAULT 1 counts the CREATING session by design -
+-- and the once-per-run increment needs this table's memory of who
+-- already counted; refs alone cannot carry that.
 CREATE TABLE IF NOT EXISTS lesson_use (
   lesson_id INTEGER NOT NULL REFERENCES lesson(id),
   run_id    TEXT NOT NULL,
