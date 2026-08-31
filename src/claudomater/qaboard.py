@@ -87,19 +87,23 @@ class QaBoardConfig:
         # every field TYPED here: a non-string path would escape as a raw
         # TypeError from Path(), past load_project_config's typed catch
         for key in ("authoring_dir", "board_url", "gate_dir"):
-            if not isinstance(raw[key], str):
+            if not isinstance(raw[key], str) or not raw[key].strip():
+                # whitespace-only survives the truthiness check above and
+                # becomes an empty value after normalization - a confusing
+                # runtime failure instead of a load-time one
                 raise QaBoardError(
-                    f"adapters.qa_board.{key} must be a string, got {raw[key]!r}"
+                    f"adapters.qa_board.{key} must be a non-blank string, "
+                    f"got {raw[key]!r}"
                 )
         gate = raw["gate"]
         if (
             not isinstance(gate, list)
             or not gate
-            or not all(isinstance(a, str) and a for a in gate)
+            or not all(isinstance(a, str) and a.strip() for a in gate)
         ):
             raise QaBoardError(
                 "adapters.qa_board.gate must be a non-empty list of "
-                f"non-empty argv strings, got {gate!r}"
+                f"non-blank argv strings, got {gate!r}"
             )
         root = Path(root)
         authoring = Path(raw["authoring_dir"])
@@ -140,9 +144,18 @@ def load_spec(path: Path, epic_id: str) -> dict:
         raise QaBoardError(
             f"{path} is not an authoring spec (need an object with a 'steps' list)"
         )
+    seen: set[str] = set()
     for i, step in enumerate(spec["steps"]):
         if not isinstance(step, dict) or not str(step.get("step_key", "")).strip():
             raise QaBoardError(f"{path}: steps[{i}] has no usable step_key")
+        key = str(step["step_key"]).strip()
+        if key in seen:
+            # step_key uniquely identifies a step everywhere downstream
+            # (the board's unique constraint, the retry reuse, coverage) -
+            # a spec already carrying a duplicate is malformed, and
+            # authoring on top of it would compound the corruption
+            raise QaBoardError(f"{path}: duplicate step_key {key!r}")
+        seen.add(key)
     return spec
 
 

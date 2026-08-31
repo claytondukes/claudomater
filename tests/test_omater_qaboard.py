@@ -465,3 +465,35 @@ class TestRoundTwoHardening:
         intent = [e for e in log.events if e[1] == "qa-board-step"][0][2]
         assert intent["step_label"] == "34-36 walkthrough"
         assert intent["surface_proof"] == "app/src/W.tsx:1"
+
+    def test_whitespace_only_adapter_fields_fail_at_load(self, tmp_path):
+        """Round-10 pins: blank-after-strip values passed the truthiness
+        check and failed later as confusing runtime errors."""
+        base = {
+            "authoring_dir": "a",
+            "board_url": "http://x/api",
+            "gate_dir": "s",
+            "gate": ["./g.sh"],
+        }
+        for key, bad in (
+            ("board_url", "   "),
+            ("authoring_dir", " "),
+            ("gate_dir", "\t"),
+            ("gate", ["./g.sh", "   "]),
+        ):
+            raw = {**base, key: bad}
+            with pytest.raises(QaBoardError, match="qa_board"):
+                QaBoardConfig.from_adapter(raw, tmp_path)
+
+    def test_a_spec_with_duplicate_step_keys_is_refused(self, cfg):
+        path = spec_path(cfg, "34")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps({"epic_id": "34", "steps": [
+                {"step_key": "34-1-01", "label": "34-1 a"},
+                {"step_key": "34-1-01", "label": "34-1 b"},
+            ]}),
+            encoding="utf-8",
+        )
+        with pytest.raises(QaBoardError, match="duplicate step_key"):
+            load_spec(path, "34")
