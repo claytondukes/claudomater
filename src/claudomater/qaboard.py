@@ -105,7 +105,9 @@ class QaBoardConfig:
         gate_dir = Path(raw["gate_dir"])
         return cls(
             authoring_dir=authoring if authoring.is_absolute() else root / authoring,
-            board_url=str(raw["board_url"]).rstrip("/"),
+            # strip whitespace BEFORE the slash trim: a pasted URL with a
+            # stray space otherwise fails later as a confusing "unreachable"
+            board_url=raw["board_url"].strip().rstrip("/"),
             gate_dir=gate_dir if gate_dir.is_absolute() else root / gate_dir,
             gate=tuple(gate),
         )
@@ -230,10 +232,16 @@ def _http_json(url: str, payload: dict | None = None, timeout: float = 10.0) -> 
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")[:300]
         raise QaBoardError(f"board {exc.code} on {url}: {detail}") from exc
-    except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
+    except ValueError as exc:
+        # the board RESPONDED, with something that is not JSON - a
+        # different failure from unreachable, and triaged differently
         raise QaBoardError(
-            f"board unreachable or unreadable at {url}: {exc} - the finish "
-            "flow does not skip an unreachable board"
+            f"board response at {url} is not JSON: {exc}"
+        ) from exc
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        raise QaBoardError(
+            f"board unreachable at {url}: {exc} - the finish flow does "
+            "not skip an unreachable board"
         ) from exc
 
 

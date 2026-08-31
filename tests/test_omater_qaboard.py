@@ -210,7 +210,7 @@ class TestBoardCalls:
     def test_an_unreachable_board_is_a_loud_stop_not_a_skip(self, tmp_path):
         cfg = QaBoardConfig(
             authoring_dir=tmp_path,
-            board_url="http://127.0.0.1:9/api",  # discard port: refuses
+            board_url="http://127.0.0.1:0/api",  # port 0: deterministically unbound
             gate_dir=tmp_path,
             gate=("true",),
         )
