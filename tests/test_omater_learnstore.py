@@ -1086,7 +1086,10 @@ class TestSyncIgnoresUnrelatedRepoState:
         (repo / "other.txt").write_text("original\n", encoding="utf-8")
         git(repo, "add", "-A")
         git(repo, "commit", "-q", "-m", "seed")
-        git(repo, "push", "-q")
+        # -u: this machine's global push.autoSetupRemote=true masks a
+        # missing upstream; without the explicit -u the fixture would fail
+        # on any machine that lacks that config (sync's pull needs tracking)
+        git(repo, "push", "-q", "-u", "origin", "HEAD")
         s = LearnStore.open(
             tmp_path / "l.db", export_dir=repo / "omater" / "lessons",
             now=ticking_now(),

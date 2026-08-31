@@ -1055,10 +1055,14 @@ def sync(
         message = (
             f"omater-learn: sync ({stats.new} new, {stats.updated} updated)"
         )
-        # `-- <export files>`: commits ONLY these paths, so unrelated staged
-        # work stays staged instead of being misfiled under lesson history
+        # `--only -- <export files>`: commits ONLY these paths, so unrelated
+        # staged work stays staged instead of being misfiled under lesson
+        # history. --only is already git's default when paths are given
+        # (measured: a pathspec commit leaves other staged files staged);
+        # stating it makes the guarantee explicit rather than an implied
+        # default a reader has to know.
         commit = _git(
-            repo, "commit", "-q", "-m", message,
+            repo, "commit", "-q", "--only", "-m", message,
             "--", *(str(pp) for pp in export_files),
         )
         if commit.returncode != 0:
