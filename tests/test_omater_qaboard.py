@@ -167,7 +167,7 @@ class TestSpecAuthoring:
         with pytest.raises(QaBoardError, match="cannot be read"):
             load_spec(path, "34")
 
-    def test_next_step_key_continues_the_storys_sequence(self):
+    def test_next_step_key_continues_the_story_sequence(self):
         spec = {"steps": [
             {"step_key": "34-36-01"},
             {"step_key": "34-36-02"},
