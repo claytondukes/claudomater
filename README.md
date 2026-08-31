@@ -156,7 +156,7 @@ omater usage         # guardrail snapshot + decision
 | `omater sprint export PATH` | Write the DB's statuses back through the file (byte-exact apart from flipped tokens) |
 | `omater sprint set KEY STATUS PATH` | Flip one status: validated for the key's kind, written to the DB, then written through to the file |
 | `omater sprint status [--epic N] [--json]` | The sprint view, rendered on demand from the tables |
-| `omater sprint add-epic EPIC PATH [--story KEY ...]` | Create a new epic block in the DB and the file: epic line, stories, and — always, last in the block — `epic-N-retrospective: fable-review-required` (the retro status is a constant; the banned `optional` is unrepresentable). Insertion is byte-exact: existing content survives untouched |
+| `omater sprint add-epic EPIC PATH [--story KEY]...` | Create a new epic block in the DB and the file: epic line, stories, and — always, last in the block — `epic-N-retrospective: fable-review-required` (the retro status is a constant; the banned `optional` is unrepresentable). Insertion is byte-exact: existing content survives untouched |
 | `omater sprint check-retros PATH` | The retro-vocabulary gate: fail if any `*-retrospective:` line carries the banned `optional`; a missing file fails loudly (it must never read as a pass); prints the status distribution on success |
 | `omater resume\|abort\|approve [--run ID]` | Write a control event a paused/escalated run consumes (also under `omater control …`) |
 | `omater hook pre-tool-use --root PATH` | The provisioned PreToolUse write fence (reads the hook payload on stdin) |
