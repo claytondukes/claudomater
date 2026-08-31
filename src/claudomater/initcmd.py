@@ -19,7 +19,7 @@ from __future__ import annotations
 import shutil
 from pathlib import Path
 
-from claudomater import hooks
+from claudomater import commitguard, hooks
 from claudomater.config import ConfigError, PROJECT_CONFIG_NAME, load_project_config
 
 GITIGNORE_LINE = ".omater/"
@@ -57,6 +57,13 @@ adapters:
 
 learning:
   scopes: [global]
+
+# artifact_roots: []       # symlinked artifact dirs OUTSIDE the tree (declared
+#   - _bmad-output          #   write-containment exceptions, reviewable here)
+
+# commit_scope: {{}}        # pre-commit guard scope, per repo (armed at run
+#   ".": [src/, tests/]     #   start, agents only, FAIL-CLOSED): what a phase
+#   _bmad-output: [docs/]   #   agent may COMMIT. Undeclared repo = block all.
 
 ci:
   tier_on_push: fast       # fast | full
@@ -128,11 +135,19 @@ def run_verify(root: Path | str) -> list[str]:
     cfg_path = root / PROJECT_CONFIG_NAME
     if not cfg_path.exists():
         problems.append(f"{cfg_path} missing — run `omater init`")
+        # No config = no artifact roots to enumerate; the root repo can
+        # still carry a leftover guard worth reporting.
+        problems.extend(commitguard.verify(root, require=False))
     else:
         try:
-            load_project_config(root)
+            cfg = load_project_config(root)
         except ConfigError as exc:
             problems.append(str(exc))
+            problems.extend(commitguard.verify(root, require=False))
+        else:
+            # Between runs the commit guard must not exist (run-scoped,
+            # same P1-1 rule as the fence); a leftover reports here.
+            problems.extend(commitguard.verify_for_config(root, cfg, require=False))
 
     gitignore = root / ".gitignore"
     try:

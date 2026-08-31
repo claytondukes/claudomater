@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from claudomater import hooks, initcmd
+from claudomater import commitguard, hooks, initcmd
 from claudomater.config import ProjectConfig, load_project_config
 from claudomater.phases import worktree_dirt_paths
 from claudomater.runlog import RunError, RunLog
@@ -32,6 +32,7 @@ def start_run(
         hooks.provision(root)  # arm the run-scoped fence (idempotent)
     except hooks.HookProvisionError as exc:
         raise RunError(f"cannot arm the write fence: {exc}") from exc
+    armed_scopes: dict[str, list[str]] = {}
     try:
         problems = initcmd.run_verify(root) + hooks.verify(root, require=True)
         if problems:
@@ -40,12 +41,28 @@ def start_run(
                 + "; ".join(problems)
             )
         cfg = load_project_config(root)
+        # Arm the commit guard (Phase 3 deliverable 1): project root plus
+        # every artifact-root git repo, each with its declared commit_scope
+        # (empty = fail-closed until declared). Run-scoped and agent-gated
+        # exactly like the fence; verified in require mode right after, the
+        # same provision-then-prove discipline the fence uses.
+        try:
+            armed_scopes = commitguard.arm_for_config(root, cfg)
+        except commitguard.GuardError as exc:
+            raise RunError(f"cannot arm the commit guard: {exc}") from exc
+        guard_problems = commitguard.verify_for_config(root, cfg, require=True)
+        if guard_problems:
+            raise RunError(
+                "refusing to start a run with commit-guard drift: "
+                + "; ".join(guard_problems)
+            )
         log = RunLog.create(root, run_id=run_id)
     except BaseException as exc:
-        # A start that FAILS must not leave the fence armed - the lifecycle
-        # is "exists only while a run is live". One exception: when the
-        # failure is the one-live-run conflict (or anything else while a
-        # live run exists), that run owns the fence and it must stay.
+        # A start that FAILS must not leave the fence or the guard armed -
+        # the lifecycle is "exists only while a run is live". One
+        # exception: when the failure is the one-live-run conflict (or
+        # anything else while a live run exists), that run owns them both
+        # and they must stay.
         try:
             RunLog.attach(root)  # raises unless a live run exists
         except RunError:
@@ -58,8 +75,25 @@ def start_run(
                     "cleanup also failed: could not disarm the write fence "
                     f"({cleanup}); remove it with `omater teardown`"
                 )
+            try:
+                cfg_cleanup = load_project_config(root)
+            except Exception:  # config unusable: still clear the root repo
+                cfg_cleanup = None
+            try:
+                if cfg_cleanup is not None:
+                    commitguard.disarm_for_config(root, cfg_cleanup)
+                elif commitguard.is_git_repo(root):
+                    commitguard.disarm(root)
+            except commitguard.GuardError as cleanup:
+                exc.add_note(
+                    "cleanup also failed: could not disarm the commit guard "
+                    f"({cleanup}); remove it with `omater teardown`"
+                )
         raise
     log.event("run", "policy", cfg.policy())
+    # The armed commit scope is part of the run's reviewable record: a
+    # scope dispute after the fact reads from the log, not from memory.
+    log.event("run", "commit-guard", {"repos": armed_scopes})
     # The salvage exclusion baseline (F2): paths dirty at run START are the
     # operator's deliberately-uncommitted state, and `wip(phase-crash)`
     # salvage must never sweep them onto the branch. Recorded in the run

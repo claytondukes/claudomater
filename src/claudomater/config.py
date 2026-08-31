@@ -185,6 +185,13 @@ class ProjectConfig:
     # explicit, committed, reviewable exception to write containment;
     # never a blanket symlink-follow.
     artifact_roots: list[str] = field(default_factory=list)
+    # Per-repo COMMIT scope for the pre-commit guard (Phase 3 deliverable
+    # 1): "." is the project root, any other key must be an artifact_roots
+    # entry (the guard arms each artifact root that is a git repo). Values
+    # are repo-relative path prefixes a phase agent may commit. A repo with
+    # no declared scope arms EMPTY - every gated commit blocks - which is
+    # the fail-closed default until the project declares one.
+    commit_scope: dict[str, list[str]] = field(default_factory=dict)
     ci_tier_on_push: str | None = None  # None -> deployment_type default
     ci_tier_on_merge: str = "full"
     gates: dict[str, Any] = field(default_factory=dict)
@@ -309,6 +316,43 @@ def load_project_config(root: Path | str) -> ProjectConfig:
             f"got {artifact_roots!r}"
         )
 
+    commit_scope_raw = _require_mapping("commit_scope", data.get("commit_scope"))
+    commit_scope: dict[str, list[str]] = {}
+    for repo_key, entries in commit_scope_raw.items():
+        if not isinstance(repo_key, str) or not repo_key:
+            raise ConfigError(
+                f"{PROJECT_CONFIG_NAME}: commit_scope keys must be repo names "
+                f"('.' or an artifact_roots entry), got {repo_key!r}"
+            )
+        if repo_key != "." and repo_key not in artifact_roots:
+            # A typo'd key would silently arm the intended repo EMPTY (all
+            # gated commits blocked) while declaring scope for a repo the
+            # run never arms - fail at load, where the typo is visible.
+            raise ConfigError(
+                f"{PROJECT_CONFIG_NAME}: commit_scope key {repo_key!r} is "
+                f"neither '.' nor an artifact_roots entry {artifact_roots!r}"
+            )
+        if not isinstance(entries, list) or not all(
+            isinstance(e, str) and e for e in entries
+        ):
+            raise ConfigError(
+                f"{PROJECT_CONFIG_NAME}: commit_scope.{repo_key} must be a "
+                f"list of repo-relative path strings, got {entries!r}"
+            )
+        # One source of truth for entry rules (relative, no '..'): the
+        # guard's own normalizer, called here so garbage fails at LOAD,
+        # not when start_run arms the guard. Lazy import - commitguard
+        # imports hooks, and this module must stay importable first.
+        from claudomater.commitguard import GuardError, normalize_scope
+
+        try:
+            normalize_scope(entries)
+        except GuardError as exc:
+            raise ConfigError(
+                f"{PROJECT_CONFIG_NAME}: commit_scope.{repo_key}: {exc}"
+            ) from exc
+        commit_scope[repo_key] = list(entries)
+
     scopes = learning_raw.get("scopes")
     if scopes is None:
         scopes = ["global"]
@@ -362,6 +406,7 @@ def load_project_config(root: Path | str) -> ProjectConfig:
         },
         learning_scopes=list(scopes),
         artifact_roots=list(artifact_roots),
+        commit_scope=commit_scope,
         ci_tier_on_push=ci_raw.get("tier_on_push"),
         ci_tier_on_merge=ci_raw.get("tier_on_merge", "full"),
         gates=gates_raw,

@@ -122,8 +122,22 @@ def _cmd_notify(args: argparse.Namespace) -> int:
 
 
 def _cmd_hook(args: argparse.Namespace) -> int:
+    if args.hook == "pre-commit":
+        # The commit guard's git hook. Root is the working-tree top git
+        # runs hooks from (no --root: the installed script must stay
+        # environment-independent); hook_main gates on the agent marker
+        # and FAILS CLOSED past that gate - see commitguard.py.
+        from claudomater import commitguard
+
+        return commitguard.hook_main(args.root)
     if args.hook != "pre-tool-use":
         print(f"error: unknown hook {args.hook!r}", file=sys.stderr)
+        return EXIT_ERROR
+    if args.root is None:
+        # Only the pre-commit hook may omit --root; the fence's installed
+        # command always passes it. A hand invocation without it is a
+        # setup error, not a fence decision (nonzero-non-2 = non-blocking).
+        print("error: --root is required for pre-tool-use", file=sys.stderr)
         return EXIT_ERROR
     if not hooks.fence_active():
         # Not an omater-spawned agent session: the project-level hook fires
@@ -144,18 +158,61 @@ def _cmd_hook(args: argparse.Namespace) -> int:
 
 
 def _cmd_teardown(args: argparse.Namespace) -> int:
+    from claudomater import commitguard
+
     root = Path(args.root).resolve()
+    rc = EXIT_OK
     try:
         changed = hooks.deprovision(root)
     except hooks.HookProvisionError as exc:
         print(f"error: {exc}", file=sys.stderr)
+        changed = False
+        rc = EXIT_ERROR
+    else:
+        print(
+            f"write-fence hook removed from {hooks.settings_path(root)}"
+            if changed
+            else "write-fence hook was not installed; nothing to remove"
+        )
+    # Commit guard: root repo + every artifact-root git repo. Artifact
+    # roots come from config; with the config unreadable the root repo is
+    # still cleared, and the miss is REPORTED (nonzero) rather than tidied
+    # over - an armed guard left in an artifact repo outlives the run.
+    try:
+        cfg = load_project_config(root)
+    except ConfigError as exc:
+        cfg = None
+        config_error = exc
+    try:
+        if cfg is not None:
+            removed = commitguard.disarm_for_config(root, cfg)
+        else:
+            removed = (
+                ["."]
+                if commitguard.is_git_repo(root) and commitguard.disarm(root)
+                else []
+            )
+    except commitguard.GuardError as exc:
+        print(f"error: {exc}", file=sys.stderr)
         return EXIT_ERROR
     print(
-        f"write-fence hook removed from {hooks.settings_path(root)}"
-        if changed
-        else "write-fence hook was not installed; nothing to remove"
+        f"commit guard removed from: {', '.join(removed)}"
+        if removed
+        else "commit guard was not armed; nothing to remove"
     )
-    return EXIT_OK
+    if cfg is None and removed:
+        # A commit guard WAS armed here, so start_run ran with a config -
+        # one that names the artifact roots we now cannot enumerate. That
+        # miss is a failure, not a footnote. A configless teardown that
+        # found no guard stays a quiet success: the fence alone never
+        # needed config, and there is nothing guard-shaped left to miss.
+        print(
+            f"warning: could not read project config ({config_error}); "
+            "artifact-root commit guards (if any) were NOT checked",
+            file=sys.stderr,
+        )
+        rc = EXIT_ERROR
+    return rc
 
 
 def _open_store(args: argparse.Namespace):
@@ -379,7 +436,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser(
         "teardown",
-        help="disarm the write fence (remove the run-scoped PreToolUse hook)",
+        help="disarm the write fence and the commit guard (remove the "
+        "run-scoped PreToolUse hook and pre-commit hooks)",
     )
     p.add_argument("root", nargs="?", default=".")
     p.set_defaults(fn=_cmd_teardown)
@@ -400,9 +458,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--user-config", default=None, help=argparse.SUPPRESS)
     p.set_defaults(fn=_cmd_notify)
 
-    p = sub.add_parser("hook", help="hook entrypoints (called by Claude Code)")
-    p.add_argument("hook", choices=["pre-tool-use"])
-    p.add_argument("--root", required=True)
+    p = sub.add_parser(
+        "hook", help="hook entrypoints (called by Claude Code / git)"
+    )
+    p.add_argument("hook", choices=["pre-tool-use", "pre-commit"])
+    p.add_argument("--root", default=None)
     p.set_defaults(fn=_cmd_hook)
 
     p = sub.add_parser("learn", help="learning store (local index + JSONL exports)")
