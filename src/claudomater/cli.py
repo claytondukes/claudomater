@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sqlite3
 import sys
 from pathlib import Path
 
@@ -228,6 +229,11 @@ def _cmd_learn(args: argparse.Namespace) -> int:
             )
     except learnstore.LearnStoreError as exc:
         print(f"error: {exc}", file=sys.stderr)
+        return EXIT_ERROR
+    except sqlite3.DatabaseError as exc:
+        # belt for the residual class: post-open sqlite failures (locked
+        # index, disk-level trouble) stay a clean CLI error, not a traceback
+        print(f"error: learning DB failure: {exc}", file=sys.stderr)
         return EXIT_ERROR
     finally:
         store.close()

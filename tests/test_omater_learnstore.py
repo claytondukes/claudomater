@@ -1015,3 +1015,28 @@ class TestIoErrorsAreTyped:
         (bad / "global.jsonl").write_bytes(b"\xff\xfe garbage")
         with pytest.raises(LearnStoreError, match=r"global\.jsonl: unreadable"):
             store.import_dir(bad)
+
+
+class TestGitTimeoutIsTyped:
+    """PR #11 round 15: a hung/missing git reaches the CLI as the store's
+    own error - TimeoutExpired/OSError from _git bypassed the boundary."""
+
+    def test_timeout_expired_becomes_learnstore_error(self, tmp_path, monkeypatch):
+        import subprocess as sp
+
+        from claudomater import learnstore
+
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        s = LearnStore.open(tmp_path / "l.db", export_dir=repo / "lessons",
+                            now=ticking_now())
+        seed(s)
+
+        def hanging_run(argv, **kwargs):
+            raise sp.TimeoutExpired(argv, kwargs.get("timeout", 120))
+
+        monkeypatch.setattr(learnstore.subprocess, "run", hanging_run)
+        with pytest.raises(LearnStoreError, match="timed out after 120s"):
+            sync(s)
+        s.close()

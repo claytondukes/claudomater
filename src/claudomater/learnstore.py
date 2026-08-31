@@ -727,9 +727,19 @@ class LearnStore:
 
 
 def _git(cwd: Path, *args: str) -> subprocess.CompletedProcess:
-    return subprocess.run(
-        ["git", "-C", str(cwd), *args], capture_output=True, text=True, timeout=120
-    )
+    try:
+        return subprocess.run(
+            ["git", "-C", str(cwd), *args],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+    except subprocess.TimeoutExpired as exc:
+        # typed at the boundary: a hung git must reach the CLI as the
+        # store's own error, not a raw TimeoutExpired traceback
+        raise LearnStoreError(f"git {args[0]} timed out after 120s") from exc
+    except OSError as exc:
+        raise LearnStoreError(f"git {args[0]} could not run: {exc}") from exc
 
 
 def sync(
