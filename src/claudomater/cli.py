@@ -157,6 +157,74 @@ def _cmd_teardown(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def _open_store(args: argparse.Namespace):
+    from claudomater import learnstore
+
+    cfg = load_user_config(args.user_config)
+    secrets_deny: list[str] = []
+    if args.project:
+        # the project's deny list guards lesson content written from its
+        # runs — the corpus outlives the run that produced it
+        secrets_deny = load_project_config(Path(args.project).resolve()).secrets_deny
+    return learnstore.LearnStore.open(
+        args.db or cfg.learning_db_path,
+        export_dir=args.export_dir or cfg.learning_export_path,
+        secrets_deny=secrets_deny,
+    )
+
+
+def _cmd_learn(args: argparse.Namespace) -> int:
+    from claudomater import learnstore
+
+    try:
+        store = _open_store(args)
+    except (ConfigError, learnstore.LearnStoreError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return EXIT_ERROR
+    try:
+        if args.learn_cmd in ("add", "refine", "supersede"):
+            fn = getattr(store, args.learn_cmd)
+            kwargs = {"rule": args.rule, "why": args.why}
+            if args.learn_cmd == "refine":
+                kwargs = {k: v for k, v in kwargs.items() if v is not None}
+            lesson_id = fn(args.scope, args.domain, args.topic, **kwargs)
+            print(f"{args.learn_cmd}: lesson {lesson_id} ({args.scope}/{args.domain}/{args.topic})")
+        elif args.learn_cmd == "list":
+            rows = store.lessons(args.scope or ["global"], domains=args.domain or None)
+            if args.json:
+                print(json.dumps(rows, indent=2, sort_keys=True))
+            else:
+                for r in rows:
+                    print(f"{r['scope']}/{r['domain']}/{r['topic']} [{r['status']}] {r['rule']}")
+                print(f"{len(rows)} live lesson(s)")
+        elif args.learn_cmd == "search":
+            rows = store.search(args.query, args.scope or ["global"])
+            if args.json:
+                print(json.dumps(rows, indent=2, sort_keys=True))
+            else:
+                for r in rows:
+                    print(f"{r['scope']}/{r['domain']}/{r['topic']} [refs {r['refs']}] {r['rule']}")
+                print(f"{len(rows)} match(es)")
+        elif args.learn_cmd == "export":
+            for path in store.export():
+                print(f"exported {path}")
+        elif args.learn_cmd == "import":
+            stats = store.import_dir()
+            print(f"imported: {stats.new} new, {stats.updated} updated, {stats.unchanged} unchanged")
+        elif args.learn_cmd == "sync":
+            result = learnstore.sync(store, push=args.push)
+            print(
+                f"sync: {result['new']} new, {result['updated']} updated, "
+                f"committed={result['committed']}, pushed={result['pushed']}"
+            )
+    except learnstore.LearnStoreError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return EXIT_ERROR
+    finally:
+        store.close()
+    return EXIT_OK
+
+
 def _cmd_start(args: argparse.Namespace) -> int:
     from claudomater.run import start_run
 
@@ -226,6 +294,52 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("hook", choices=["pre-tool-use"])
     p.add_argument("--root", required=True)
     p.set_defaults(fn=_cmd_hook)
+
+    p = sub.add_parser("learn", help="learning store (local index + JSONL exports)")
+    learn_sub = p.add_subparsers(dest="learn_cmd", required=True)
+
+    def _learn_parser(name: str, help_text: str) -> argparse.ArgumentParser:
+        lp = learn_sub.add_parser(name, help=help_text)
+        lp.add_argument("--user-config", default=None, help=argparse.SUPPRESS)
+        lp.add_argument("--db", default=None, help="override learning.db_path")
+        lp.add_argument(
+            "--export-dir", default=None, help="override learning.export_path"
+        )
+        lp.add_argument(
+            "--project",
+            default=None,
+            help="project root whose secrets_deny scrubs lesson content",
+        )
+        lp.set_defaults(fn=_cmd_learn)
+        return lp
+
+    for verb, help_text in (
+        ("add", "a genuinely new lesson (refuses an existing live key)"),
+        ("refine", "merge better wording into the existing lesson"),
+        ("supersede", "replace the old judgment; the old row stays as audit trail"),
+    ):
+        lp = _learn_parser(verb, help_text)
+        lp.add_argument("--scope", required=True)
+        lp.add_argument("--domain", required=True)
+        lp.add_argument("--topic", required=True)
+        required_content = verb != "refine"
+        lp.add_argument("--rule", required=required_content, default=None)
+        lp.add_argument("--why", required=required_content, default=None)
+
+    lp = _learn_parser("list", "live lessons for the given scopes")
+    lp.add_argument("--scope", action="append", default=None)
+    lp.add_argument("--domain", action="append", default=None)
+    lp.add_argument("--json", action="store_true")
+
+    lp = _learn_parser("search", "FTS over rule+why, live rows only")
+    lp.add_argument("query")
+    lp.add_argument("--scope", action="append", default=None)
+    lp.add_argument("--json", action="store_true")
+
+    _learn_parser("export", "write the deterministic per-scope JSONL export")
+    _learn_parser("import", "import per-scope JSONL (latest updated_at wins)")
+    lp = _learn_parser("sync", "git pull -> import -> export -> commit")
+    lp.add_argument("--push", action="store_true", help="push after committing")
 
     p = sub.add_parser(
         "start", help="start a run (drift check + run log + policy record)"
