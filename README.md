@@ -112,6 +112,17 @@ Phase 0 skeleton — the pieces every pipeline run stands on:
   non-repo-relative path is refused (it would match nothing and silently
   waive the gate), and an empty-or-blank changed-file set is refused (a
   broken lookup must not read as "no surface").
+- **Completion-integrity gate** (`claudomater.completion`) — a story
+  cannot flip `done` while its own paperwork disagrees with reality
+  (epic-46 retro A5: a story shipped `done` with three tasks unchecked
+  and the work genuinely not done). Two fail-closed blades: any unchecked
+  `- [ ]` box inside `## Tasks / Subtasks` (any indent) blocks, and the
+  `### File List` is compared as a SET against `git show --name-only` on
+  the merge commit — a merged file the list omits and a listed file the
+  merge lacks are both named. The verifier diffs the actual changeset;
+  narration never satisfies it. A missing File List section blocks by
+  default ("no list" and "list agrees" must never read the same), with an
+  explicit `require_file_list=False` opt-out.
 
 - **QA-board finish flow** (`claudomater.qaboard`) — after a story's PR
   merges and BEFORE its done-flip: classify the MERGED changeset with the
