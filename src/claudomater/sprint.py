@@ -169,10 +169,13 @@ def _epic_of(key: str, kind: str, current_epic: str) -> str:
     POSITION otherwise — because a story key genuinely cannot be parsed.
     ui3 has a sub-epic `epic-4-5` whose stories are `4-5-1-...`, so
     `4-5-1-ec-api-research` is ambiguous between "epic 4, story 5-1" and
-    "epic 4-5, story 1" from the key alone; it also has `34-T-board-truth
-    -up-pass-2`, whose second segment is not a number at all. The file
-    expresses grouping positionally (an `epic-N` line, then its stories,
-    then its retro line), so that is what gets read.
+    "epic 4-5, story 1" from the key alone. It also carries a key whose
+    second segment is not a number at all:
+
+        34-T-board-truth-up-pass-2
+
+    The file expresses grouping positionally (an `epic-N` line, then its
+    stories, then its retro line), so that is what gets read.
     """
     if key == "project" or key.startswith("project-"):
         return ""  # project-scoped: the whole-project retro is not epic 46's
