@@ -158,8 +158,7 @@ def classify_changed_files(paths: list[str], rules: SurfaceRules) -> SurfaceVerd
     if not cleaned:
         raise SurfaceError(
             "no changed files resolved - refusing to report 'no surface' "
-            f"from a file set of {len(paths)} entr"
-            f"{'y' if len(paths) == 1 else 'ies'} that is empty after "
+            f"from a {len(paths)}-entry file set that is empty after "
             "trimming (indistinguishable from a broken lookup)"
         )
     verdict = SurfaceVerdict()

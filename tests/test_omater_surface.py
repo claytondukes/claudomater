@@ -44,8 +44,21 @@ RULES = SurfaceRules(
 # merges; nothing is copied into this repo.
 UI3 = Path(os.environ.get("OMATER_UI3_ROOT", Path.home() / "sourcecode/ui3"))
 
+def _ui3_replayable() -> bool:
+    """Config present AND the replayed merges resolvable: a directory that
+    carries a .omater.yaml but not the git history (shallow clone, plain
+    dir) must SKIP, not fail confusingly mid-replay."""
+    if not (UI3 / ".omater.yaml").is_file():
+        return False
+    probe = subprocess.run(
+        ["git", "cat-file", "-e", "a5105e31^{commit}"],
+        cwd=UI3, capture_output=True,
+    )
+    return probe.returncode == 0
+
+
 requires_ui3 = pytest.mark.skipif(
-    not (UI3 / ".omater.yaml").is_file(), reason="ui3 checkout not present"
+    not _ui3_replayable(), reason="ui3 checkout with replay history not present"
 )
 
 
