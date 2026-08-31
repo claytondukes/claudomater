@@ -378,9 +378,18 @@ class TestUi3AcceptanceProof:
         copy = tmp_path / "sprint-status.yaml"
         copy.write_bytes(UI3_SPRINT_STATUS.read_bytes())
         doc = SprintDoc.read(copy)
-        target = next(e for e in doc.entries if e.kind == "story" and e.status != "done")
+        # pick ANY story and flip it to a status it does not already hold:
+        # requiring a non-done story would raise StopIteration - failing an
+        # operator-only proof for a reason that has nothing to do with the
+        # exporter - on the day the real sprint is fully closed out
+        stories_in_file = [e for e in doc.entries if e.kind == "story"]
+        assert stories_in_file, "the real file carries no story lines to flip"
+        target = stories_in_file[0]
+        new_status = "review" if target.status != "review" else "done"
         before = doc.render().splitlines(keepends=True)
-        after = doc.with_statuses({target.key: "done"}).render().splitlines(keepends=True)
+        after = doc.with_statuses({target.key: new_status}).render().splitlines(
+            keepends=True
+        )
         differing = [i for i, (a, b) in enumerate(zip(before, after)) if a != b]
         assert len(before) == len(after) and len(differing) == 1
 
@@ -438,7 +447,17 @@ class TestOnDiskBytesSurviveExactly:
         )
 
     @pytest.mark.parametrize(
-        "sep", [b"\r", b"\x0b", b"\x0c", " ".encode("utf-8")]
+        "sep",
+        [
+            b"\r",
+            b"\x0b",
+            b"\x0c",
+            # ESCAPED, never a literal: an invisible separator sitting in
+            # source is unreviewable and editors/formatters silently eat it
+            "\u2028".encode("utf-8"),
+            "\u2029".encode("utf-8"),
+            "\x85".encode("utf-8"),
+        ],
     )
     def test_an_embedded_line_separator_is_refused_not_silently_split(
         self, tmp_path, sep

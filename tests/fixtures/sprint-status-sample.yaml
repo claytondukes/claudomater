@@ -3,7 +3,10 @@
 # This fixture is INVENTED. It carries no real project's content: every
 # epic, story, date and narrative line below is made up for the express
 # purpose of exercising the export's byte-exactness against the SHAPES a
-# curated status file actually takes.
+# curated status file actually takes. The dates below are this fictional
+# project's OWN chronology and deliberately do not track any real
+# project's calendar; they are internally consistent (the `optional` ban
+# precedes epic 4, which is why epic 4 carries the post-ban retro value).
 #
 # RULES:
 # - This file is the status map only. One line per epic, one line per
@@ -51,7 +54,7 @@ development_status:
   3-T-truth-up-pass-with-a-letter-segment: done
   3-2-cancelled-work: scrapped
   3-3-blocked-on-another-team: deferred
-  epic-3-retrospective: optional  # LEGACY value, banned 2026-02-14 - preserved as audit trail
+  epic-3-retrospective: optional  # LEGACY value, banned 2026-02-14 in THIS FIXTURE'S invented timeline - preserved as audit trail
 
   # Epic 4: the live epic - the statuses a run actually flips
   epic-4: in-progress
