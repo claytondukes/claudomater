@@ -335,8 +335,10 @@ def load_project_config(root: Path | str) -> ProjectConfig:
         if not isinstance(entries, list) or not all(
             isinstance(e, str) and e for e in entries
         ):
+            # bracket-with-repr, not dotted: the root key is "." and
+            # `commit_scope..` reads as a typo rather than an address
             raise ConfigError(
-                f"{PROJECT_CONFIG_NAME}: commit_scope.{repo_key} must be a "
+                f"{PROJECT_CONFIG_NAME}: commit_scope[{repo_key!r}] must be a "
                 f"list of repo-relative path strings, got {entries!r}"
             )
         # One source of truth for entry rules (relative, no '..'): the
@@ -349,7 +351,7 @@ def load_project_config(root: Path | str) -> ProjectConfig:
             normalize_scope(entries)
         except GuardError as exc:
             raise ConfigError(
-                f"{PROJECT_CONFIG_NAME}: commit_scope.{repo_key}: {exc}"
+                f"{PROJECT_CONFIG_NAME}: commit_scope[{repo_key!r}]: {exc}"
             ) from exc
         commit_scope[repo_key] = list(entries)
 

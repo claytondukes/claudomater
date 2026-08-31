@@ -482,9 +482,14 @@ class TestCommitScopeConfig:
                 )
             )
 
-    def test_non_list_values_are_rejected(self, tmp_path):
+    def test_non_list_values_are_rejected_and_the_root_key_reads_cleanly(
+        self, tmp_path
+    ):
+        """Copilot round-2 (suppressed pair): dotted notation rendered the
+        root key as `commit_scope..` - bracket-with-repr keeps the message
+        addressable for '.' and named keys alike."""
         for bad in ("ui", "null", "3"):
-            with pytest.raises(ConfigError, match="commit_scope"):
+            with pytest.raises(ConfigError, match=r"commit_scope\['\.'\]"):
                 load_project_config(
                     write_project(
                         tmp_path, f'project: p\ncommit_scope:\n  ".": {bad}\n'
@@ -496,7 +501,7 @@ class TestCommitScopeConfig:
         guard validates here, so an absolute or traversing entry fails at
         load instead of at run start."""
         for bad in ("/etc", "a/../b", "~/x"):
-            with pytest.raises(ConfigError, match="commit_scope"):
+            with pytest.raises(ConfigError, match=r"commit_scope\['\.'\]"):
                 load_project_config(
                     write_project(
                         tmp_path,
