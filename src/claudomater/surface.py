@@ -54,6 +54,12 @@ def _non_repo_relative(text: str) -> str | None:
         return "backslash-separated (git paths are forward-slash)"
     if re.match(r"^[A-Za-z]:", text):
         return "a drive-letter path"
+    if text.startswith("./") or ".." in text.split("/"):
+        # git's repo-relative output never carries either shape - callers
+        # that legitimately receive './'-prefixed PATHS strip the prefix
+        # before this check (classify_path does); a PATTERN with one
+        # would simply never match
+        return "outside git's repo-relative namespace ('./' or '..')"
     return None
 
 

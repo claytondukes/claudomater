@@ -294,3 +294,11 @@ class TestWindowsShapedInputs:
         for bad in ("docs/** ", " app/src/**", "app\t"):
             with pytest.raises(SurfaceError, match="whitespace"):
                 SurfaceRules(surface=(bad,))
+
+    def test_dot_slash_and_traversal_patterns_are_refused(self):
+        """Round-5: './ui/**' and 'a/../b' are outside git's repo-relative
+        output namespace and never match - the same silently-disabled-rule
+        class as whitespace padding and Windows shapes."""
+        for bad in ("./app/src/**", "a/../b/**", ".."):
+            with pytest.raises(SurfaceError):
+                SurfaceRules(surface=(bad,))
