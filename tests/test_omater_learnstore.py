@@ -19,7 +19,6 @@ import pytest
 from claudomater.cli import EXIT_ERROR, EXIT_OK, main
 from claudomater.learnstore import (
     EXPORT_FIELDS,
-    ImportStats,
     LearnStore,
     LearnStoreError,
     sync,
@@ -664,3 +663,34 @@ class TestRound3Hardening:
         staged = git(repo, "diff", "--cached", "--name-only").stdout.split()
         assert staged == ["unrelated-wip.txt"]  # untouched, and nothing else
         s.close()
+
+
+class TestScopeFilenameContract:
+    """PR #11 round 4: scope names map 1:1 to export files, so unsafe names
+    fail CLOSED - sanitizing let distinct scopes ('a/b', 'a?b') collide onto
+    one filename and silently mix corpora."""
+
+    def test_unsafe_scopes_are_refused_at_the_write(self, store):
+        for bad in ("a/b", "a?b", ".hidden", "sp ace"):
+            with pytest.raises(LearnStoreError, match="filename-safe"):
+                store.add(bad, "ci", "t", "r", "w")
+
+    def test_import_refuses_empty_or_unsafe_keys_with_location(self, store, tmp_path):
+        bad = tmp_path / "bad-keys"
+        bad.mkdir()
+        base = {
+            "rule": "r", "why": "w", "status": "active",
+            "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
+        }
+        (bad / "x.jsonl").write_text(
+            json.dumps({**base, "scope": "global", "domain": "ci", "topic": "  "}) + "\n",
+            encoding="utf-8",
+        )
+        with pytest.raises(LearnStoreError, match=r"x\.jsonl:1: topic"):
+            store.import_dir(bad)
+        (bad / "x.jsonl").write_text(
+            json.dumps({**base, "scope": "a/b", "domain": "ci", "topic": "t"}) + "\n",
+            encoding="utf-8",
+        )
+        with pytest.raises(LearnStoreError, match=r"x\.jsonl:1: scope"):
+            store.import_dir(bad)

@@ -131,13 +131,24 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+# scope names map 1:1 to export filenames, so they must BE filename-safe —
+# sanitizing would let distinct scopes ("a/b", "a?b") collide onto one file
+# and silently mix corpora
+_SCOPE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
+
+
+def _validate_scope(scope: str, context: str = "") -> None:
+    if not _SCOPE_RE.fullmatch(scope):
+        prefix = f"{context}: " if context else ""
+        raise LearnStoreError(
+            f"{prefix}scope {scope!r} is not filename-safe (alphanumeric "
+            "start, then [A-Za-z0-9._-]); scope names map 1:1 to export files"
+        )
+
+
 def _scope_filename(scope: str) -> str:
-    """Scope names come from config, but they become filenames — sanitize
-    with the same posture as run-log path components."""
-    cleaned = re.sub(r"[^A-Za-z0-9._-]+", "_", scope).lstrip(".")
-    if not cleaned:
-        raise LearnStoreError(f"scope {scope!r} does not yield a usable filename")
-    return cleaned + ".jsonl"
+    _validate_scope(scope)
+    return scope + ".jsonl"
 
 
 @dataclass
@@ -244,6 +255,8 @@ class LearnStore:
         for name, value in (("scope", scope), ("domain", domain), ("topic", topic)):
             if not isinstance(value, str) or not value.strip():
                 raise LearnStoreError(f"{name} must be a non-empty string, got {value!r}")
+        # fail at the write, not later at export-filename derivation
+        _validate_scope(scope)
 
     def _live_row(self, scope: str, domain: str, topic: str) -> sqlite3.Row | None:
         return self.conn.execute(
@@ -499,6 +512,15 @@ class LearnStore:
                     raise LearnStoreError(
                         f"{path.name}:{lineno}: unknown status {row['status']!r}"
                     )
+                for field in ("scope", "domain", "topic"):
+                    # import is the untrusted boundary and export is
+                    # write-through: an empty or unsafe key would only fail
+                    # LATER (export filename derivation) without location
+                    if not row[field].strip():
+                        raise LearnStoreError(
+                            f"{path.name}:{lineno}: {field} must be non-empty"
+                        )
+                _validate_scope(row["scope"], context=f"{path.name}:{lineno}")
                 for field in ("created_at", "updated_at"):
                     # winner selection and chain order are lexicographic
                     # comparisons that are only sound for this exact format —
