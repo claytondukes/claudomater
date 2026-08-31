@@ -900,15 +900,21 @@ class TestSyncStagesOnlyTheExport:
         s = LearnStore.open(tmp_path / "l.db", export_dir=export_dir,
                             now=ticking_now())
         seed(s)
-        for stray in (".DS_Store", "notes.txt~", "rogue.jsonl"):
+        for stray in (".DS_Store", "notes.txt~"):
             (export_dir / stray).write_text("stray", encoding="utf-8")
         result = sync(s)
         assert result["committed"] is True
         committed = git(repo, "show", "--name-only", "--format=", "HEAD").stdout
         assert "global.jsonl" in committed
-        for stray in (".DS_Store", "notes.txt~", "rogue.jsonl"):
+        for stray in (".DS_Store", "notes.txt~"):
             assert stray not in committed
         # and the strays are not left staged either
         staged = git(repo, "diff", "--cached", "--name-only").stdout
         assert staged.strip() == ""
+        # a stray .jsonl is different: the corpus directory IS import input,
+        # so garbage jsonl BLOCKS sync loudly (a legitimate new scope file
+        # from another machine imports cleanly instead)
+        (export_dir / "rogue.jsonl").write_text("not json", encoding="utf-8")
+        with pytest.raises(LearnStoreError, match=r"rogue\.jsonl:1"):
+            sync(s)
         s.close()
