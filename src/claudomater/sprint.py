@@ -68,16 +68,42 @@ _RETRO_SUFFIX = "-retrospective"
 # An entry is `<indent><key>:<gap><status>[<spaces>#<comment>]<eol>`. The
 # status token is `[^\s#]+` — a value carrying whitespace is NOT a status
 # map entry and is refused (loudly) rather than half-parsed.
+#
+# The EOL alternatives are exactly `\r\n` and `\n`. A BARE `\r` must not
+# qualify: paired with a line splitter that breaks on it, `epic-1: do\rne`
+# parsed as status 'do' and a later flip rewrote that span into
+# `epic-1: done\rne` — silent corruption of a curated document.
 _ENTRY_RE = re.compile(
     r"^(?P<indent>[ \t]+)"
     r"(?P<key>[A-Za-z0-9][A-Za-z0-9._-]*)"
     r":(?P<gap>[ \t]+)"
     r"(?P<status>[^\s#]+)"
     r"(?P<trailer>[ \t]+#[^\r\n]*)?"
-    r"(?P<eol>\r?\n?)$"
+    r"(?P<eol>\r?\n)?$"
 )
 _TOP_KEY_RE = re.compile(r"^(?P<key>[A-Za-z0-9_][A-Za-z0-9._-]*):")
-_BLANK_OR_COMMENT_RE = re.compile(r"^[ \t]*(#|$)")
+# `\r?` before the end: in a CRLF file a blank line IS `\r\n`, and reading
+# it as a dedent would end the data block and silently drop every entry
+# after it.
+_BLANK_OR_COMMENT_RE = re.compile(r"^[ \t]*(?:#|\r?$)")
+
+
+def _split_keepends(text: str) -> list[str]:
+    """Split on `\\n` ONLY, keeping line endings.
+
+    `str.splitlines()` also breaks on `\\r`, `\\x0b`, `\\x0c`, `\\x1c`-`\\x1e`,
+    U+0085, U+2028 and U+2029. Any of those appearing inside a status map
+    would cut one source line into two, and the leading fragment would
+    parse as a complete entry — recording a truncated status and leaving
+    the remainder to be reinterpreted. Splitting only on `\\n` keeps such a
+    character inside its line, where the entry regex refuses it and the
+    parse fails loudly.
+    """
+    parts = text.split("\n")
+    lines = [part + "\n" for part in parts[:-1]]
+    if parts[-1]:  # trailing text with no final newline
+        lines.append(parts[-1])
+    return lines
 
 
 class SprintError(Exception):
@@ -163,7 +189,7 @@ class SprintDoc:
 
     @classmethod
     def parse(cls, text: str) -> "SprintDoc":
-        raws = text.splitlines(keepends=True)
+        raws = _split_keepends(text)
         lines: list[_Line] = []
         seen: dict[str, int] = {}
         in_block = False

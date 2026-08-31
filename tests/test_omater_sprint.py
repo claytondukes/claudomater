@@ -437,14 +437,54 @@ class TestOnDiskBytesSurviveExactly:
             b"1-1-a-story: backlog", b"1-1-a-story: done"
         )
 
-    def test_a_lone_cr_is_not_treated_as_a_line_break(self, store, tmp_path):
-        """`splitlines()` breaks on \\r, \\x0b, \\x0c and U+2028 too; a
-        status value containing one would silently split a line in two.
-        The parser must refuse it rather than reformat the document."""
+    @pytest.mark.parametrize(
+        "sep", [b"\r", b"\x0b", b"\x0c", " ".encode("utf-8")]
+    )
+    def test_an_embedded_line_separator_is_refused_not_silently_split(
+        self, tmp_path, sep
+    ):
+        """PR #13 round 2. `splitlines()` breaks on \\r, \\x0b, \\x0c and
+        U+2028 as well as \\n. A status value carrying one was split in
+        two and the leading fragment parsed as the WHOLE value - so
+        `epic-1: do\\rne` recorded status 'do', and a later flip rewrote
+        that span to produce `epic-1: done\\rne`. Silent corruption of a
+        curated document, which is the one thing this module must never
+        do. The previous version of this test used \\x0b, the one
+        separator the regex already refused, so it never covered the
+        dangerous case."""
         p = tmp_path / "odd.yaml"
-        p.write_bytes(b"development_status:\n  epic-1: do\x0bne\n")
+        p.write_bytes(b"development_status:\n  epic-1: do" + sep + b"ne\n")
         with pytest.raises(SprintError, match="unparseable entry"):
             SprintDoc.read(p)
+
+    def test_a_crlf_blank_line_does_not_end_the_data_block(self, tmp_path):
+        """A blank line is `\\r\\n` in a CRLF file, and treating it as a
+        dedent silently DROPS every entry after it - the stories would
+        never reach the DB and nothing would say so."""
+        p = tmp_path / "crlf-gap.yaml"
+        p.write_bytes(
+            b"development_status:\r\n"
+            b"  epic-1: done\r\n"
+            b"\r\n"
+            b"  1-1-after-the-gap: backlog\r\n"
+        )
+        assert [e.key for e in SprintDoc.read(p).entries] == [
+            "epic-1",
+            "1-1-after-the-gap",
+        ]
+
+    def test_a_crlf_comment_line_inside_the_block_is_passed_through(self, tmp_path):
+        p = tmp_path / "crlf-comment.yaml"
+        raw = (
+            b"development_status:\r\n"
+            b"  epic-1: done\r\n"
+            b"  # Epic 2: the next one\r\n"
+            b"  epic-2: backlog\r\n"
+        )
+        p.write_bytes(raw)
+        doc = SprintDoc.read(p)
+        assert [e.key for e in doc.entries] == ["epic-1", "epic-2"]
+        assert doc.render().encode("utf-8") == raw
 
     def test_a_file_with_no_trailing_newline_round_trips_on_disk(self, tmp_path):
         p = tmp_path / "nonl.yaml"
