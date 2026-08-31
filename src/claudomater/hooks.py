@@ -1894,6 +1894,44 @@ def scratch_dirs_for(root: Path, env: dict[str, str] | None = None) -> list[Path
     return dirs
 
 
+def artifact_roots_for(root: Path) -> list[Path]:
+    """Declared artifact directories that may sit OUTSIDE the tree.
+
+    Slice D acceptance run: the fence denied every write to ui3's
+    `_bmad-output/` - where the story file lives - because that directory is
+    a symlink out of the checkout, so realpath placed it outside the root.
+    Phase 1 hit the same wall (all 8 of its denials) and survived only
+    because the fence is a redirector, not a jail: the agent rewrote the
+    file through an interpreter, which the Bash scan passes by design. The
+    pipeline was working around its own fence.
+
+    This is parity finding F1's twin - F1 gave VERIFIERS `artifact_roots`
+    for exactly this symlink and left the fence with the same mistake.
+
+    The exception is DECLARED, in the project's committed config, so it is
+    reviewable and narrow. Following symlinks in general would hand any
+    in-tree symlink an escape from containment. Reading the config fails
+    CLOSED: a missing or malformed file grants no exceptions, because an
+    error that WIDENS a fence silently disarms it.
+    """
+    try:
+        from claudomater.config import load_project_config
+
+        declared = load_project_config(root).artifact_roots
+    except Exception:  # noqa: BLE001 - any config trouble grants nothing
+        return []
+    out: list[Path] = []
+    for entry in declared:
+        p = Path(os.path.expanduser(entry))
+        if not p.is_absolute():
+            p = root / p
+        try:
+            out.append(Path(os.path.realpath(p)))
+        except OSError:
+            continue
+    return out
+
+
 def evaluate_pre_tool_use(
     payload: dict[str, Any],
     root: Path | str,
@@ -1910,6 +1948,9 @@ def evaluate_pre_tool_use(
     scratch = [
         Path(os.path.realpath(d)) for d in scratch_dirs_for(root, env)
     ]
+    # Declared artifact roots widen containment by exactly what the project
+    # committed to its config - see artifact_roots_for.
+    scratch.extend(artifact_roots_for(root))
     # A relative cwd would make relative tool paths resolve against the hook
     # PROCESS's working directory — environment-dependent decisions and an
     # avoidable bypass surface. Only an absolute cwd is trusted; anything

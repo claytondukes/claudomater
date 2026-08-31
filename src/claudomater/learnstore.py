@@ -1010,18 +1010,11 @@ def sync(
             f"export directory {export_dir} is not inside a git repository"
         )
     repo = Path(top.stdout.strip())
-    pre = _git(repo, "diff", "--cached", "--quiet")
-    if pre.returncode == 1:
-        # `git commit` commits the whole index: pre-existing staged edits in
-        # the dotfiles repo would ride the omater-learn: commit, misfiling
-        # unrelated work under lesson history. Refuse before touching git.
-        raise LearnStoreError(
-            "the export repo already has staged changes; commit or unstage "
-            "them before `omater learn sync` (its commit must carry only "
-            "the lessons export)"
-        )
-    if pre.returncode > 1:
-        raise LearnStoreError(f"git diff failed: {pre.stderr.strip()}")
+    # No repo-wide veto on staged changes (slice D finding F2): the commit
+    # below is PATHSPEC-LIMITED, so unrelated staged work cannot ride the
+    # omater-learn: commit - prevented rather than merely detected. Judging
+    # paths sync never touches is what made it unusable against a real
+    # dotfiles repo with ordinary work in flight.
     remotes = _git(repo, "remote")
     if remotes.returncode != 0:
         # an error is not "no remotes": proceeding would silently skip the
@@ -1029,7 +1022,12 @@ def sync(
         raise LearnStoreError(f"git remote failed: {remotes.stderr.strip()}")
     has_remote = bool(remotes.stdout.strip())
     if has_remote:
-        pull = _git(repo, "pull", "--ff-only", "-q")
+        # `-c pull.rebase=false`: a plain `pull --ff-only` still HONORS the
+        # operator's pull.rebase, and this machine sets it globally - which
+        # turned sync's pull into a rebase that refuses on any unstaged
+        # change anywhere in the repo, even with nothing to fetch. The flag
+        # pins what the pull MEANS to what this function documents.
+        pull = _git(repo, "-c", "pull.rebase=false", "pull", "--ff-only", "-q")
         if pull.returncode != 0:
             raise LearnStoreError(
                 "git pull --ff-only failed - resolve the export repo by hand "
@@ -1057,7 +1055,12 @@ def sync(
         message = (
             f"omater-learn: sync ({stats.new} new, {stats.updated} updated)"
         )
-        commit = _git(repo, "commit", "-q", "-m", message)
+        # `-- <export files>`: commits ONLY these paths, so unrelated staged
+        # work stays staged instead of being misfiled under lesson history
+        commit = _git(
+            repo, "commit", "-q", "-m", message,
+            "--", *(str(pp) for pp in export_files),
+        )
         if commit.returncode != 0:
             raise LearnStoreError(f"commit failed: {commit.stderr.strip()}")
         committed = True

@@ -637,7 +637,7 @@ class TestRound3Hardening:
         assert len(store.lessons(["global"], domains=None)) == 1
         assert len(store.lessons(["global"], domains=["review"])) == 1
 
-    def test_sync_refuses_a_dirty_index(self, tmp_path):
+    def test_unrelated_staged_work_is_excluded_not_refused(self, tmp_path):
         """Pre-existing staged edits in the dotfiles repo must never ride
         the omater-learn: commit - and the refusal leaves them untouched."""
         origin = tmp_path / "origin.git"
@@ -649,6 +649,10 @@ class TestRound3Hardening:
         (repo / "seed.txt").write_text("x", encoding="utf-8")
         git(repo, "add", "-A")
         git(repo, "commit", "-q", "-m", "seed")
+        # push the seed: an unpushed bare origin has no main ref, so sync's
+        # ff-only pull fails loudly on "no such ref" - correct behaviour, but
+        # it is not what this test is about (same fixture gap as slice A)
+        git(repo, "push", "-q", "-u", "origin", "HEAD")
         (repo / "unrelated-wip.txt").write_text("half-done dotfile edit", encoding="utf-8")
         git(repo, "add", "unrelated-wip.txt")
         s = LearnStore.open(
@@ -656,12 +660,21 @@ class TestRound3Hardening:
             now=ticking_now(),
         )
         seed(s)
-        head_before = git(repo, "rev-parse", "HEAD").stdout
-        with pytest.raises(LearnStoreError, match="already has staged changes"):
-            sync(s)
-        assert git(repo, "rev-parse", "HEAD").stdout == head_before  # no commit
+        # SUPERSEDED MECHANISM, PRESERVED INTENT (slice D finding F2).
+        # This test was written when sync REFUSED on a dirty index, to stop
+        # unrelated staged work being misfiled under lesson history. That
+        # intent still holds and is now enforced more strongly: the commit is
+        # pathspec-limited, so the unrelated file cannot ride along even
+        # though sync no longer refuses. Refusing was also wrong in practice -
+        # it made sync unusable against a real dotfiles repo with ordinary
+        # work in flight, which is how the finding surfaced.
+        result = sync(s)
+        assert result["committed"] is True
+        committed = git(repo, "show", "--name-only", "--format=", "HEAD").stdout
+        assert "global.jsonl" in committed
+        assert "unrelated-wip.txt" not in committed  # the intent, preserved
         staged = git(repo, "diff", "--cached", "--name-only").stdout.split()
-        assert staged == ["unrelated-wip.txt"]  # untouched, and nothing else
+        assert staged == ["unrelated-wip.txt"]  # still staged, untouched
         s.close()
 
 
@@ -1038,5 +1051,95 @@ class TestGitTimeoutIsTyped:
 
         monkeypatch.setattr(learnstore.subprocess, "run", hanging_run)
         with pytest.raises(LearnStoreError, match="timed out after 120s"):
+            sync(s)
+        s.close()
+
+
+class TestSyncIgnoresUnrelatedRepoState:
+    """Slice D finding F2, 2026-08-31. `omater learn sync` refused to run at
+    all against the operator's real dotfiles repo, for two reasons that both
+    amount to judging paths it does not touch:
+
+    1. `git pull --ff-only` HONORS the operator's `pull.rebase=true`, which
+       turns it into a rebase pull - and a rebase refuses on ANY unstaged
+       change anywhere in the repo. The branch was already up to date, so
+       the pull had nothing to fetch and still blocked the sync.
+    2. The pre-flight staged-changes check was repo-wide, so unrelated
+       staged work refused the sync even though sync stages only the export
+       files.
+
+    The commit is now pathspec-limited, which PREVENTS unrelated staged work
+    from riding the omater-learn: commit instead of merely detecting it - so
+    the repo-wide veto is unnecessary as well as wrong."""
+
+    def _repo(self, tmp_path):
+        origin = tmp_path / "origin.git"
+        subprocess.run(["git", "init", "-q", "--bare", str(origin)], check=True)
+        repo = tmp_path / "dotfiles"
+        subprocess.run(["git", "clone", "-q", str(origin), str(repo)], check=True)
+        git(repo, "config", "user.email", "t@t")
+        git(repo, "config", "user.name", "t")
+        (repo / "seed.txt").write_text("x", encoding="utf-8")
+        (repo / "other.txt").write_text("original\n", encoding="utf-8")
+        git(repo, "add", "-A")
+        git(repo, "commit", "-q", "-m", "seed")
+        git(repo, "push", "-q")
+        s = LearnStore.open(
+            tmp_path / "l.db", export_dir=repo / "omater" / "lessons",
+            now=ticking_now(),
+        )
+        return s, repo
+
+    def test_pull_rebase_true_does_not_block_the_sync(self, tmp_path):
+        """The operator's config must not change what sync's pull means."""
+        s, repo = self._repo(tmp_path)
+        git(repo, "config", "pull.rebase", "true")
+        (repo / "other.txt").write_text("locally edited\n", encoding="utf-8")
+        seed(s)
+        result = sync(s)
+        assert result["committed"] is True
+        s.close()
+
+    def test_unrelated_unstaged_changes_do_not_block_the_sync(self, tmp_path):
+        s, repo = self._repo(tmp_path)
+        (repo / "other.txt").write_text("locally edited\n", encoding="utf-8")
+        seed(s)
+        assert sync(s)["committed"] is True
+        # and the operator's edit is still there, uncommitted
+        assert (repo / "other.txt").read_text() == "locally edited\n"
+        assert "other.txt" in git(repo, "status", "--porcelain").stdout
+        s.close()
+
+    def test_unrelated_staged_changes_neither_block_nor_ride_along(self, tmp_path):
+        s, repo = self._repo(tmp_path)
+        (repo / "other.txt").write_text("staged by the operator\n", encoding="utf-8")
+        git(repo, "add", "other.txt")
+        seed(s)
+        assert sync(s)["committed"] is True
+        committed = git(repo, "show", "--name-only", "--format=", "HEAD").stdout
+        assert "global.jsonl" in committed
+        assert "other.txt" not in committed  # did NOT ride the commit
+        # still staged, exactly as the operator left it
+        assert "other.txt" in git(repo, "diff", "--cached", "--name-only").stdout
+        s.close()
+
+    def test_a_genuinely_non_fast_forward_pull_still_fails_loudly(self, tmp_path):
+        """The fix must not turn a real divergence into a silent merge."""
+        s, repo = self._repo(tmp_path)
+        other = tmp_path / "other-clone"
+        subprocess.run(["git", "clone", "-q", str(tmp_path / "origin.git"), str(other)],
+                       check=True)
+        git(other, "config", "user.email", "t@t")
+        git(other, "config", "user.name", "t")
+        (other / "remote-side.txt").write_text("remote\n", encoding="utf-8")
+        git(other, "add", "-A")
+        git(other, "commit", "-q", "-m", "remote work")
+        git(other, "push", "-q")
+        # local diverges: a commit of its own, so the pull cannot fast-forward
+        (repo / "local-side.txt").write_text("local\n", encoding="utf-8")
+        git(repo, "add", "-A")
+        git(repo, "commit", "-q", "-m", "local work")
+        seed(s)
+        with pytest.raises(LearnStoreError, match="ff-only|fast-forward"):
             sync(s)
         s.close()
