@@ -444,3 +444,75 @@ class TestArtifactRootsConfig:
             write_project(tmp_path, "project: p\nartifact_roots: [_bmad-output]\n")
         )
         assert cfg.artifact_roots == ["_bmad-output"]
+
+
+class TestCommitScopeConfig:
+    """Phase 3 deliverable 1: `commit_scope` maps a repo ('.' or an
+    artifact_roots entry) to the path prefixes a phase agent may commit
+    there. Garbage fails at LOAD - a typo'd key or entry discovered at run
+    start would arm the guard empty (all gated commits blocked) with the
+    declared scope silently attached to a repo the run never arms."""
+
+    def test_absent_means_no_declared_scope(self, tmp_path):
+        cfg = load_project_config(write_project(tmp_path, "project: p\n"))
+        assert cfg.commit_scope == {}
+
+    def test_a_valid_map_loads(self, tmp_path):
+        cfg = load_project_config(
+            write_project(
+                tmp_path,
+                "project: p\n"
+                "artifact_roots: [_bmad-output]\n"
+                "commit_scope:\n"
+                '  ".": [ui/, backend]\n'
+                "  _bmad-output: [implementation-artifacts]\n",
+            )
+        )
+        assert cfg.commit_scope == {
+            ".": ["ui/", "backend"],
+            "_bmad-output": ["implementation-artifacts"],
+        }
+
+    def test_a_key_that_names_no_armed_repo_is_rejected(self, tmp_path):
+        with pytest.raises(ConfigError, match="commit_scope"):
+            load_project_config(
+                write_project(
+                    tmp_path,
+                    "project: p\ncommit_scope:\n  _bmad-output: [docs]\n",
+                )
+            )
+
+    def test_non_list_values_are_rejected_and_the_root_key_reads_cleanly(
+        self, tmp_path
+    ):
+        """Copilot round-2 (suppressed pair): dotted notation rendered the
+        root key as `commit_scope..` - bracket-with-repr keeps the message
+        addressable for '.' and named keys alike."""
+        for bad in ("ui", "null", "3"):
+            with pytest.raises(ConfigError, match=r"commit_scope\['\.'\]"):
+                load_project_config(
+                    write_project(
+                        tmp_path, f'project: p\ncommit_scope:\n  ".": {bad}\n'
+                    )
+                )
+
+    def test_entry_grammar_is_the_guards_own(self, tmp_path):
+        """One source of truth: the same normalize_scope that arms the
+        guard validates here, so an absolute or traversing entry fails at
+        load instead of at run start."""
+        for bad in ("/etc", "a/../b", "~/x"):
+            with pytest.raises(ConfigError, match=r"commit_scope\['\.'\]"):
+                load_project_config(
+                    write_project(
+                        tmp_path,
+                        f'project: p\ncommit_scope:\n  ".": ["{bad}"]\n',
+                    )
+                )
+
+    def test_an_explicit_empty_list_is_a_legal_declaration(self, tmp_path):
+        """[] says 'this repo is read-only for agents' - representable on
+        purpose, distinct from an absent declaration only in intent."""
+        cfg = load_project_config(
+            write_project(tmp_path, 'project: p\ncommit_scope:\n  ".": []\n')
+        )
+        assert cfg.commit_scope == {".": []}

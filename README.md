@@ -115,6 +115,17 @@ Phase 0 skeleton — the pieces every pipeline run stands on:
   (`python -c`, tempfile) pass the Bash scan by design; the measured
   backstop is the per-phase `permission_denials` capture in the run log
   plus verifier discipline.
+- **Commit guard** — a run-scoped, agent-gated git `pre-commit` hook that
+  blocks a phase agent's commits touching paths outside the run's declared
+  write scope (`.omater.yaml` `commit_scope`, per repo: `"."` and each
+  `artifact_roots` git repo). Same P1-1 lifecycle as the fence (`omater
+  start` arms, `omater teardown` removes, operator commits pass ungated),
+  but FAIL-CLOSED while gated: a missing scope file, unreadable config, or
+  missing `omater` binary blocks the commit instead of waving it through.
+  It composes with the fence at the git layer — the staged file list is
+  exact, no bash parsing involved. Arming refuses foreign pre-commit hooks
+  and any `core.hooksPath` that redirects hooks away from the repo's own
+  `.git/hooks`; the armed scope is written to the run log.
 
 ### Install
 
@@ -129,8 +140,8 @@ omater usage         # guardrail snapshot + decision
 | Command | What it does |
 |---|---|
 | `omater init [ROOT] [--verify] [--force]` | Provision config template + gitignore; `--verify` = between-runs drift check (exit 1 on drift) |
-| `omater start [ROOT]` | Start a run: arm the write fence, drift check, run-log creation, resolved policy written to the log |
-| `omater teardown [ROOT]` | Disarm the write fence (remove the run-scoped PreToolUse hook) |
+| `omater start [ROOT]` | Start a run: arm the write fence + commit guard, drift check, run-log creation, resolved policy written to the log |
+| `omater teardown [ROOT]` | Disarm the write fence and the commit guard (root repo + artifact-root repos) |
 | `omater usage [--json]` | Fetch usage, evaluate guardrails; exit 0 ok / 3 pause / 4 degrade |
 | `omater policy [ROOT] [--json]` | Show the resolved policy (model chain, review floor, CI tier) for the project's `deployment_type` |
 | `omater notify KIND MESSAGE` | Send a Slack notification through the configured webhook |
@@ -147,6 +158,7 @@ omater usage         # guardrail snapshot + decision
 | `omater sprint status [--epic N] [--json]` | The sprint view, rendered on demand from the tables |
 | `omater resume\|abort\|approve [--run ID]` | Write a control event a paused/escalated run consumes (also under `omater control …`) |
 | `omater hook pre-tool-use --root PATH` | The provisioned PreToolUse write fence (reads the hook payload on stdin) |
+| `omater hook pre-commit` | The commit guard's git hook entrypoint (gated on the agent marker; fail-closed past the gate) |
 
 Development: `pip install -e '.[dev]' && pytest`.
 
