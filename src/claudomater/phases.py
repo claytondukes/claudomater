@@ -48,6 +48,10 @@ class PhaseSpec:
     retries: int = 1  # retried once, then escalated
     story_key: str | None = None
     escalated: bool = False  # story has failure history: never runs degraded
+    # ids of lessons injected into this phase's prompt (slice B): the set
+    # `lessons_applied` in the result is validated against — an id that was
+    # never injected can mint no credit
+    injected_lessons: tuple[int, ...] = ()
 
 
 @dataclass
@@ -282,6 +286,34 @@ def extract_json_result(text: str) -> dict[str, Any] | None:
             pass
         idx = start + 1
     return last
+
+
+def inject_lessons(
+    spec: PhaseSpec,
+    store: Any,
+    scopes: Sequence[str],
+    domains: Sequence[str] = (),
+    budget: int = 20,
+) -> PhaseSpec:
+    """Compose lesson retrieval into a phase spec — the ONE seam where the
+    prompt gains the injection block AND `injected_lessons` is set, so the
+    logged injected set can never drift from what the prompt actually
+    carries (two hand-rolled steps would eventually disagree, and the
+    provenance would lie). An empty retrieval returns the spec unchanged.
+
+        spec = inject_lessons(spec, store, cfg.learning_scopes, domains)
+        outcome = runner.run_phase(spec)
+    """
+    from claudomater.learnstore import injection_block
+
+    rows = store.lessons_for_phase(scopes, domains, budget=budget)
+    if not rows:
+        return spec
+    return replace(
+        spec,
+        prompt=f"{spec.prompt}\n\n{injection_block(rows)}",
+        injected_lessons=tuple(row["id"] for row in rows),
+    )
 
 
 RETRY_FEEDBACK_HEADER = "## Previous attempt failures (address these first)"
@@ -677,6 +709,7 @@ class PhaseRunner:
         secrets_deny: tuple[str, ...] | list[str] = (),
         guardrail_check: Callable[[], Decision] | None = None,
         project: str | None = None,
+        learn_store: Any | None = None,
     ):
         self.project_root = Path(project_root)
         self.runlog = runlog
@@ -686,6 +719,9 @@ class PhaseRunner:
         self.secrets_deny = tuple(secrets_deny)
         self.guardrail_check = guardrail_check
         self.project = project
+        # optional LearnStore: when present, VERIFIED phases' validated
+        # lessons_applied ids feed refs/sessions via record_applied
+        self.learn_store = learn_store
         self._pre_run_dirt_cache: frozenset[str] | None = None
         # An executor that reports its child PID (`on_spawn`) gets the run
         # log's pid recorder; simpler executors keep the two-arg contract.
@@ -760,6 +796,71 @@ class PhaseRunner:
                         paths = frozenset(p for p in got if isinstance(p, str))
             self._pre_run_dirt_cache = paths
         return self._pre_run_dirt_cache
+
+    def _record_lessons_applied(self, spec: PhaseSpec, result: dict[str, Any]) -> None:
+        """Provenance for the self-reported `lessons_applied` (slice B):
+        the claim is validated against the ids actually injected — an id
+        never injected (or a malformed entry) is REJECTED and logged, never
+        counted; only verified phases reach here, so a failed attempt's
+        claim mints nothing. Counting is best-effort: a learn-store failure
+        is logged, never a verified phase turned into a failure."""
+        present = "lessons_applied" in result
+        claimed = result.get("lessons_applied")
+        if not present and not spec.injected_lessons:
+            return
+        injected = set(spec.injected_lessons)
+        # an ABSENT field is "no report" (recorded as reported=False); a
+        # PRESENT field that is not a list — an explicit null included — is
+        # a malformed claim whose value lands in `rejected`: the contract is
+        # that malformed claims are logged, never silently dropped, and
+        # `in result` is what tells the two apart
+        reported = present and isinstance(claimed, list)
+        if not present:
+            items: list[Any] = []
+        elif isinstance(claimed, list):
+            items = claimed
+        else:
+            items = [claimed]
+        applied: list[int] = []
+        rejected: list[Any] = []
+        for item in items:
+            if isinstance(item, int) and not isinstance(item, bool) and item in injected:
+                if item not in applied:
+                    applied.append(item)
+            else:
+                # rejected entries are AGENT-authored values headed for the
+                # run log and progress.log: scrub them like every other
+                # retained artifact (the contract makes no exception for
+                # malformed claims — those are the likeliest to carry junk).
+                # A dict or list leaks nested strings — dict KEYS included —
+                # exactly like a bare string, so containers are retained as
+                # their scrubbed JSON text rather than chased recursively
+                # through every shape an agent can invent; non-string
+                # scalars carry no text to scrub and keep their shape.
+                if isinstance(item, str):
+                    rejected.append(self._scrub(item))
+                elif isinstance(item, (dict, list, tuple)):
+                    rejected.append(
+                        self._scrub(json.dumps(item, sort_keys=True, default=repr))
+                    )
+                else:
+                    rejected.append(item)
+        self.runlog.event(
+            spec.name,
+            "lessons-applied",
+            {"applied": applied, "rejected": rejected, "reported": reported},
+            story_key=spec.story_key,
+        )
+        if self.learn_store is not None and applied:
+            try:
+                self.learn_store.record_applied(applied, self.runlog.run_id)
+            except Exception as exc:  # noqa: BLE001 — accounting must not fail the phase
+                self.runlog.event(
+                    spec.name,
+                    "lessons-applied-recording-failed",
+                    {"error": self._scrub(str(exc))},
+                    story_key=spec.story_key,
+                )
 
     def _salvage(self, spec: PhaseSpec) -> None:
         """Commit-first salvage, write-ahead: the intent is logged before git
@@ -861,6 +962,16 @@ class PhaseRunner:
                     )
                     spawn_detail["retry_feedback"] = len(outcome.failure_reasons)
 
+            if spec.injected_lessons:
+                # provenance, write-ahead: WHAT the agent was given is on
+                # record before the agent exists — lessons_applied is later
+                # validated against exactly this set
+                self.runlog.event(
+                    spec.name,
+                    "lessons-injected",
+                    {"ids": list(spec.injected_lessons), "attempt": attempt},
+                    story_key=spec.story_key,
+                )
             # Write-ahead: intent hits the log BEFORE the agent spawns.
             spawn_record = self.runlog.event(
                 spec.name, "phase-spawn", spawn_detail, story_key=spec.story_key
@@ -954,6 +1065,7 @@ class PhaseRunner:
                     self.runlog.event(
                         spec.name, "phase-verified", detail, story_key=spec.story_key
                     )
+                    self._record_lessons_applied(spec, result)
                     outcome.status = "verified"
                     outcome.result = result
                     return outcome

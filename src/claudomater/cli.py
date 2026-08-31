@@ -215,6 +215,23 @@ def _cmd_learn(args: argparse.Namespace) -> int:
                 for r in rows:
                     print(f"{r['scope']}/{r['domain']}/{r['topic']} [refs {r['refs']}] {r['rule']}")
                 print(f"{len(rows)} match(es)")
+        elif args.learn_cmd == "candidates":
+            rows = store.candidates()
+            for r in rows:
+                print(
+                    f"{r['scope']}/{r['domain']}/{r['topic']} "
+                    f"[refs {r['refs']}, sessions {r['sessions']}] {r['rule']}"
+                )
+            print(
+                f"{len(rows)} promotion candidate(s); promote with "
+                "`omater learn promote --scope S --domain D --topic T`"
+            )
+        elif args.learn_cmd == "promote":
+            lesson_id = store.promote(args.scope, args.domain, args.topic)
+            print(
+                f"promoted: lesson {lesson_id} "
+                f"({args.scope}/{args.domain}) is now always-loaded for its scope"
+            )
         elif args.learn_cmd == "export":
             for path in store.export():
                 print(f"exported {path}")
@@ -350,6 +367,16 @@ def build_parser() -> argparse.ArgumentParser:
     lp.add_argument("query")
     lp.add_argument("--scope", action="append", default=None)
     lp.add_argument("--json", action="store_true")
+
+    _learn_parser(
+        "candidates", "promotion candidates (3+ uses across 2+ runs) for review"
+    )
+    lp = _learn_parser(
+        "promote", "HUMAN-gated: make a lesson always-loaded for its scope"
+    )
+    lp.add_argument("--scope", required=True)
+    lp.add_argument("--domain", required=True)
+    lp.add_argument("--topic", required=True)
 
     _learn_parser("export", "write the deterministic per-scope JSONL export")
     _learn_parser("import", "import per-scope JSONL (latest updated_at wins)")
