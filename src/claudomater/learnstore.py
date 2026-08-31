@@ -1010,18 +1010,11 @@ def sync(
             f"export directory {export_dir} is not inside a git repository"
         )
     repo = Path(top.stdout.strip())
-    pre = _git(repo, "diff", "--cached", "--quiet")
-    if pre.returncode == 1:
-        # `git commit` commits the whole index: pre-existing staged edits in
-        # the dotfiles repo would ride the omater-learn: commit, misfiling
-        # unrelated work under lesson history. Refuse before touching git.
-        raise LearnStoreError(
-            "the export repo already has staged changes; commit or unstage "
-            "them before `omater learn sync` (its commit must carry only "
-            "the lessons export)"
-        )
-    if pre.returncode > 1:
-        raise LearnStoreError(f"git diff failed: {pre.stderr.strip()}")
+    # No repo-wide veto on staged changes (slice D finding F2): the commit
+    # below is PATHSPEC-LIMITED, so unrelated staged work cannot ride the
+    # omater-learn: commit - prevented rather than merely detected. Judging
+    # paths sync never touches is what made it unusable against a real
+    # dotfiles repo with ordinary work in flight.
     remotes = _git(repo, "remote")
     if remotes.returncode != 0:
         # an error is not "no remotes": proceeding would silently skip the
@@ -1029,7 +1022,15 @@ def sync(
         raise LearnStoreError(f"git remote failed: {remotes.stderr.strip()}")
     has_remote = bool(remotes.stdout.strip())
     if has_remote:
-        pull = _git(repo, "pull", "--ff-only", "-q")
+        # `--no-rebase`: a plain `pull --ff-only` still HONORS the
+        # operator's pull.rebase, and this machine sets it globally - which
+        # turned sync's pull into a rebase that refuses on any unstaged
+        # change anywhere in the repo, even with nothing to fetch. The flag
+        # pins what the pull MEANS to what this function documents.
+        # (--no-rebase rather than `-c pull.rebase=false`: _git's error
+        # wrapper names args[0] as the subcommand, and "git -c timed out"
+        # would misname the operation exactly when the operator needs it.)
+        pull = _git(repo, "pull", "--no-rebase", "--ff-only", "-q")
         if pull.returncode != 0:
             raise LearnStoreError(
                 "git pull --ff-only failed - resolve the export repo by hand "
@@ -1047,7 +1048,13 @@ def sync(
     add = _git(repo, "add", "--", *(str(p) for p in export_files))
     if add.returncode != 0:
         raise LearnStoreError(f"git add failed: {add.stderr.strip()}")
-    staged = _git(repo, "diff", "--cached", "--quiet", "--", str(export_dir))
+    # the SAME pathspec as the commit below: checking the whole directory
+    # let an operator-staged stray under it trigger a commit whose own
+    # pathspec had nothing to commit (PR #14 round 3)
+    staged = _git(
+        repo, "diff", "--cached", "--quiet", "--",
+        *(str(pp) for pp in export_files),
+    )
     # --quiet exit codes: 0 = no changes, 1 = changes, >1 = the diff itself
     # failed — conflating an error with "changes present" would commit blind
     if staged.returncode > 1:
@@ -1057,7 +1064,16 @@ def sync(
         message = (
             f"omater-learn: sync ({stats.new} new, {stats.updated} updated)"
         )
-        commit = _git(repo, "commit", "-q", "-m", message)
+        # `--only -- <export files>`: commits ONLY these paths, so unrelated
+        # staged work stays staged instead of being misfiled under lesson
+        # history. --only is already git's default when paths are given
+        # (measured: a pathspec commit leaves other staged files staged);
+        # stating it makes the guarantee explicit rather than an implied
+        # default a reader has to know.
+        commit = _git(
+            repo, "commit", "-q", "--only", "-m", message,
+            "--", *(str(pp) for pp in export_files),
+        )
         if commit.returncode != 0:
             raise LearnStoreError(f"commit failed: {commit.stderr.strip()}")
         committed = True

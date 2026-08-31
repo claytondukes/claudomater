@@ -2949,3 +2949,130 @@ class TestInit:
             assert any("cannot read" in p and ".gitignore" in p for p in problems)
         finally:
             gitignore.chmod(0o644)
+
+
+class TestDeclaredArtifactRoots:
+    """Slice D acceptance run, 2026-08-31. The write fence denied EVERY write
+    to ui3's `_bmad-output/` - the story file's home - because that directory
+    is a symlink out of the tree, so realpath put it outside the root. The
+    create phase burned $10.75 fighting it.
+
+    This is parity finding F1's twin: F1 fixed the same containment mistake
+    for VERIFIERS (`result_file_exists` gained `artifact_roots`), and the
+    fence was left with it. Phase 1 hit it identically - all 8 of that run's
+    permission denials were `_bmad-output` writes - and only survived because
+    the fence is a redirector rather than a jail, so the agent worked around
+    it through an interpreter. A pipeline that only works because its own
+    fence is porous is not a working pipeline.
+
+    A declared artifact root is an EXPLICIT, reviewable exception in the
+    project's committed config - not a blanket symlink-follow, which would
+    let any in-tree symlink escape containment."""
+
+    def test_declared_artifact_root_outside_the_tree_is_allowed(self, tmp_path):
+        root = tmp_path / "proj"
+        (root / ".claude").mkdir(parents=True)
+        outside = tmp_path / "artifacts"
+        (outside / "impl").mkdir(parents=True)
+        (root / "_bmad-output").symlink_to(outside)
+        (root / ".omater.yaml").write_text(
+            "project: p\nartifact_roots: [_bmad-output]\n", encoding="utf-8"
+        )
+        allow, reason = hooks.evaluate_pre_tool_use(
+            payload("Write", file_path=str(root / "_bmad-output" / "impl" / "s.md")),
+            root,
+        )
+        assert allow, reason
+
+    def test_an_undeclared_symlink_out_of_the_tree_is_still_denied(self, tmp_path):
+        """The exception is the DECLARED root, not symlinks in general."""
+        root = tmp_path / "proj"
+        (root / ".claude").mkdir(parents=True)
+        outside = tmp_path / "elsewhere"
+        outside.mkdir()
+        (root / "sneaky").symlink_to(outside)
+        (root / ".omater.yaml").write_text(
+            "project: p\nartifact_roots: [_bmad-output]\n", encoding="utf-8"
+        )
+        allow, _ = hooks.evaluate_pre_tool_use(
+            payload("Write", file_path=str(root / "sneaky" / "x.txt")), root
+        )
+        assert not allow
+
+    def test_no_declaration_keeps_the_strict_default(self, tmp_path):
+        root = tmp_path / "proj"
+        (root / ".claude").mkdir(parents=True)
+        outside = tmp_path / "artifacts"
+        outside.mkdir()
+        (root / "_bmad-output").symlink_to(outside)
+        (root / ".omater.yaml").write_text("project: p\n", encoding="utf-8")
+        allow, _ = hooks.evaluate_pre_tool_use(
+            payload("Write", file_path=str(root / "_bmad-output" / "s.md")), root
+        )
+        assert not allow
+
+    def test_a_bash_write_into_a_declared_root_is_allowed(self, tmp_path):
+        root = tmp_path / "proj"
+        (root / ".claude").mkdir(parents=True)
+        outside = tmp_path / "artifacts"
+        outside.mkdir()
+        (root / "_bmad-output").symlink_to(outside)
+        (root / ".omater.yaml").write_text(
+            "project: p\nartifact_roots: [_bmad-output]\n", encoding="utf-8"
+        )
+        p = payload(
+            "Bash", command=f"cat > {root / '_bmad-output' / 's.md'} << 'EOF'\nx\nEOF"
+        )
+        allow, reason = hooks.evaluate_pre_tool_use(p, root)
+        assert allow, reason
+
+    def test_a_broken_config_does_not_widen_the_fence(self, tmp_path):
+        """Fail CLOSED: an unreadable config grants no exceptions. The
+        alternative - allowing on error - would let a malformed file silently
+        disarm containment."""
+        root = tmp_path / "proj"
+        (root / ".claude").mkdir(parents=True)
+        outside = tmp_path / "artifacts"
+        outside.mkdir()
+        (root / "_bmad-output").symlink_to(outside)
+        (root / ".omater.yaml").write_text("project: [not\n  valid: yaml", encoding="utf-8")
+        allow, _ = hooks.evaluate_pre_tool_use(
+            payload("Write", file_path=str(root / "_bmad-output" / "s.md")), root
+        )
+        assert not allow
+
+    def test_an_absolute_declared_root_is_honored(self, tmp_path):
+        root = tmp_path / "proj"
+        (root / ".claude").mkdir(parents=True)
+        outside = tmp_path / "artifacts"
+        outside.mkdir()
+        (root / ".omater.yaml").write_text(
+            f"project: p\nartifact_roots: ['{outside}']\n", encoding="utf-8"
+        )
+        allow, reason = hooks.evaluate_pre_tool_use(
+            payload("Write", file_path=str(outside / "s.md")), root
+        )
+        assert allow, reason
+
+    def test_the_deny_hint_names_each_allowed_group_accurately(self, tmp_path):
+        """PR #14 round 4: the hint lumped artifact roots into the scratch
+        list under a wording that implied one group - misleading exactly
+        when a deny happens."""
+        root = tmp_path / "proj"
+        (root / ".claude").mkdir(parents=True)
+        outside = tmp_path / "artifacts"
+        outside.mkdir()
+        (root / "_bmad-output").symlink_to(outside)
+        (root / ".omater.yaml").write_text(
+            "project: p\nartifact_roots: [_bmad-output]\n", encoding="utf-8"
+        )
+        allow, reason = hooks.evaluate_pre_tool_use(
+            payload("Write", file_path="/somewhere/else/x.txt"), root
+        )
+        assert not allow
+        # each group carries its own parenthesized list
+        assert "declared scratch dir (" in reason
+        assert "declared artifact root (" in reason
+        scratch_part = reason.split("declared artifact root")[0]
+        assert str(outside) not in scratch_part  # not lumped into scratch
+        assert str(outside) in reason.split("declared artifact root")[1]

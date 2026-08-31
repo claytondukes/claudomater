@@ -180,6 +180,11 @@ class ProjectConfig:
         default_factory=lambda: {"issue_tracker": None, "qa_board": None}
     )
     learning_scopes: list[str] = field(default_factory=lambda: ["global"])
+    # Directories that legitimately hold this project's artifacts but do
+    # NOT resolve inside the tree - typically a symlinked output dir. An
+    # explicit, committed, reviewable exception to write containment;
+    # never a blanket symlink-follow.
+    artifact_roots: list[str] = field(default_factory=list)
     ci_tier_on_push: str | None = None  # None -> deployment_type default
     ci_tier_on_merge: str = "full"
     gates: dict[str, Any] = field(default_factory=dict)
@@ -291,6 +296,19 @@ def load_project_config(root: Path | str) -> ProjectConfig:
     ):
         raise ConfigError(f"{PROJECT_CONFIG_NAME}: secrets_deny must be a list of names")
 
+    # explicit None check: `or []` would swallow falsy non-list values
+    # (false, '', 0) as "not set" instead of failing validation
+    artifact_roots = data.get("artifact_roots")
+    if artifact_roots is None:
+        artifact_roots = []
+    if not isinstance(artifact_roots, list) or not all(
+        isinstance(s, str) and s for s in artifact_roots
+    ):
+        raise ConfigError(
+            f"{PROJECT_CONFIG_NAME}: artifact_roots must be a list of path strings, "
+            f"got {artifact_roots!r}"
+        )
+
     scopes = learning_raw.get("scopes")
     if scopes is None:
         scopes = ["global"]
@@ -343,6 +361,7 @@ def load_project_config(root: Path | str) -> ProjectConfig:
             "qa_board": adapters_raw.get("qa_board"),
         },
         learning_scopes=list(scopes),
+        artifact_roots=list(artifact_roots),
         ci_tier_on_push=ci_raw.get("tier_on_push"),
         ci_tier_on_merge=ci_raw.get("tier_on_merge", "full"),
         gates=gates_raw,
