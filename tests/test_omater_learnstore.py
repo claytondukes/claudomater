@@ -992,3 +992,26 @@ class TestRound10Hardening:
         seed(store, scope="global")
         seed(store, scope="stack-ts")
         assert store.export_paths() == store.export()
+
+
+class TestIoErrorsAreTyped:
+    """PR #11 round 14: raw OSError/UnicodeDecodeError from file IO bypassed
+    the LearnStoreError boundary the CLI catches - export's compare-read and
+    import's file reads now fail closed with the path named."""
+
+    def test_export_over_a_non_utf8_file_is_a_typed_error(self, tmp_path):
+        export_dir = tmp_path / "lessons"
+        export_dir.mkdir()
+        (export_dir / "global.jsonl").write_bytes(b"\xff\xfe garbage")
+        s = LearnStore.open(tmp_path / "l.db", export_dir=export_dir,
+                            now=ticking_now())
+        with pytest.raises(LearnStoreError, match="cannot write export file"):
+            s.add("global", "ci", "t", "r", "w")  # write-through hits the file
+        s.close()
+
+    def test_import_of_a_non_utf8_file_is_a_typed_error(self, store, tmp_path):
+        bad = tmp_path / "bad-encoding"
+        bad.mkdir()
+        (bad / "global.jsonl").write_bytes(b"\xff\xfe garbage")
+        with pytest.raises(LearnStoreError, match=r"global\.jsonl: unreadable"):
+            store.import_dir(bad)

@@ -525,9 +525,16 @@ class LearnStore:
             ]
             path = out_dir / _scope_filename(scope)
             content = "\n".join(lines) + "\n" if lines else ""
-            # skip no-op rewrites so write-through never churns mtimes
-            if not path.exists() or path.read_text(encoding="utf-8") != content:
-                path.write_text(content, encoding="utf-8")
+            # typed errors at the IO boundary: raw OSError/UnicodeDecodeError
+            # would bypass the CLI's LearnStoreError handler as a traceback
+            try:
+                # skip no-op rewrites so write-through never churns mtimes
+                if not path.exists() or path.read_text(encoding="utf-8") != content:
+                    path.write_text(content, encoding="utf-8")
+            except (OSError, UnicodeDecodeError) as exc:
+                raise LearnStoreError(
+                    f"cannot write export file {path}: {exc}"
+                ) from exc
             written.append(path)
         return written
 
@@ -552,9 +559,14 @@ class LearnStore:
         # neutral and _settle_key applies intent with conflict resolution.
         intended: dict[tuple[str, str, str, str], str] = {}
         for path in sorted(src.glob("*.jsonl")):
-            for lineno, line in enumerate(
-                path.read_text(encoding="utf-8").splitlines(), 1
-            ):
+            try:
+                text = path.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError) as exc:
+                # import is the untrusted boundary: an unreadable or
+                # non-UTF8 file fails closed with the store's own error,
+                # never a raw traceback through the CLI
+                raise LearnStoreError(f"{path.name}: unreadable ({exc})") from exc
+            for lineno, line in enumerate(text.splitlines(), 1):
                 if not line.strip():
                     continue
                 try:
