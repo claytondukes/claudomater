@@ -694,3 +694,63 @@ class TestScopeFilenameContract:
         )
         with pytest.raises(LearnStoreError, match=r"x\.jsonl:1: scope"):
             store.import_dir(bad)
+
+
+class TestChainLinksWhenAnEarlierGenerationWins:
+    """PR #11 round 5: latest updated_at picks the head, not latest
+    created_at - so a NEWER generation can lose and be forced superseded.
+    Its superseded_by must point at the head that beat it, never dangle."""
+
+    def test_forced_superseded_newest_generation_points_at_the_head(
+        self, store, tmp_path
+    ):
+        foreign = tmp_path / "foreign"
+        foreign.mkdir()
+        base = {"scope": "global", "domain": "review", "topic": "k",
+                "rule": "r", "why": "w"}
+        rows = [
+            {**base, "status": "superseded",
+             "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z"},
+            # older generation, refined LATE: wins the head on updated_at
+            {**base, "rule": "old generation, heavily refined", "status": "active",
+             "created_at": "2026-02-01T00:00:00Z", "updated_at": "2026-09-01T00:00:00Z"},
+            # newest generation, loses: must point back at the winner
+            {**base, "rule": "newest but loses", "status": "active",
+             "created_at": "2026-03-01T00:00:00Z", "updated_at": "2026-03-02T00:00:00Z"},
+        ]
+        (foreign / "global.jsonl").write_text(
+            "\n".join(json.dumps(r, sort_keys=True) for r in rows) + "\n",
+            encoding="utf-8",
+        )
+        store.import_dir(foreign)
+        by_created = store.conn.execute(
+            "SELECT * FROM lesson WHERE topic='k' ORDER BY created_at"
+        ).fetchall()
+        g1, head, g3 = by_created
+        assert head["status"] == "active"
+        assert head["rule"] == "old generation, heavily refined"
+        assert g1["status"] == "superseded" and g1["superseded_by"] == head["id"]
+        assert g3["status"] == "superseded"
+        assert g3["superseded_by"] == head["id"]  # was NULL: the dangling bug
+
+    def test_fully_retired_key_keeps_a_null_tail(self, store, tmp_path):
+        """A key whose every generation is superseded has no head - the last
+        generation's NULL link means 'retired', not 'dangling'."""
+        foreign = tmp_path / "foreign"
+        foreign.mkdir()
+        base = {"scope": "global", "domain": "review", "topic": "retired",
+                "rule": "r", "why": "w", "status": "superseded"}
+        rows = [
+            {**base, "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z"},
+            {**base, "created_at": "2026-02-01T00:00:00Z", "updated_at": "2026-02-01T00:00:00Z"},
+        ]
+        (foreign / "global.jsonl").write_text(
+            "\n".join(json.dumps(r, sort_keys=True) for r in rows) + "\n",
+            encoding="utf-8",
+        )
+        store.import_dir(foreign)
+        first, last = store.conn.execute(
+            "SELECT * FROM lesson WHERE topic='retired' ORDER BY created_at"
+        ).fetchall()
+        assert first["superseded_by"] == last["id"]
+        assert last["superseded_by"] is None

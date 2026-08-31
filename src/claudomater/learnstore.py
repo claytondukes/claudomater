@@ -614,8 +614,20 @@ class LearnStore:
             status = intents[r["id"]]
             if status in LIVE_STATUSES and r["id"] != head_id:
                 status = "superseded"
-            successor = rows[i + 1]["id"] if i + 1 < len(rows) else None
-            link = successor if status == "superseded" else None
+            link = None
+            if status == "superseded":
+                # what superseded this row: the next generation, or — when
+                # conflict resolution crowned an EARLIER generation (later
+                # updated_at wins, not later created_at) — the head that
+                # beat it; a NULL link would dangle, breaking supersede()'s
+                # every-superseded-row-points-at-its-successor meaning. A
+                # key whose every generation is retired keeps NULL on the
+                # last row: nothing supersedes it.
+                successor = rows[i + 1]["id"] if i + 1 < len(rows) else None
+                if successor is not None:
+                    link = successor
+                elif head_id is not None and head_id != r["id"]:
+                    link = head_id
             if r["status"] != status or r["superseded_by"] != link:
                 updates.append((status, link, r["id"]))
         # demotions before the head's promotion: applying the head first
