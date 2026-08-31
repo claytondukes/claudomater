@@ -531,14 +531,18 @@ class LearnStore:
                     seen.add(row["id"])
                     chosen.append(row)
 
+        # tiers 1 and 2 are status-disjoint (promoted vs active), so an
+        # exact LIMIT per tier is safe — and the cursor is iterated, never
+        # materialized: only up to `budget` rows can be consumed
         marks = ",".join("?" * len(scopes))
         take(
             dict(r)
             for r in self.conn.execute(
                 f"SELECT * FROM lesson WHERE status='promoted' "
-                f"AND scope IN ({marks}) ORDER BY refs DESC, scope, domain, topic",
-                (*scopes,),
-            ).fetchall()
+                f"AND scope IN ({marks}) "
+                "ORDER BY refs DESC, scope, domain, topic LIMIT ?",
+                (*scopes, budget),
+            )
         )
         if domains and len(chosen) < budget:
             dmarks = ",".join("?" * len(domains))
@@ -547,9 +551,9 @@ class LearnStore:
                 for r in self.conn.execute(
                     f"SELECT * FROM lesson WHERE status='active' "
                     f"AND scope IN ({marks}) AND domain IN ({dmarks}) "
-                    "ORDER BY refs DESC, scope, domain, topic",
-                    (*scopes, *domains),
-                ).fetchall()
+                    "ORDER BY refs DESC, scope, domain, topic LIMIT ?",
+                    (*scopes, *domains, budget - len(chosen)),
+                )
             )
             # FTS terms are phrase-quoted with embedded quotes doubled:
             # domain names are data, never query syntax. Tier 3 asks for
