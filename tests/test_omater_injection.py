@@ -336,3 +336,20 @@ class TestRound2Hardening:
         row = store.conn.execute("SELECT refs FROM lesson WHERE id=?", (lid,)).fetchone()
         assert row["refs"] == 0  # the first increment rolled back with the batch
         assert store.conn.execute("SELECT COUNT(*) FROM lesson_use").fetchone()[0] == 0
+
+
+class TestFtsTierFillGuarantee:
+    """PR #12 round 3: the tier-3 LIMIT covers budget plus every already-
+    chosen row, so dupes (tier-2 domain rows also FTS-match their own
+    domain term) can never starve the fill below budget when enough unique
+    matches exist."""
+
+    def test_budget_fills_despite_tier2_duplicates_in_the_fts_limit(self, store):
+        # 3 domain-column matches (tier 2) that also FTS-match "charts",
+        # plus 3 text-only matches; budget 5 must fill to 5
+        for i in range(3):
+            lesson(store, f"d{i}", domain="charts", rule=f"charts rule {i}")
+        for i in range(3):
+            lesson(store, f"t{i}", domain="misc", rule=f"about charts too {i}")
+        rows = store.lessons_for_phase(["global"], domains=["charts"], budget=5)
+        assert len(rows) == 5

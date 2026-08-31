@@ -556,8 +556,17 @@ class LearnStore:
             # ACTIVE rows only — promoted rows are already chosen, and
             # letting them occupy the LIMIT would crowd out fresh matches.
             query = " OR ".join('"' + d.replace('"', '""') + '"' for d in domains)
+            # the LIMIT covers budget PLUS every already-chosen row: dupes
+            # (tier-2 domain rows also FTS-match) consume limit slots after
+            # dedupe, and the fill guarantee should be obvious, not an
+            # inequality argument
             take(
-                self.search(query, scopes, limit=budget, statuses=("active",))
+                self.search(
+                    query,
+                    scopes,
+                    limit=budget + len(chosen),
+                    statuses=("active",),
+                )
             )
         return chosen
 
