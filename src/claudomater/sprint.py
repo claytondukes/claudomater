@@ -337,6 +337,18 @@ def import_doc(
     decides — the divergence stays visible instead of being resolved by
     whichever side was read most recently.
     """
+    if not doc.entries:
+        # `import` exists to seed FROM a status map, so a document with no
+        # entries means the wrong file or a truncated one — never a
+        # successful import of nothing. This also closes a data-loss path:
+        # `prune` treats every tracked key absent from the document as an
+        # orphan, so an empty document would delete the project's entire
+        # tracking and exit 0.
+        raise SprintError(
+            f"no status-map entries found — a sprint file carries them "
+            f"under `{DATA_BLOCK_KEY}:`; refusing to import (and to prune "
+            "against) a document that has none"
+        )
     now = utc_now()
     rows = [(project, e.key, e.epic, e.status, now) for e in doc.entries]
     with store.conn:

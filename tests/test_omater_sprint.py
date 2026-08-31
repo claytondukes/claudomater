@@ -654,6 +654,38 @@ class TestImportRefreshesMembershipLoudly:
         import_path(store, "sample", workfile, prune=True)
         assert "4-1-already-shipped" in statuses(store, "other")
 
+    def test_importing_a_file_with_no_status_map_is_refused(self, store, tmp_path):
+        """PR #13 round 8. `import` seeds from a sprint-status.yaml, so a
+        document carrying no entries means the operator pointed at the
+        wrong file or a truncated one - reporting "imported 0 row(s)" and
+        exiting 0 calls that success."""
+        wrong = tmp_path / "some-other.yaml"
+        wrong.write_text("project: other\nsomething_else:\n  key: value\n", encoding="utf-8")
+        with pytest.raises(SprintError, match="no status-map entries"):
+            import_path(store, "sample", wrong)
+
+    def test_an_empty_status_map_is_refused(self, store, tmp_path):
+        p = tmp_path / "empty.yaml"
+        p.write_text("project: x\ndevelopment_status:\n", encoding="utf-8")
+        with pytest.raises(SprintError, match="no status-map entries"):
+            import_path(store, "sample", p)
+
+    def test_pruning_against_the_wrong_file_cannot_wipe_tracking(
+        self, store, workfile, tmp_path
+    ):
+        """The severe case the refusal closes: --prune treats every
+        tracked key absent from the document as an orphan, so an empty
+        document made `import --prune wrong-file.yaml` delete the whole
+        project's tracking and exit 0."""
+        import_path(store, "sample", workfile)
+        before = statuses(store, "sample")
+        assert before
+        wrong = tmp_path / "some-other.yaml"
+        wrong.write_text("project: other\n", encoding="utf-8")
+        with pytest.raises(SprintError, match="no status-map entries"):
+            import_path(store, "sample", wrong, prune=True)
+        assert statuses(store, "sample") == before
+
     def test_orphans_are_empty_for_a_matching_file(self, store, workfile):
         import_path(store, "sample", workfile)
         assert orphaned_keys(store, "sample", SprintDoc.read(workfile)) == []
@@ -864,6 +896,13 @@ class TestSprintCli:
         assert main(self._args(tmp_path, "import", str(workfile), "--prune")) == EXIT_OK
         assert "pruned: 4-1-already-shipped" in capsys.readouterr().out
         assert main(self._args(tmp_path, "export", str(workfile))) == EXIT_OK
+
+    def test_importing_the_wrong_file_is_a_cli_error(self, tmp_path, capsys):
+        wrong = tmp_path / "some-other.yaml"
+        wrong.write_text("project: other\nkeys:\n  a: b\n", encoding="utf-8")
+        rc = main(self._args(tmp_path, "import", str(wrong)))
+        assert rc == EXIT_ERROR
+        assert "no status-map entries" in capsys.readouterr().err
 
     def test_status_json_is_machine_readable(self, tmp_path, workfile, capsys):
         assert main(self._args(tmp_path, "import", str(workfile))) == EXIT_OK
