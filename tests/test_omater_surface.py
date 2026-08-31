@@ -268,3 +268,21 @@ class TestCaseSensitivity:
         rules = SurfaceRules(surface=("app/**",), exclude=("README*",))
         assert classify_path("README.md", rules) == "excluded"
         assert classify_path("readme.md", rules) == "neutral"
+
+
+class TestWindowsShapedInputs:
+    """Copilot round-3 suppressed pair: the absolute check only caught a
+    leading '/'. A drive-letter path, a UNC path, or a backslash-separated
+    path slipped through - a PATTERN that never matches silently disables
+    the rule it declares, and a PATH that matches nothing classifies
+    neutral, the documented silent waiver."""
+
+    def test_windows_shaped_patterns_are_refused(self):
+        for bad in ("C:/app/src/**", "app\\src\\**", "\\\\server\\share"):
+            with pytest.raises(SurfaceError):
+                SurfaceRules(surface=(bad,))
+
+    def test_windows_shaped_paths_are_refused(self):
+        for bad in ("C:/app/src/App.tsx", "C:\\app\\x.ts", "app\\src\\App.tsx"):
+            with pytest.raises(SurfaceError, match="not repo-relative"):
+                classify_path(bad, RULES)

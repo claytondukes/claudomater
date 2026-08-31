@@ -41,6 +41,22 @@ from typing import Any
 _ROOT_DOTFILE_RE = re.compile(r"^\.[^/]+$")
 
 
+def _non_repo_relative(text: str) -> str | None:
+    """Why `text` cannot be a repo-relative POSIX path/pattern, or None.
+    Windows shapes included (round-3 finding): a drive-letter or
+    backslash-separated value would never match git's forward-slash
+    repo-relative output - a pattern like that silently disables the rule
+    it declares, and a path like that classifies neutral (the documented
+    silent waiver)."""
+    if text.startswith("/"):
+        return "absolute"
+    if "\\" in text:
+        return "backslash-separated (git paths are forward-slash)"
+    if re.match(r"^[A-Za-z]:", text):
+        return "a drive-letter path"
+    return None
+
+
 class SurfaceError(Exception):
     """The classification cannot be made honestly. Never swallowed: a
     silent pass is indistinguishable from a real pass at the call site."""
@@ -68,9 +84,10 @@ class SurfaceRules:
                     raise SurfaceError(
                         f"{name} patterns must be non-empty strings, got {pattern!r}"
                     )
-                if pattern.startswith("/"):
+                why = _non_repo_relative(pattern)
+                if why is not None:
                     raise SurfaceError(
-                        f"{name} pattern {pattern!r} is absolute - every "
+                        f"{name} pattern {pattern!r} is {why} - every "
                         "pattern is repo-relative"
                     )
         if not self.surface:
@@ -110,7 +127,7 @@ def classify_path(path: str, rules: SurfaceRules) -> str:
         path = path[2:]
     if not path:
         raise SurfaceError("empty path passed to classify_path")
-    if path.startswith("/") or ".." in path.split("/"):
+    if _non_repo_relative(path) or ".." in path.split("/"):
         raise SurfaceError(
             f"path is not repo-relative: {path!r}. Every pattern is "
             "repo-relative, so this path would match nothing and classify "
