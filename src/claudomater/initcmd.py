@@ -65,6 +65,11 @@ learning:
 #   ".": [src/, tests/]     #   start, agents only, FAIL-CLOSED): what a phase
 #   _bmad-output: [docs/]   #   agent may COMMIT. Undeclared repo = block all.
 
+# surface_rules: {{}}       # QA-board surface gate: SURFACE-TOUCHING and
+#   surface: [src/ui/**]    #   exclusion pattern lists (exclusions FIRST),
+#   exclude: [docs/**]      #   kept beside the process doc that governs them
+#   exclude_root_dotfiles: true
+
 ci:
   tier_on_push: fast       # fast | full
   tier_on_merge: full

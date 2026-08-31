@@ -192,6 +192,13 @@ class ProjectConfig:
     # no declared scope arms EMPTY - every gated commit blocks - which is
     # the fail-closed default until the project declares one.
     commit_scope: dict[str, list[str]] = field(default_factory=dict)
+    # Surface-classification rules for the QA-board gate (Phase 3
+    # deliverable 3): the project's SURFACE-TOUCHING / exclusion pattern
+    # lists, committed here so they are reviewable beside the process
+    # document that governs them (the predecessor hardcoded them in code
+    # and they drifted from the document within days). None = the project
+    # declares no surface gate.
+    surface_rules: Any = None
     ci_tier_on_push: str | None = None  # None -> deployment_type default
     ci_tier_on_merge: str = "full"
     gates: dict[str, Any] = field(default_factory=dict)
@@ -367,6 +374,16 @@ def load_project_config(root: Path | str) -> ProjectConfig:
             f"scope names, got {scopes!r}"
         )
 
+    # surface_rules validates through the engine's own loader (one source
+    # of truth for the block's grammar), failing at LOAD like every other
+    # knob. Lazy import: surface.py is engine code config merely wires.
+    from claudomater.surface import SurfaceError, rules_from_config
+
+    try:
+        surface_rules = rules_from_config(data.get("surface_rules"))
+    except SurfaceError as exc:
+        raise ConfigError(f"{PROJECT_CONFIG_NAME}: {exc}") from exc
+
     gates_raw = _require_mapping("gates", data.get("gates"))
     # Gates are scalar knobs, and the mapping rides verbatim into policy()
     # — the run-log snapshot json.dumps'es. yaml.safe_load happily produces
@@ -409,6 +426,7 @@ def load_project_config(root: Path | str) -> ProjectConfig:
         learning_scopes=list(scopes),
         artifact_roots=list(artifact_roots),
         commit_scope=commit_scope,
+        surface_rules=surface_rules,
         ci_tier_on_push=ci_raw.get("tier_on_push"),
         ci_tier_on_merge=ci_raw.get("tier_on_merge", "full"),
         gates=gates_raw,
