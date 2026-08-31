@@ -191,9 +191,9 @@ class TestRealCorpusReplays:
         unchecked and their sub-items unexecuted. The gate must block it -
         this is deliverable 4's reason to exist."""
         story = self._story_at(
-            "1dbdf53", "46-7-testyml-least-privilege-and-csp-doc.md"
+            "1dbdf534c5c370654893a4bffaa909cf900eef7b", "46-7-testyml-least-privilege-and-csp-doc.md"
         )
-        merged = merged_files_of(UI3, "5b26c746")
+        merged = merged_files_of(UI3, "5b26c746f7153b6209610dfdd36d34d44f260e0b")
         report = completion_report(story, merged)
         assert not report.ok
         assert len(report.unchecked) >= 3  # 3 top-level tasks + sub-items
@@ -208,7 +208,7 @@ class TestRealCorpusReplays:
         story = self._story_at(
             "HEAD", "46-7-testyml-least-privilege-and-csp-doc.md"
         )
-        merged = merged_files_of(UI3, "5b26c746")
+        merged = merged_files_of(UI3, "5b26c746f7153b6209610dfdd36d34d44f260e0b")
         assert completion_report(story, merged).ok
 
     def test_34_36_passes_boxes_but_its_missing_file_list_is_flagged(self):
@@ -219,7 +219,7 @@ class TestRealCorpusReplays:
         story = self._story_at(
             "HEAD", "34-36-timeseries-chart-click-semantics.md"
         )
-        merged = merged_files_of(UI3, "a5105e31")
+        merged = merged_files_of(UI3, "a5105e31abd06adfdcd5801fa6062d86052b13f5")
         report = completion_report(story, merged)
         assert report.unchecked == []
         assert any("File List" in p for p in report.problems)

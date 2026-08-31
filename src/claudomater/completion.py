@@ -183,7 +183,14 @@ def merged_files_of(repo: Path | str, sha: str) -> list[str]:
     the actual changeset, so this is the only supported source."""
     try:
         proc = subprocess.run(
-            ["git", "show", "--name-only", "--no-renames", "--format=", sha],
+            # quotepath=false: with it on (the default), git backslash-
+            # escapes non-ASCII filenames, which would falsely mismatch a
+            # File List carrying the real name. Sorted so the caller sees
+            # a deterministic list regardless of git's emit order.
+            [
+                "git", "-c", "core.quotepath=false",
+                "show", "--name-only", "--no-renames", "--format=", sha,
+            ],
             cwd=repo,
             capture_output=True,
             text=True,
@@ -194,4 +201,4 @@ def merged_files_of(repo: Path | str, sha: str) -> list[str]:
         raise CompletionError(
             f"git show {sha} failed in {repo}: {proc.stderr.strip()}"
         )
-    return [line for line in proc.stdout.splitlines() if line.strip()]
+    return sorted(line for line in proc.stdout.splitlines() if line.strip())
