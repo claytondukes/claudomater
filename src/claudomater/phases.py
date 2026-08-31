@@ -288,6 +288,34 @@ def extract_json_result(text: str) -> dict[str, Any] | None:
     return last
 
 
+def inject_lessons(
+    spec: PhaseSpec,
+    store: Any,
+    scopes: Sequence[str],
+    domains: Sequence[str] = (),
+    budget: int = 20,
+) -> PhaseSpec:
+    """Compose lesson retrieval into a phase spec — the ONE seam where the
+    prompt gains the injection block AND `injected_lessons` is set, so the
+    logged injected set can never drift from what the prompt actually
+    carries (two hand-rolled steps would eventually disagree, and the
+    provenance would lie). An empty retrieval returns the spec unchanged.
+
+        spec = inject_lessons(spec, store, cfg.learning_scopes, domains)
+        outcome = runner.run_phase(spec)
+    """
+    from claudomater.learnstore import injection_block
+
+    rows = store.lessons_for_phase(scopes, domains, budget=budget)
+    if not rows:
+        return spec
+    return replace(
+        spec,
+        prompt=f"{spec.prompt}\n\n{injection_block(rows)}",
+        injected_lessons=tuple(row["id"] for row in rows),
+    )
+
+
 RETRY_FEEDBACK_HEADER = "## Previous attempt failures (address these first)"
 
 # The fixed instruction frame the quoted evidence sits under (parity finding

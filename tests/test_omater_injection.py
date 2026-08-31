@@ -399,3 +399,50 @@ class TestRound4Hardening:
         )
         (ev,) = [e for e in log.events() if e["event"] == "lessons-applied"]
         assert ev["detail"] == {"applied": [], "rejected": [None], "reported": False}
+
+
+class TestInjectLessonsSeam:
+    """PR #12 round 5: one seam composes retrieval into the spec - the
+    prompt's block and the logged injected set come from the same rows, so
+    they can never drift apart."""
+
+    def test_prompt_block_and_injected_ids_come_from_the_same_rows(
+        self, tmp_path, store
+    ):
+        from claudomater.phases import inject_lessons
+
+        a = lesson(store, "a", domain="charts")
+        b = lesson(store, "b", domain="charts")
+        spec = PhaseSpec("dev", "m", "do the story")
+        injected = inject_lessons(spec, store, ["global"], ["charts"])
+        assert injected.prompt.startswith("do the story\n\n")
+        assert set(injected.injected_lessons) == {a, b}
+        for lid in injected.injected_lessons:
+            assert f"[L{lid}]" in injected.prompt
+        assert spec.injected_lessons == ()  # the caller's spec is untouched
+
+    def test_empty_retrieval_returns_the_spec_unchanged(self, store):
+        from claudomater.phases import inject_lessons
+
+        spec = PhaseSpec("dev", "m", "p")
+        assert inject_lessons(spec, store, ["global"], ["charts"]) is spec
+
+    def test_end_to_end_provenance_through_the_seam(self, tmp_path, store):
+        from claudomater.phases import inject_lessons
+
+        lid = lesson(store, "k", domain="charts")
+        log = RunLog.create(tmp_path)
+
+        class Applies:
+            def run(self, spec, model):
+                return ExecutionResult(text=GOOD_APPLYING % lid)
+
+        spec = inject_lessons(
+            PhaseSpec("dev", "m", "p"), store, ["global"], ["charts"]
+        )
+        outcome = PhaseRunner(tmp_path, log, Applies(), learn_store=store).run_phase(spec)
+        assert outcome.status == "verified"
+        (inj,) = [e for e in log.events() if e["event"] == "lessons-injected"]
+        (app,) = [e for e in log.events() if e["event"] == "lessons-applied"]
+        assert inj["detail"]["ids"] == [lid] and app["detail"]["applied"] == [lid]
+        assert store.conn.execute("SELECT refs FROM lesson").fetchone()["refs"] == 1
