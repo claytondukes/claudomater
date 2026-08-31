@@ -446,3 +446,17 @@ class TestInjectLessonsSeam:
         (app,) = [e for e in log.events() if e["event"] == "lessons-applied"]
         assert inj["detail"]["ids"] == [lid] and app["detail"]["applied"] == [lid]
         assert store.conn.execute("SELECT refs FROM lesson").fetchone()["refs"] == 1
+
+
+class TestCandidacyCountsDistinctAppliedRuns:
+    """PR #12 round 6: sessions defaults to 1 (the creating session), so
+    three uses inside ONE run read sessions=2 and falsely qualified -
+    candidacy now counts distinct applied runs from lesson_use."""
+
+    def test_heavy_use_in_a_single_run_is_not_a_candidate(self, store):
+        lid = lesson(store, "single-run-hot")
+        for _ in range(3):
+            store.record_applied([lid], "run-1")
+        assert store.candidates() == []
+        store.record_applied([lid], "run-2")  # second DISTINCT run qualifies
+        assert [c["topic"] for c in store.candidates()] == ["single-run-hot"]

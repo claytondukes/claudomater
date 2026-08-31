@@ -610,11 +610,17 @@ class LearnStore:
         automatically — auto-promotion is an instruction-injection channel
         (§12): a poisoned lesson must never reach always-loaded status
         without eyes on it."""
+        # distinct APPLIED runs come from lesson_use, not the sessions
+        # column: its schema default of 1 counts the creating session, so
+        # three uses inside a single run would read sessions=2 and falsely
+        # qualify — candidacy is a usage signal and must count usage
         return [
             dict(r)
             for r in self.conn.execute(
-                "SELECT * FROM lesson WHERE status='active' "
-                "AND refs >= 3 AND sessions >= 2 "
+                "SELECT lesson.* FROM lesson WHERE status='active' "
+                "AND refs >= 3 "
+                "AND (SELECT COUNT(*) FROM lesson_use "
+                "     WHERE lesson_use.lesson_id = lesson.id) >= 2 "
                 "ORDER BY refs DESC, sessions DESC, scope, domain, topic"
             ).fetchall()
         ]
