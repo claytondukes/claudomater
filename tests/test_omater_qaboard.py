@@ -47,6 +47,7 @@ class _StubBoard(BaseHTTPRequestHandler):
     sections: list[dict] = []
     posted: list[tuple[str, dict]] = []
     fail_next_post = False
+    post_body_override: str | None = None
 
     def log_message(self, *args):  # quiet
         pass
@@ -73,7 +74,10 @@ class _StubBoard(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(b'{"detail": "simulated board failure"}')
             return
-        body = json.dumps({"id": 555, **payload}).encode()
+        if type(self).post_body_override is not None:
+            body = type(self).post_body_override.encode()
+        else:
+            body = json.dumps({"id": 555, **payload}).encode()
         self.send_response(201)
         self.send_header("Content-Type", "application/json")
         self.end_headers()
@@ -374,3 +378,42 @@ class TestUi3FinishReplays:
         (event,) = [e for e in log.events if e[1] == "qa-board-waiver"]
         assert "CLAUDE.md" in event[2]["neutral"]
         assert _StubBoard.posted == []
+
+
+class TestRoundTwoHardening:
+    """Copilot round-2 suppressed findings, all three real."""
+
+    def test_a_sibling_story_prefix_cannot_credit_the_label(self, cfg):
+        """The digit-boundary lesson from the coverage regex, resurfacing:
+        startswith('34-3') matches a '34-36 ...' label, so a step authored
+        for one story could credit its sibling. The id must end at a
+        non-digit boundary."""
+        with pytest.raises(QaBoardError, match="must start with its story id"):
+            author_step(cfg, "34", "34-3", "34-36 walkthrough", "x.ts:1")
+        # legit punctuation after the id stays legal
+        step = author_step(cfg, "34", "34-3", "34-3: walkthrough", "x.ts:1")
+        assert step["step_key"] == "34-3-01"
+
+    def test_malformed_section_objects_are_a_typed_stop(self, cfg):
+        _StubBoard.sections = [{"epic_id": "34"}]  # no id field
+        with pytest.raises(QaBoardError, match="section"):
+            section_id_for_epic(cfg, "34")
+        _StubBoard.sections = [{"epic_id": "34", "id": "seven"}]
+        with pytest.raises(QaBoardError, match="section"):
+            section_id_for_epic(cfg, "34")
+
+    def test_a_board_response_without_an_id_is_a_loud_stop(self, cfg):
+        """posted.get('id') on a malformed payload either crashed untyped
+        (non-dict) or silently recorded board_step_id=None - the flow must
+        refuse a response it cannot anchor an audit trail to."""
+        from claudomater.qaboard import post_step
+
+        _StubBoard.post_body_override = "[]"
+        try:
+            with pytest.raises(QaBoardError, match="board response"):
+                post_step(cfg, 7, {"step_key": "34-3-01", "label": "34-3 x"})
+            _StubBoard.post_body_override = '{"ok": true}'
+            with pytest.raises(QaBoardError, match="board response"):
+                post_step(cfg, 7, {"step_key": "34-3-01", "label": "34-3 x"})
+        finally:
+            _StubBoard.post_body_override = None

@@ -166,10 +166,14 @@ def author_step(
     without one, so authoring such a step here would strand it."""
     if not label.strip():
         raise QaBoardError("a walkthrough step needs a non-empty label")
-    if not label.strip().startswith(story_id):
+    if not re.match(rf"{re.escape(story_id)}(?!\d)", label.strip()):
+        # the digit boundary is load-bearing (the coverage regex's own
+        # lesson): a bare startswith('34-3') matches a '34-36 ...' label,
+        # crediting a step to its sibling story
         raise QaBoardError(
-            f"the step label must start with its story id {story_id!r} - "
-            "coverage is matched on the label's story reference"
+            f"the step label must start with its story id {story_id!r} "
+            "(digit-bounded) - coverage is matched on the label's story "
+            "reference"
         )
     if not surface_proof.strip():
         raise QaBoardError(
@@ -232,11 +236,18 @@ def section_id_for_epic(cfg: QaBoardConfig, epic_id: str) -> int:
         )
     if len(matches) > 1:
         raise QaBoardError(f"multiple board sections claim epic {epic_id!r}")
-    return int(matches[0]["id"])
+    raw_id = matches[0].get("id")
+    try:
+        return int(raw_id)
+    except (TypeError, ValueError) as exc:
+        raise QaBoardError(
+            f"board section for epic {epic_id!r} has no usable id "
+            f"({raw_id!r}) - a malformed section is a stop, not a crash"
+        ) from exc
 
 
 def post_step(cfg: QaBoardConfig, section_id: int, step: dict) -> dict:
-    return _http_json(
+    posted = _http_json(
         f"{cfg.board_url}/sections/{section_id}/steps",
         {
             "step_key": step["step_key"],
@@ -244,6 +255,15 @@ def post_step(cfg: QaBoardConfig, section_id: int, step: dict) -> dict:
             "surface_proof": step.get("surface_proof"),
         },
     )
+    # the returned id anchors the audit trail (the run log records it);
+    # a response without one either crashed untyped (non-dict) or
+    # silently recorded None - refuse it instead
+    if not isinstance(posted, dict) or "id" not in posted:
+        raise QaBoardError(
+            f"board response to the step POST has no 'id' "
+            f"({str(posted)[:200]!r}) - cannot anchor the audit trail"
+        )
+    return posted
 
 
 def run_gate(cfg: QaBoardConfig, epic_id: str) -> None:
