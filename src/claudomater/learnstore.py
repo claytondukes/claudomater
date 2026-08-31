@@ -477,9 +477,14 @@ class LearnStore:
         matches); superseded rows never surface regardless."""
         if not scopes:
             return []
-        statuses = tuple(s for s in statuses if s in LIVE_STATUSES)
-        if not statuses:
-            return []
+        unknown = [s for s in statuses if s not in LIVE_STATUSES]
+        if unknown or not statuses:
+            # silently filtering would mask a programmer error as an empty
+            # result; superseded is not silently reachable either
+            raise LearnStoreError(
+                f"search statuses must be within {LIVE_STATUSES}, got "
+                f"{tuple(statuses)!r}"
+            )
         try:
             smarks = ",".join("?" * len(statuses))
             rows = self.conn.execute(
@@ -563,19 +568,24 @@ class LearnStore:
         the local-only lesson_use table). Callers pass ids already
         validated against the injected set — nothing here re-checks that,
         so validation stays where the provenance event is written."""
-        for lesson_id in lesson_ids:
-            cur = self.conn.execute(
-                "INSERT OR IGNORE INTO lesson_use (lesson_id, run_id) VALUES (?, ?)",
-                (lesson_id, run_id),
-            )
-            first_use_this_run = cur.rowcount == 1
-            self.conn.execute(
-                "UPDATE lesson SET refs = refs + 1"
-                + (", sessions = sessions + 1" if first_use_this_run else "")
-                + " WHERE id=?",
-                (lesson_id,),
-            )
-        self.conn.commit()
+        # one transaction for the whole batch: the caller swallows failures
+        # (a verified phase must not fail on accounting), so a mid-loop
+        # raise must roll back cleanly instead of leaving a partial open
+        # transaction holding the write lock
+        with self.conn:
+            for lesson_id in lesson_ids:
+                cur = self.conn.execute(
+                    "INSERT OR IGNORE INTO lesson_use (lesson_id, run_id) "
+                    "VALUES (?, ?)",
+                    (lesson_id, run_id),
+                )
+                first_use_this_run = cur.rowcount == 1
+                self.conn.execute(
+                    "UPDATE lesson SET refs = refs + 1"
+                    + (", sessions = sessions + 1" if first_use_this_run else "")
+                    + " WHERE id=?",
+                    (lesson_id,),
+                )
         # counters are volatile and never export - no write-through needed
 
     # ---- promotion: candidates surfaced, humans decide (design §6) ---------

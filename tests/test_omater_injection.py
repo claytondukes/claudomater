@@ -312,3 +312,27 @@ class TestRound1Hardening:
         )
         (ev2,) = [e for e in log2.events() if e["event"] == "lessons-applied"]
         assert ev2["detail"] == {"applied": [], "rejected": [], "reported": False}
+
+
+class TestRound2Hardening:
+    """PR #12 round 2."""
+
+    def test_unknown_search_statuses_fail_loudly(self, store):
+        lesson(store, "k")
+        for bad in (("superseded",), ("active", "bogus"), ()):
+            with pytest.raises(LearnStoreError, match="search statuses"):
+                store.search("rule", ["global"], statuses=bad)
+
+    def test_record_applied_failure_rolls_back_the_whole_batch(self, store):
+        """The caller swallows accounting failures, so a mid-batch raise
+        must leave no partial state and no open transaction holding the
+        write lock."""
+        import sqlite3 as sq
+
+        lid = lesson(store, "k")
+        with pytest.raises(sq.IntegrityError):
+            store.record_applied([lid, 999999], "run-x")  # second id: FK violation
+        assert store.conn.in_transaction is False
+        row = store.conn.execute("SELECT refs FROM lesson WHERE id=?", (lid,)).fetchone()
+        assert row["refs"] == 0  # the first increment rolled back with the batch
+        assert store.conn.execute("SELECT COUNT(*) FROM lesson_use").fetchone()[0] == 0
