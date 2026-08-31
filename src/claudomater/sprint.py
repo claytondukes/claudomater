@@ -84,6 +84,25 @@ class SprintError(Exception):
     pass
 
 
+# Text I/O for this module goes through exactly these two functions, so
+# newline handling is decided in ONE place. `newline=""` disables
+# universal-newline translation in both directions: without it
+# `read_text()` silently turns a CRLF file into LF (on every platform)
+# and `write_text()` turns LF into os.linesep on Windows — either of
+# which rewrites every line of a file this module promises not to touch.
+# The bug that motivated this was invisible to an in-memory test AND to
+# `round_trip_ok`, which compared normalized text to normalized text and
+# so returned True while the on-disk bytes changed.
+def _read_exact(path: Path) -> str:
+    with path.open("r", encoding="utf-8", newline="") as fh:
+        return fh.read()
+
+
+def _write_exact(path: Path, text: str) -> None:
+    with path.open("w", encoding="utf-8", newline="") as fh:
+        fh.write(text)
+
+
 @dataclass(frozen=True)
 class SprintEntry:
     """One status-map line: `34-36-timeseries-chart-click-semantics: backlog`."""
@@ -200,7 +219,7 @@ class SprintDoc:
 
     @classmethod
     def read(cls, path: Path) -> "SprintDoc":
-        return cls.parse(path.read_text(encoding="utf-8"))
+        return cls.parse(_read_exact(path))
 
     def render(self) -> str:
         return "".join(line.raw for line in self._lines)
@@ -301,7 +320,7 @@ def _write_atomically(path: Path, text: str) -> None:
     """
     tmp = path.with_name(f".{path.name}.omater-tmp")
     try:
-        tmp.write_text(text, encoding="utf-8")
+        _write_exact(tmp, text)
         os.chmod(tmp, stat.S_IMODE(path.stat().st_mode))
         os.replace(tmp, path)
     except BaseException:
@@ -377,7 +396,7 @@ def export(store: LearnStore, project: str, path: Path) -> bool:
     # one read: the same bytes are both parsed and compared against, so
     # the "did anything change" answer cannot be about a different revision
     # of the file than the one that was rewritten
-    source = path.read_text(encoding="utf-8")
+    source = _read_exact(path)
     doc = SprintDoc.parse(source)
     db = statuses(store, project)
     if not db:
@@ -403,7 +422,7 @@ def export(store: LearnStore, project: str, path: Path) -> bool:
 def round_trip_ok(path: Path) -> bool:
     """Parse-then-render equals the source bytes. The proof that the line
     model preserves a document it did not author."""
-    text = path.read_text(encoding="utf-8")
+    text = _read_exact(path)
     return SprintDoc.parse(text).render() == text
 
 

@@ -300,7 +300,9 @@ def _cmd_sprint(args: argparse.Namespace) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return EXIT_ERROR
     except OSError as exc:
-        print(f"error: cannot read the status file: {exc}", file=sys.stderr)
+        # `export`/`set` write as well as read, so a fixed "cannot read"
+        # would misdirect triage on a full disk or a failed rename
+        print(f"error: status file I/O failed ({path}): {exc}", file=sys.stderr)
         return EXIT_ERROR
     except sqlite3.DatabaseError as exc:
         print(f"error: learning DB failure: {exc}", file=sys.stderr)

@@ -385,6 +385,90 @@ class TestUi3AcceptanceProof:
         assert len(before) == len(after) and len(differing) == 1
 
 
+class TestOnDiskBytesSurviveExactly:
+    """PR #13 round 1. The in-memory CRLF test proved nothing about FILES:
+    `Path.read_text()` uses universal newlines, so a CRLF file was
+    normalized to LF on read and rewritten with different bytes - and
+    `round_trip_ok()` returned True while doing it, which is a proof
+    function that a live defect could satisfy. Every check here goes
+    through the filesystem."""
+
+    CRLF = (
+        b"# a curated header\r\n"
+        b"development_status:\r\n"
+        b"  epic-1: in-progress\r\n"
+        b"  1-1-a-story: backlog  # with a trailing comment\r\n"
+        b"# STRUCTURAL CHANGE LOG\r\n"
+        b"# 2026-01-01: something structural happened\r\n"
+    )
+
+    def test_round_trip_ok_verdict_is_backed_by_the_actual_bytes(self, tmp_path):
+        """Asserting `round_trip_ok(p) is True` would pass on the BUG -
+        it returned True by comparing normalized text to normalized text.
+        The verdict has to agree with a byte-level comparison, which is
+        the thing it claims to be reporting."""
+        p = tmp_path / "crlf.yaml"
+        p.write_bytes(self.CRLF)
+        truly_exact = SprintDoc.read(p).render().encode("utf-8") == p.read_bytes()
+        assert round_trip_ok(p) == truly_exact
+        assert truly_exact
+        assert p.read_bytes() == self.CRLF  # the check itself must not rewrite
+
+    def test_reading_a_crlf_file_preserves_its_line_endings(self, tmp_path):
+        p = tmp_path / "crlf.yaml"
+        p.write_bytes(self.CRLF)
+        assert SprintDoc.read(p).render().encode("utf-8") == self.CRLF
+
+    def test_a_noop_export_leaves_crlf_bytes_untouched(self, store, tmp_path):
+        p = tmp_path / "crlf.yaml"
+        p.write_bytes(self.CRLF)
+        import_path(store, "sample", p)
+        assert export(store, "sample", p) is False
+        assert p.read_bytes() == self.CRLF
+
+    def test_a_flip_on_a_crlf_file_changes_only_the_status_token(
+        self, store, tmp_path
+    ):
+        p = tmp_path / "crlf.yaml"
+        p.write_bytes(self.CRLF)
+        import_path(store, "sample", p)
+        set_status(store, "sample", "1-1-a-story", "done", p)
+        assert p.read_bytes() == self.CRLF.replace(
+            b"1-1-a-story: backlog", b"1-1-a-story: done"
+        )
+
+    def test_a_lone_cr_is_not_treated_as_a_line_break(self, store, tmp_path):
+        """`splitlines()` breaks on \\r, \\x0b, \\x0c and U+2028 too; a
+        status value containing one would silently split a line in two.
+        The parser must refuse it rather than reformat the document."""
+        p = tmp_path / "odd.yaml"
+        p.write_bytes(b"development_status:\n  epic-1: do\x0bne\n")
+        with pytest.raises(SprintError, match="unparseable entry"):
+            SprintDoc.read(p)
+
+    def test_a_file_with_no_trailing_newline_round_trips_on_disk(self, tmp_path):
+        p = tmp_path / "nonl.yaml"
+        raw = b"development_status:\n  epic-1: done"
+        p.write_bytes(raw)
+        assert round_trip_ok(p)
+        assert SprintDoc.read(p).render().encode("utf-8") == raw
+
+    def test_a_flip_never_appends_a_trailing_newline(self, store, tmp_path):
+        p = tmp_path / "nonl.yaml"
+        p.write_bytes(b"development_status:\n  epic-1: backlog")
+        import_path(store, "sample", p)
+        set_status(store, "sample", "epic-1", "done", p)
+        assert p.read_bytes() == b"development_status:\n  epic-1: done"
+
+    def test_utf8_content_outside_the_status_map_survives(self, store, tmp_path):
+        p = tmp_path / "utf8.yaml"
+        raw = "development_status:\n  epic-1: backlog  # café — naïve\n".encode("utf-8")
+        p.write_bytes(raw)
+        import_path(store, "sample", p)
+        set_status(store, "sample", "epic-1", "done", p)
+        assert p.read_bytes() == raw.replace(b"epic-1: backlog", b"epic-1: done")
+
+
 class TestTheWriterAndItsExportNeverDisagree:
     """Write-through means the file write is PART of the operation: if it
     cannot land, the DB write must not survive it either."""
@@ -477,7 +561,30 @@ class TestSprintCli:
     def test_a_missing_file_is_a_cli_error_not_a_traceback(self, tmp_path, capsys):
         rc = main(self._args(tmp_path, "import", str(tmp_path / "nope.yaml")))
         assert rc == EXIT_ERROR
-        assert "cannot read the status file" in capsys.readouterr().err
+        err = capsys.readouterr().err
+        assert "status file I/O failed" in err and "nope.yaml" in err
+
+    def test_a_write_failure_is_not_reported_as_a_read_failure(
+        self, tmp_path, workfile, capsys, monkeypatch
+    ):
+        """PR #13 round 1: `export`/`set` write as well as read, so a
+        fixed 'cannot read' message would misdirect triage."""
+        import claudomater.sprint as sprint_mod
+
+        assert main(self._args(tmp_path, "import", str(workfile))) == EXIT_OK
+        capsys.readouterr()
+
+        def boom(path, text):
+            raise OSError("No space left on device")
+
+        monkeypatch.setattr(sprint_mod, "_write_atomically", boom)
+        rc = main(
+            self._args(tmp_path, "set", "4-3-being-worked", "review", str(workfile))
+        )
+        assert rc == EXIT_ERROR
+        err = capsys.readouterr().err
+        assert "No space left on device" in err
+        assert "cannot read" not in err
 
     def test_export_reports_already_in_sync(self, tmp_path, workfile, capsys):
         assert main(self._args(tmp_path, "import", str(workfile))) == EXIT_OK
