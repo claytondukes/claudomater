@@ -754,3 +754,16 @@ class TestChainLinksWhenAnEarlierGenerationWins:
         ).fetchall()
         assert first["superseded_by"] == last["id"]
         assert last["superseded_by"] is None
+
+
+class TestOpenLeavesNoOpenTransaction:
+    """PR #11 round 6: the FTS integrity-check runs as an INSERT, which
+    implicitly begins a write transaction - the success path must commit
+    it, or the open store holds the write lock for its whole lifetime and
+    starves concurrent writers (the WAL + busy-timeout serialization the
+    design pins)."""
+
+    def test_read_only_open_holds_no_transaction(self, tmp_path):
+        s = LearnStore.open(tmp_path / "l.db")
+        assert s.conn.in_transaction is False
+        s.close()

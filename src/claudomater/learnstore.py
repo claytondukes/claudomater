@@ -234,6 +234,10 @@ class LearnStore:
                 "INSERT INTO lesson_fts(lesson_fts, rank) "
                 "VALUES ('integrity-check', 1)"
             )
+            # the command INSERT implicitly opened a write transaction;
+            # returning without committing would hold the write lock for
+            # the store's whole lifetime and starve concurrent writers
+            self.conn.commit()
             return False
         except sqlite3.DatabaseError:
             self.conn.execute(
