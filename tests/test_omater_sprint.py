@@ -1436,3 +1436,36 @@ class TestUi3RetroGateProof:
         violations, distribution = retro_ban_scan(UI3_SPRINT_STATUS)
         assert violations == []
         assert set(distribution) <= {"fable-review-required", "done"}
+
+
+class TestRetroBanScanRoundTwo:
+    """Copilot round-1 findings on the gate itself."""
+
+    def test_a_retro_line_with_no_status_token_fails_loudly(self, tmp_path):
+        """`epic-1-retrospective:` (bare, or comment-only) is a line the
+        gate cannot meaningfully evaluate - recording an empty-string
+        status in the distribution read as CLEAN, the silent-pass shape
+        this module refuses everywhere else."""
+        from claudomater.sprint import retro_ban_scan
+
+        for tail in ("", " ", " # comment only"):
+            f = tmp_path / "bare.yaml"
+            f.write_text(
+                f"development_status:\n  epic-1-retrospective:{tail}\n",
+                encoding="utf-8",
+            )
+            with pytest.raises(SprintError, match="no status token"):
+                retro_ban_scan(f)
+
+    def test_check_retros_prints_the_line_exactly_as_on_disk(
+        self, workfile, capsys
+    ):
+        """The CLI stripped leading indentation off the violation line,
+        hiding the exact on-disk content the operator is about to fix."""
+        rc = main(["sprint", "check-retros", str(workfile)])
+        assert rc == EXIT_ERROR
+        out = capsys.readouterr().out
+        assert "  epic-3-retrospective: optional" in out  # indent intact
+        # the STRIPPED form (separator's single space glued straight onto
+        # the key) must not appear - that's what hiding the indent looks like
+        assert ": epic-3-retrospective" not in out

@@ -632,8 +632,8 @@ def add_epic(
             # visibly belong to its block would parse fine and mislead
             # every human reader
             raise SprintError(
-                f"story key {skey!r} does not start with {epic!r}- : a story "
-                f"created under {epic_key} must carry its epic's prefix"
+                f"story key {skey!r} must carry its epic's prefix "
+                f"{epic + '-'!r} - it is being created under {epic_key}"
             )
         if skey.endswith(_RETRO_SUFFIX) or skey.startswith("epic-"):
             raise SprintError(
@@ -762,6 +762,15 @@ def retro_ban_scan(path: Path) -> tuple[list[tuple[int, str]], dict[str, int]]:
         if m is None:
             continue
         status = m.group("status")
+        if not status:
+            # a retro line with NO status token (bare colon, comment-only)
+            # is one the gate cannot meaningfully evaluate - recording an
+            # empty status read as CLEAN, the silent-pass shape this
+            # module refuses everywhere else
+            raise SprintError(
+                f"{path}:{i}: retrospective line has no status token "
+                f"({raw.rstrip()!r}) - the gate cannot evaluate it"
+            )
         distribution[status] = distribution.get(status, 0) + 1
         if status == BANNED_RETRO_STATUS:
             violations.append((i, raw.rstrip("\r\n")))

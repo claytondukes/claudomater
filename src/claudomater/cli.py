@@ -423,7 +423,10 @@ def _cmd_sprint_check_retros(args: argparse.Namespace) -> int:
         return EXIT_ERROR
     if violations:
         for line_no, raw in violations:
-            print(f"{path}:{line_no}: {raw.strip()}")
+            # the line exactly as on disk (scan strips only the EOL):
+            # trimming indentation would hide the content the operator is
+            # about to go fix
+            print(f"{path}:{line_no}: {raw}")
         print(
             f"FATAL: {len(violations)} banned "
             f"'{sprint_mod.BANNED_RETRO_STATUS}' retrospective status(es) "
