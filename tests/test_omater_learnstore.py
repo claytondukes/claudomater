@@ -564,3 +564,43 @@ class TestSyncGitErrorHandling:
         s = self._sync_with_patched_git(synced_store, monkeypatch, fail_on="add")
         with pytest.raises(LearnStoreError, match="git add failed"):
             sync(s)
+
+
+class TestTopicScrubIdentity:
+    """PR #11 round 2: the topic is part of the KEY, so its scrubbed form
+    must be the one identity everywhere - lookup, storage, import, and
+    error text. Scrubbing only at insert split the identity: refine missed
+    the row, a second add hit the unique index as an uncaught
+    IntegrityError, and the error string echoed the secret."""
+
+    SECRET_TOPIC = "leak-hunter2-secret-endpoint"
+
+    def test_scrub_altered_topic_is_one_lesson_across_verbs(self, store):
+        store.add("global", "ci", self.SECRET_TOPIC, "r", "w")
+        # the same raw topic addresses the same lesson for every verb
+        store.refine("global", "ci", self.SECRET_TOPIC, rule="refined")
+        new_id = store.supersede("global", "ci", self.SECRET_TOPIC, "superseded judgment", "why")
+        (live,) = store.lessons(["global"])
+        assert live["id"] == new_id
+        assert "hunter2-secret" not in live["topic"]
+
+    def test_second_add_is_a_classify_error_that_never_echoes_the_secret(self, store):
+        store.add("global", "ci", self.SECRET_TOPIC, "r", "w")
+        with pytest.raises(LearnStoreError, match="classify") as exc_info:
+            store.add("global", "ci", self.SECRET_TOPIC, "r2", "w2")
+        assert "hunter2-secret" not in str(exc_info.value)
+
+    def test_import_scrubs_the_topic_too(self, store, tmp_path):
+        foreign = tmp_path / "foreign"
+        foreign.mkdir()
+        row = {
+            "scope": "global", "domain": "ci", "topic": self.SECRET_TOPIC,
+            "rule": "r", "why": "w", "status": "active",
+            "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
+        }
+        (foreign / "global.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
+        store.import_dir(foreign)
+        (imported,) = store.lessons(["global"])
+        assert "hunter2-secret" not in imported["topic"]
+        exported = (tmp_path / "lessons" / "global.jsonl").read_text(encoding="utf-8")
+        assert "hunter2-secret" not in exported

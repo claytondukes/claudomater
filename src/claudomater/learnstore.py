@@ -261,8 +261,14 @@ class LearnStore:
     def add(self, scope: str, domain: str, topic: str, rule: str, why: str) -> int:
         """A genuinely NEW lesson. Refuses an existing live key — the caller
         must classify the conflict as refine or supersede, never silently
-        overwrite a judgment."""
+        overwrite a judgment.
+
+        The topic is scrubbed ONCE at entry and that form is the key for
+        lookup, storage, and error text alike: scrubbing only at insert let
+        a deny-listed topic miss the live-row check, hit the unique index
+        as an uncaught IntegrityError, and echo the secret in the error."""
         self._validate_key(scope, domain, topic)
+        topic = self._scrub(topic)
         if self._live_row(scope, domain, topic) is not None:
             raise LearnStoreError(
                 f"a live lesson already exists for ({scope}, {domain}, {topic}); "
@@ -275,7 +281,7 @@ class LearnStore:
             (
                 scope,
                 domain,
-                self._scrub(topic),
+                topic,
                 self._scrub(rule),
                 self._scrub(why),
                 ts,
@@ -295,8 +301,10 @@ class LearnStore:
         why: str | None = None,
     ) -> int:
         """Merge into the EXISTING row (same judgment, better wording).
-        At least one of rule/why must change."""
+        At least one of rule/why must change. The topic is normalized to
+        its scrubbed form for lookup and messaging (same rule as add)."""
         self._validate_key(scope, domain, topic)
+        topic = self._scrub(topic)
         row = self._live_row(scope, domain, topic)
         if row is None:
             raise LearnStoreError(
@@ -320,8 +328,11 @@ class LearnStore:
     def supersede(self, scope: str, domain: str, topic: str, rule: str, why: str) -> int:
         """A NEW judgment replacing the old one: new row becomes the live
         head, the old row keeps its key as the audit trail
-        (status=superseded, superseded_by -> the new row)."""
+        (status=superseded, superseded_by -> the new row). The topic is
+        normalized to its scrubbed form for lookup, storage, and messaging
+        (same rule as add)."""
         self._validate_key(scope, domain, topic)
+        topic = self._scrub(topic)
         old = self._live_row(scope, domain, topic)
         if old is None:
             raise LearnStoreError(
@@ -340,7 +351,7 @@ class LearnStore:
             (
                 scope,
                 domain,
-                self._scrub(topic),
+                topic,
                 self._scrub(rule),
                 self._scrub(why),
                 ts,
@@ -508,7 +519,10 @@ class LearnStore:
         stats: ImportStats,
         intended: dict[tuple[str, str, str, str], str],
     ) -> None:
-        key = (row["scope"], row["domain"], row["topic"])
+        # topic joins rule/why under the scrub (it is persisted and
+        # exported); scrubbing is idempotent, so an already-clean corpus
+        # keeps its identity and the round-trip stays byte-exact
+        key = (row["scope"], row["domain"], self._scrub(row["topic"]))
         generation = (*key, row["created_at"])
         local = self.conn.execute(
             "SELECT * FROM lesson WHERE scope=? AND domain=? AND topic=? "
@@ -625,8 +639,9 @@ def sync(
                 "git pull --ff-only failed - resolve the export repo by hand "
                 f"before syncing: {pull.stderr.strip()}"
             )
+    # import_dir ends with the write-through export (export_dir is
+    # guaranteed configured here), so no second export pass is needed
     stats = store.import_dir()
-    store.export()
     add = _git(repo, "add", "--", str(export_dir))
     if add.returncode != 0:
         raise LearnStoreError(f"git add failed: {add.stderr.strip()}")
