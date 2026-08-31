@@ -183,10 +183,23 @@ def author_step(
         )
     path = spec_path(cfg, epic_id)
     spec = load_spec(path, epic_id)
+    label = label.strip()
+    surface_proof = surface_proof.strip()
+    # IDEMPOTENT on identical content: a retry after a mid-flow crash
+    # (board 500, gate failure) re-runs this whole flow, and computing
+    # the next sequence number again would append a SECOND spec entry for
+    # the same story. Same story + same label + same proof = the same
+    # step, reused; the board POST is idempotent server-side on its key.
+    for existing in spec["steps"]:
+        if (
+            existing.get("label") == label
+            and existing.get("surface_proof") == surface_proof
+        ):
+            return dict(existing)
     step = {
         "step_key": next_step_key(spec, story_id),
-        "label": label.strip(),
-        "surface_proof": surface_proof.strip(),
+        "label": label,
+        "surface_proof": surface_proof,
     }
     if any(s.get("step_key") == step["step_key"] for s in spec["steps"]):
         raise QaBoardError(f"step_key collision: {step['step_key']}")
@@ -319,6 +332,11 @@ def finish_story(
             story_key=story_id,
         )
         return {"ok": True, "step_required": False, **verdict.as_dict()}
+    # normalize ONCE here so the intent event, the spec, and the board all
+    # carry the same bytes - logging raw values while author_step stripped
+    # them let the audit trail disagree with what was persisted
+    step_label = (step_label or "").strip()
+    surface_proof = (surface_proof or "").strip()
     if not step_label or not surface_proof:
         raise QaBoardError(
             f"story {story_id} touched {len(verdict.surface)} surface "

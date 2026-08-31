@@ -295,9 +295,10 @@ class TestFinishFlow:
             finish_story("34-36", ["app/src/Widget.tsx"], RULES, cfg, _Log())
 
     def test_a_board_500_stops_the_flow_after_authoring(self, cfg):
-        """The spec append lands (idempotent to retry: the same step_key
-        collides loudly), the POST failure stops the flow, and no
-        gate-pass event is minted."""
+        """The spec append lands, the POST failure stops the flow, and no
+        gate-pass event is minted. Retry semantics live in
+        test_a_retry_after_a_mid_flow_crash_converges: identical content
+        reuses the appended step instead of minting a sibling."""
         _StubBoard.fail_next_post = True
         log = _Log()
         with pytest.raises(QaBoardError, match="board 500"):
@@ -429,3 +430,37 @@ class TestRoundTwoHardening:
         _StubBoard.sections = ["oops", {"epic_id": "34", "id": 7}]
         with pytest.raises(QaBoardError, match="section"):
             section_id_for_epic(cfg, "34")
+
+    def test_a_retry_after_a_mid_flow_crash_converges(self, cfg):
+        """Round-5 (the docstring's claim was wrong, and the truth was
+        worse): a naive retry re-ran author_step, computed the NEXT
+        sequence number, and appended a SECOND spec entry for the same
+        story. Identical content now reuses the existing step, so
+        retry-after-crash converges: spec unchanged, POST idempotent
+        server-side, gate re-run harmless."""
+        log = _Log()
+        _StubBoard.fail_next_post = True
+        with pytest.raises(QaBoardError, match="board 500"):
+            finish_story(
+                "34-36", ["app/src/W.tsx"], RULES, cfg, log,
+                step_label="34-36 walkthrough", surface_proof="app/src/W.tsx:1",
+            )
+        result = finish_story(
+            "34-36", ["app/src/W.tsx"], RULES, cfg, log,
+            step_label="34-36 walkthrough", surface_proof="app/src/W.tsx:1",
+        )
+        assert result["ok"] and result["step_key"] == "34-36-01"
+        spec = json.loads(spec_path(cfg, "34").read_text())
+        assert [s["step_key"] for s in spec["steps"]] == ["34-36-01"]  # ONE entry
+
+    def test_the_intent_event_records_what_gets_persisted(self, cfg):
+        """Round-5: the intent event logged raw values while author_step
+        stripped them - the audit trail must match the persisted bytes."""
+        log = _Log()
+        finish_story(
+            "34-36", ["app/src/W.tsx"], RULES, cfg, log,
+            step_label="  34-36 walkthrough  ", surface_proof=" app/src/W.tsx:1 ",
+        )
+        intent = [e for e in log.events if e[1] == "qa-board-step"][0][2]
+        assert intent["step_label"] == "34-36 walkthrough"
+        assert intent["surface_proof"] == "app/src/W.tsx:1"
