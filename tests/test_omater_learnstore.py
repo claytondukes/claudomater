@@ -941,11 +941,32 @@ class TestRound10Hardening:
             return conn
 
         monkeypatch.setattr(sqlite3, "connect", capturing_connect)
-        with pytest.raises(sqlite3.DatabaseError):
+        # round 11: post-connect sqlite errors surface as the store's OWN
+        # typed error (a CLI caller must never see a raw sqlite traceback)
+        with pytest.raises(LearnStoreError, match="cannot initialize"):
             LearnStore.open(db)
         (conn,) = captured
         with pytest.raises(sqlite3.ProgrammingError, match="closed"):
             conn.execute("SELECT 1")
+
+    def test_cli_reports_an_uninitializable_db_without_a_traceback(
+        self, tmp_path, capsys
+    ):
+        """PR #11 round 11: the CLI catches LearnStoreError - so open() must
+        emit it for schema mismatches, not raw sqlite3.DatabaseError."""
+        db = tmp_path / "cli.db"
+        pre = sqlite3.connect(str(db))
+        pre.execute("CREATE TABLE lesson (id INTEGER PRIMARY KEY, other TEXT)")
+        pre.commit()
+        pre.close()
+        rc = main([
+            "learn", "list", "--scope", "global",
+            "--user-config", str(tmp_path / "missing.yaml"),
+            "--db", str(db), "--export-dir", str(tmp_path / "lessons"),
+        ])
+        assert rc == EXIT_ERROR
+        err = capsys.readouterr().err
+        assert "cannot initialize" in err
 
     def test_sync_creates_a_missing_export_subdir_inside_the_repo(self, tmp_path):
         """PR #11 round 10: a fresh clone has the REPO but not the export

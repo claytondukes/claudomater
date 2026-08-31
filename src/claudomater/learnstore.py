@@ -247,6 +247,16 @@ class LearnStore:
                 now=now,
             )
             store._fts_check_and_rebuild()
+        except sqlite3.DatabaseError as exc:
+            # typed errors at the source: a schema mismatch (a conflicting
+            # pre-existing table, missing FTS5) must reach CLI callers as
+            # the store's own error, never a raw sqlite traceback
+            conn.close()
+            raise LearnStoreError(
+                f"learning DB at {db_path} cannot initialize ({exc}); it is "
+                "a rebuildable local index — delete it and rebuild with "
+                "`omater learn import`"
+            ) from exc
         except BaseException:
             # a failed open must not leak the connection (open fd, and a
             # held lock on some platforms makes recovery harder)

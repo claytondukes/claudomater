@@ -102,7 +102,8 @@ omater usage         # guardrail snapshot + decision
 | `omater notify KIND MESSAGE` | Send a Slack notification through the configured webhook |
 | `omater learn add\|supersede --scope S --domain D --topic T --rule R --why W` | Classified lesson writes (scrubbed via `--project`'s `secrets_deny`) |
 | `omater learn refine --scope S --domain D --topic T [--rule R] [--why W]` | Merge better wording into the existing lesson (at least one of `--rule`/`--why`) |
-| `omater learn list\|search [--scope S]` | Live lessons / FTS over rule+why (superseded rows never surface) |
+| `omater learn list [--scope S] [--domain D]` | Live lessons (superseded rows never surface) |
+| `omater learn search QUERY [--scope S]` | FTS over rule+why, live rows only |
 | `omater learn export\|import\|sync [--push]` | Deterministic per-scope JSONL export; import (latest wins); pull→import→export→commit |
 | `omater resume\|abort\|approve [--run ID]` | Write a control event a paused/escalated run consumes (also under `omater control …`) |
 | `omater hook pre-tool-use --root PATH` | The provisioned PreToolUse write fence (reads the hook payload on stdin) |
