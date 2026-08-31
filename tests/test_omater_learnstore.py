@@ -1149,3 +1149,41 @@ class TestSyncIgnoresUnrelatedRepoState:
         with pytest.raises(LearnStoreError, match="ff-only|fast-forward"):
             sync(s)
         s.close()
+
+
+class TestStagedCheckMatchesTheCommitPathspec:
+    """PR #14 round 3: after the commit went pathspec-limited, the
+    "anything staged?" check still looked at the whole export DIR - so an
+    operator-staged stray under the directory made sync attempt a commit
+    whose pathspec had nothing to commit, failing the sync for work that
+    is not sync's."""
+
+    def test_an_operator_staged_stray_under_the_export_dir_is_ignored(
+        self, tmp_path
+    ):
+        origin = tmp_path / "origin.git"
+        subprocess.run(["git", "init", "-q", "--bare", str(origin)], check=True)
+        repo = tmp_path / "dotfiles"
+        subprocess.run(["git", "clone", "-q", str(origin), str(repo)], check=True)
+        git(repo, "config", "user.email", "t@t")
+        git(repo, "config", "user.name", "t")
+        (repo / "seed.txt").write_text("x", encoding="utf-8")
+        git(repo, "add", "-A")
+        git(repo, "commit", "-q", "-m", "seed")
+        git(repo, "push", "-q", "-u", "origin", "HEAD")
+        export_dir = repo / "omater" / "lessons"
+        s = LearnStore.open(tmp_path / "l.db", export_dir=export_dir,
+                            now=ticking_now())
+        seed(s)
+        assert sync(s)["committed"] is True  # corpus committed once
+        # the operator stages a NON-jsonl stray under the export dir
+        (export_dir / ".keep").write_text("", encoding="utf-8")
+        git(repo, "add", str(export_dir / ".keep"))
+        # nothing in the CORPUS changed, so sync must be a clean no-op -
+        # not a failed commit over the operator's stray
+        result = sync(s)
+        assert result["committed"] is False
+        # the stray is still staged, exactly as the operator left it
+        staged = git(repo, "diff", "--cached", "--name-only").stdout
+        assert "omater/lessons/.keep" in staged
+        s.close()

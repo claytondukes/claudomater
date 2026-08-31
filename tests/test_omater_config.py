@@ -412,3 +412,35 @@ class TestUserConfig:
         path.write_text("usage:\n  degrade_path: claude-opus-5\n", encoding="utf-8")
         with pytest.raises(ConfigError, match="must be a list"):
             load_user_config(path)
+
+
+class TestArtifactRootsConfig:
+    """PR #14 round 3: `data.get("artifact_roots") or []` swallowed falsy
+    non-list values (false, '', 0) as "not set" instead of raising - a
+    malformed declaration must fail loudly like every other knob."""
+
+    def test_falsy_non_list_values_are_rejected(self, tmp_path):
+        for bad in ("artifact_roots: false\n", "artifact_roots: ''\n",
+                    "artifact_roots: 0\n"):
+            with pytest.raises(ConfigError, match="artifact_roots"):
+                load_project_config(write_project(tmp_path, f"project: p\n{bad}"))
+
+    def test_a_string_is_rejected_not_exploded_into_characters(self, tmp_path):
+        with pytest.raises(ConfigError, match="artifact_roots"):
+            load_project_config(
+                write_project(tmp_path, "project: p\nartifact_roots: _bmad-output\n")
+            )
+
+    def test_null_and_absent_both_mean_no_declared_roots(self, tmp_path):
+        assert load_project_config(
+            write_project(tmp_path, "project: p\nartifact_roots:\n")
+        ).artifact_roots == []
+        assert load_project_config(
+            write_project(tmp_path, "project: p\n")
+        ).artifact_roots == []
+
+    def test_a_valid_list_loads(self, tmp_path):
+        cfg = load_project_config(
+            write_project(tmp_path, "project: p\nartifact_roots: [_bmad-output]\n")
+        )
+        assert cfg.artifact_roots == ["_bmad-output"]

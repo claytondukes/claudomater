@@ -296,7 +296,11 @@ def load_project_config(root: Path | str) -> ProjectConfig:
     ):
         raise ConfigError(f"{PROJECT_CONFIG_NAME}: secrets_deny must be a list of names")
 
-    artifact_roots = data.get("artifact_roots") or []
+    # explicit None check: `or []` would swallow falsy non-list values
+    # (false, '', 0) as "not set" instead of failing validation
+    artifact_roots = data.get("artifact_roots")
+    if artifact_roots is None:
+        artifact_roots = []
     if not isinstance(artifact_roots, list) or not all(
         isinstance(s, str) and s for s in artifact_roots
     ):

@@ -1045,7 +1045,13 @@ def sync(
     add = _git(repo, "add", "--", *(str(p) for p in export_files))
     if add.returncode != 0:
         raise LearnStoreError(f"git add failed: {add.stderr.strip()}")
-    staged = _git(repo, "diff", "--cached", "--quiet", "--", str(export_dir))
+    # the SAME pathspec as the commit below: checking the whole directory
+    # let an operator-staged stray under it trigger a commit whose own
+    # pathspec had nothing to commit (PR #14 round 3)
+    staged = _git(
+        repo, "diff", "--cached", "--quiet", "--",
+        *(str(pp) for pp in export_files),
+    )
     # --quiet exit codes: 0 = no changes, 1 = changes, >1 = the diff itself
     # failed — conflating an error with "changes present" would commit blind
     if staged.returncode > 1:
