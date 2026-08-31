@@ -298,6 +298,15 @@ def section_id_for_epic(cfg: QaBoardConfig, epic_id: str) -> int:
 
 
 def post_step(cfg: QaBoardConfig, section_id: int, step: dict) -> dict:
+    # public function, so the invariant is enforced HERE too: every step
+    # this flow posts is non-waived, and the board strands a non-waived
+    # step without a proof - a caller bypassing author_step must not be
+    # able to POST null
+    if not str(step.get("surface_proof") or "").strip():
+        raise QaBoardError(
+            f"step {step.get('step_key')!r} has no surface_proof - "
+            "non-waived steps must carry one before reaching the board"
+        )
     posted = _http_json(
         f"{cfg.board_url}/sections/{section_id}/steps",
         {

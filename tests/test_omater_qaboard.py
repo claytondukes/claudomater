@@ -409,14 +409,17 @@ class TestRoundTwoHardening:
         refuse a response it cannot anchor an audit trail to."""
         from claudomater.qaboard import post_step
 
+        step = {
+            "step_key": "34-3-01", "label": "34-3 x", "surface_proof": "x.ts:1",
+        }
         _StubBoard.post_body_override = "[]"
         try:
             with pytest.raises(QaBoardError, match="board response"):
-                post_step(cfg, 7, {"step_key": "34-3-01", "label": "34-3 x"})
+                post_step(cfg, 7, step)
             for bad in ('{"ok": true}', '{"id": null}', '{"id": "abc"}'):
                 _StubBoard.post_body_override = bad
                 with pytest.raises(QaBoardError, match="board response"):
-                    post_step(cfg, 7, {"step_key": "34-3-01", "label": "34-3 x"})
+                    post_step(cfg, 7, step)
         finally:
             _StubBoard.post_body_override = None
 
@@ -497,3 +500,16 @@ class TestRoundTwoHardening:
         )
         with pytest.raises(QaBoardError, match="duplicate step_key"):
             load_spec(path, "34")
+
+    def test_post_step_refuses_a_proofless_step(self, cfg):
+        """Round-12: a caller bypassing author_step could POST null
+        surface_proof; the board strands non-waived steps without one."""
+        from claudomater.qaboard import post_step
+
+        with pytest.raises(QaBoardError, match="surface_proof"):
+            post_step(cfg, 7, {"step_key": "34-3-01", "label": "34-3 x"})
+        with pytest.raises(QaBoardError, match="surface_proof"):
+            post_step(
+                cfg, 7,
+                {"step_key": "34-3-01", "label": "34-3 x", "surface_proof": "  "},
+            )
