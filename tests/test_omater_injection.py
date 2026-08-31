@@ -492,3 +492,36 @@ class TestRejectedEntriesAreScrubbed:
         assert "[REDACTED:INJ_TEST_TOKEN]" in ev["detail"]["rejected"][0]
         progress = (log.run_dir / "progress.log").read_text(encoding="utf-8")
         assert "sekret-value-99" not in progress
+
+    def test_denied_values_nested_in_container_claims_never_reach_the_log(
+        self, tmp_path, store, monkeypatch
+    ):
+        """PR #12 round 11: a malformed entry that is a dict or list leaks
+        nested strings (and dict KEYS) exactly like a bare string - the
+        scrub must not carve out an exception for containers."""
+        monkeypatch.setenv("INJ_TEST_TOKEN", "sekret-value-99")
+        lid = lesson(store, "k")
+        log = RunLog.create(tmp_path)
+
+        class LeakyContainerClaim:
+            def run(self, spec, model):
+                return ExecutionResult(
+                    text='x\n```json\n{"status": "ok", "lessons_applied": '
+                         '[{"sekret-value-99 as key": "sekret-value-99"}, '
+                         '["sekret-value-99 nested"], 7.5]}\n```'
+                )
+
+        runner = PhaseRunner(
+            tmp_path, log, LeakyContainerClaim(), learn_store=store,
+            secrets_deny=("INJ_TEST_TOKEN",),
+        )
+        runner.run_phase(PhaseSpec("dev", "m", "p", injected_lessons=(lid,)))
+        (ev,) = [e for e in log.events() if e["event"] == "lessons-applied"]
+        assert "sekret-value-99" not in json.dumps(ev["detail"])
+        dict_entry, list_entry, scalar_entry = ev["detail"]["rejected"]
+        assert "[REDACTED:INJ_TEST_TOKEN]" in dict_entry
+        assert "[REDACTED:INJ_TEST_TOKEN]" in list_entry
+        # non-string scalars carry no text to scrub and keep their shape
+        assert scalar_entry == 7.5
+        progress = (log.run_dir / "progress.log").read_text(encoding="utf-8")
+        assert "sekret-value-99" not in progress

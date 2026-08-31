@@ -829,10 +829,22 @@ class PhaseRunner:
                     applied.append(item)
             else:
                 # rejected entries are AGENT-authored values headed for the
-                # run log and progress.log: scrub strings like every other
+                # run log and progress.log: scrub them like every other
                 # retained artifact (the contract makes no exception for
-                # malformed claims — those are the likeliest to carry junk)
-                rejected.append(self._scrub(item) if isinstance(item, str) else item)
+                # malformed claims — those are the likeliest to carry junk).
+                # A dict or list leaks nested strings — dict KEYS included —
+                # exactly like a bare string, so containers are retained as
+                # their scrubbed JSON text rather than chased recursively
+                # through every shape an agent can invent; non-string
+                # scalars carry no text to scrub and keep their shape.
+                if isinstance(item, str):
+                    rejected.append(self._scrub(item))
+                elif isinstance(item, (dict, list, tuple)):
+                    rejected.append(
+                        self._scrub(json.dumps(item, sort_keys=True, default=repr))
+                    )
+                else:
+                    rejected.append(item)
         self.runlog.event(
             spec.name,
             "lessons-applied",
