@@ -236,3 +236,11 @@ class TestRoundTwoPins:
             "### File List\n", "### File List\n\n---\n"
         )
         assert completion_report(text, MERGED).ok
+
+    def test_a_bare_unchecked_box_with_no_label_still_blocks(self):
+        """Copilot round-3: `- [ ]` with no trailing text slipped the \\s+
+        in the regex - ANY unchecked box blocks, label or not."""
+        text = STORY.replace("- [x] Task 2 - test it", "- [ ]")
+        report = completion_report(text, MERGED)
+        assert not report.ok
+        assert len(report.unchecked) == 1

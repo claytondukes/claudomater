@@ -40,7 +40,9 @@ from typing import Sequence
 TASKS_HEADING_RE = re.compile(r"^##\s+Tasks(\s*/\s*Subtasks)?\s*$", re.MULTILINE)
 FILE_LIST_HEADING_RE = re.compile(r"^###\s+File List\s*$", re.MULTILINE)
 _HEADING_RE = re.compile(r"^#{2,3}\s+\S", re.MULTILINE)
-_UNCHECKED_RE = re.compile(r"^\s*[-*]\s+\[ \]\s+(?P<text>.*)$", re.MULTILINE)
+# \s* after the box, not \s+: a bare `- [ ]` with no label text is still
+# an unchecked box, and the gate's contract is ANY unchecked box blocks
+_UNCHECKED_RE = re.compile(r"^\s*[-*]\s+\[ \]\s*(?P<text>.*)$", re.MULTILINE)
 # a File List entry: `- path`, optionally backticked, optionally with a
 # trailing annotation like (new) / (modified) / (deleted)
 _LIST_ENTRY_RE = re.compile(
