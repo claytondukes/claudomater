@@ -1,0 +1,245 @@
+"""Lesson injection + lessons_applied provenance (design §6, slice B).
+
+Closes the Epic 9 "lessons-corpus-is-write-only" lesson: prior lessons feed
+phase prompts as FRAMED DATA with ids, what was injected is on the run log
+before the agent exists, the self-reported `lessons_applied` is validated
+against exactly that set (an id never injected mints no credit), and the
+counters that drive promotion candidacy move only for verified phases.
+Promotion itself stays HUMAN-gated: the tool surfaces candidates and never
+self-promotes.
+"""
+
+from __future__ import annotations
+
+import itertools
+
+import pytest
+
+from claudomater.cli import EXIT_ERROR, EXIT_OK, main
+from claudomater.learnstore import (
+    INJECTION_FRAME,
+    INJECTION_HEADER,
+    PROMOTED_RULE_LINE_BUDGET,
+    LearnStore,
+    LearnStoreError,
+    injection_block,
+)
+from claudomater.phases import ExecutionResult, PhaseRunner, PhaseSpec
+from claudomater.runlog import RunLog
+
+
+def ticking_now():
+    counter = itertools.count()
+
+    def now():
+        t = next(counter)
+        return f"2026-08-30T{t // 3600:02d}:{(t // 60) % 60:02d}:{t % 60:02d}.000000Z"
+
+    return now
+
+
+@pytest.fixture
+def store(tmp_path):
+    s = LearnStore.open(tmp_path / "learning.db", now=ticking_now())
+    yield s
+    s.close()
+
+
+def lesson(s, topic, scope="global", domain="review", rule=None):
+    return s.add(scope, domain, topic, rule or f"rule for {topic}", f"why {topic}")
+
+
+class TestLessonsForPhase:
+    def test_promoted_first_then_domain_matches_then_fts(self, store):
+        promoted = lesson(store, "always-on")
+        store.promote("global", "review", "always-on")
+        by_domain = lesson(store, "domain-hit", domain="charts")
+        by_text = lesson(store, "text-hit", domain="misc",
+                         rule="clicking charts must select the bucket")
+        lesson(store, "unrelated", domain="misc", rule="nothing relevant here")
+        rows = store.lessons_for_phase(["global"], domains=["charts"])
+        ids = [r["id"] for r in rows]
+        assert ids[:2] == [promoted, by_domain]
+        assert by_text in ids
+        assert len(ids) == 3  # 'unrelated' matched nothing
+
+    def test_budget_truncates_after_ranking(self, store):
+        for i in range(6):
+            lesson(store, f"t{i}", domain="charts")
+        store.conn.execute("UPDATE lesson SET refs=9 WHERE topic='t5'")
+        store.conn.commit()
+        rows = store.lessons_for_phase(["global"], domains=["charts"], budget=3)
+        assert len(rows) == 3
+        assert rows[0]["topic"] == "t5"  # refs-ranked within the tier
+
+    def test_superseded_and_out_of_scope_never_surface(self, store):
+        lesson(store, "k", domain="charts")
+        store.supersede("global", "charts", "k", "new judgment", "w")
+        lesson(store, "other-scope", scope="elsewhere", domain="charts")
+        rows = store.lessons_for_phase(["global"], domains=["charts"])
+        assert [r["rule"] for r in rows] == ["new judgment"]
+
+    def test_no_scopes_or_zero_budget_is_empty(self, store):
+        lesson(store, "k")
+        assert store.lessons_for_phase([], domains=["review"]) == []
+        assert store.lessons_for_phase(["global"], budget=0) == []
+
+
+class TestInjectionBlock:
+    def test_framed_as_data_with_ids(self, store):
+        lid = lesson(store, "k", rule="first line\nsecond line")
+        block = injection_block(store.lessons_for_phase(["global"], ["review"]))
+        assert INJECTION_HEADER in block and INJECTION_FRAME in block
+        assert f"[L{lid}]" in block
+        # every content line is blockquoted — same anti-injection discipline
+        # as retry feedback: the corpus is past-run text, injection-shaped
+        assert "> first line" in block and "  > second line" in block
+        assert "lessons_applied" in INJECTION_FRAME
+
+    def test_empty_retrieval_renders_nothing(self):
+        assert injection_block([]) == ""
+
+
+GOOD_APPLYING = (
+    'done\n```json\n{"status": "complete", "lessons_applied": [%s]}\n```\n'
+)
+
+
+class TestProvenance:
+    def _run(self, tmp_path, store, injected, applied_json):
+        log = RunLog.create(tmp_path)
+
+        class OneShot:
+            def run(self, spec, model):
+                return ExecutionResult(text=GOOD_APPLYING % applied_json)
+
+        runner = PhaseRunner(tmp_path, log, OneShot(), learn_store=store)
+        spec = PhaseSpec("dev", "m", "p", injected_lessons=injected)
+        return runner.run_phase(spec), log
+
+    def test_injected_event_precedes_the_spawn(self, tmp_path, store):
+        lid = lesson(store, "k")
+        outcome, log = self._run(tmp_path, store, (lid,), str(lid))
+        events = [e["event"] for e in log.events()]
+        assert events.index("lessons-injected") < events.index("phase-spawn")
+        (inj,) = [e for e in log.events() if e["event"] == "lessons-injected"]
+        assert inj["detail"]["ids"] == [lid]
+
+    def test_applied_ids_are_validated_against_the_injected_set(
+        self, tmp_path, store
+    ):
+        lid = lesson(store, "k")
+        outcome, log = self._run(
+            tmp_path, store, (lid,), f'{lid}, 9999, "L{lid}", {lid}'
+        )
+        assert outcome.status == "verified"
+        (applied_ev,) = [e for e in log.events() if e["event"] == "lessons-applied"]
+        # the never-injected id and the malformed string are rejected; the
+        # duplicate collapses
+        assert applied_ev["detail"]["applied"] == [lid]
+        assert applied_ev["detail"]["rejected"] == [9999, f"L{lid}"]
+        row = store.conn.execute("SELECT refs, sessions FROM lesson").fetchone()
+        assert (row["refs"], row["sessions"]) == (1, 2)  # schema default sessions=1
+
+    def test_nothing_injected_mints_nothing(self, tmp_path, store):
+        lid = lesson(store, "k")
+        outcome, log = self._run(tmp_path, store, (), str(lid))
+        assert outcome.status == "verified"
+        (applied_ev,) = [e for e in log.events() if e["event"] == "lessons-applied"]
+        assert applied_ev["detail"]["applied"] == []
+        assert applied_ev["detail"]["rejected"] == [lid]
+        row = store.conn.execute("SELECT refs FROM lesson").fetchone()
+        assert row["refs"] == 0
+
+    def test_failed_phase_claims_mint_nothing(self, tmp_path, store):
+        lid = lesson(store, "k")
+        log = RunLog.create(tmp_path)
+
+        class Failing:
+            def run(self, spec, model):
+                return ExecutionResult(
+                    text=GOOD_APPLYING % lid, returncode=1
+                )
+
+        runner = PhaseRunner(tmp_path, log, Failing(), learn_store=store)
+        outcome = runner.run_phase(
+            PhaseSpec("dev", "m", "p", injected_lessons=(lid,), retries=0)
+        )
+        assert outcome.status == "escalated"
+        assert not [e for e in log.events() if e["event"] == "lessons-applied"]
+        assert store.conn.execute("SELECT refs FROM lesson").fetchone()["refs"] == 0
+
+    def test_sessions_count_distinct_runs_not_uses(self, tmp_path, store):
+        lid = lesson(store, "k")
+        store.record_applied([lid], "run-1")
+        store.record_applied([lid], "run-1")
+        store.record_applied([lid], "run-2")
+        row = store.conn.execute("SELECT refs, sessions FROM lesson").fetchone()
+        # refs: every use; sessions: schema default 1 + first use in each run
+        assert (row["refs"], row["sessions"]) == (3, 3)
+
+    def test_store_failure_never_fails_a_verified_phase(self, tmp_path, store):
+        lid = lesson(store, "k")
+        store.close()  # closed store: record_applied will raise
+        outcome, log = self._run(tmp_path, store, (lid,), str(lid))
+        assert outcome.status == "verified"
+        assert [e for e in log.events() if e["event"] == "lessons-applied-recording-failed"]
+
+
+class TestHumanGatedPromotion:
+    def test_candidates_threshold_is_3_uses_across_2_runs(self, store):
+        a = lesson(store, "hot")
+        b = lesson(store, "warm")
+        store.record_applied([a], "r1")
+        store.record_applied([a], "r2")
+        store.record_applied([a], "r2")
+        store.record_applied([b], "r1")  # 1 use, 1 run: not a candidate
+        assert [c["topic"] for c in store.candidates()] == ["hot"]
+
+    def test_promote_is_a_lifecycle_change_that_exports(self, store, tmp_path):
+        store.export_dir = tmp_path / "lessons"
+        lesson(store, "k")
+        store.promote("global", "review", "k")
+        (row,) = store.lessons(["global"])
+        assert row["status"] == "promoted"
+        exported = (tmp_path / "lessons" / "global.jsonl").read_text(encoding="utf-8")
+        assert '"status":"promoted"' in exported
+        with pytest.raises(LearnStoreError, match="already promoted"):
+            store.promote("global", "review", "k")
+
+    def test_promotion_budget_forces_a_demotion_review(self, store):
+        big_rule = "\n".join("line" for _ in range(PROMOTED_RULE_LINE_BUDGET))
+        lesson(store, "big", rule=big_rule)
+        store.promote("global", "review", "big")
+        lesson(store, "one-more")
+        with pytest.raises(LearnStoreError, match="demotion review"):
+            store.promote("global", "review", "one-more")
+
+    def test_nothing_in_the_write_or_use_paths_promotes(self, store):
+        """The no-self-promotion invariant: injection retrieval, use
+        accounting, refine, and import never change status to promoted."""
+        lid = lesson(store, "k")
+        for _ in range(5):
+            store.record_applied([lid], f"run-{_}")
+        store.lessons_for_phase(["global"], ["review"])
+        store.refine("global", "review", "k", rule="refined")
+        (row,) = store.lessons(["global"])
+        assert row["status"] == "active"
+        assert store.candidates()  # a candidate, still not promoted
+
+    def test_cli_candidates_and_promote(self, tmp_path, capsys):
+        args = lambda *rest: [
+            "learn", *rest,
+            "--user-config", str(tmp_path / "missing.yaml"),
+            "--db", str(tmp_path / "cli.db"),
+            "--export-dir", str(tmp_path / "cli-lessons"),
+        ]
+        assert main(args("add", "--scope", "global", "--domain", "ci",
+                         "--topic", "t", "--rule", "r", "--why", "w")) == EXIT_OK
+        assert main(args("candidates")) == EXIT_OK
+        assert "0 promotion candidate(s)" in capsys.readouterr().out
+        assert main(args("promote", "--scope", "global", "--domain", "ci",
+                         "--topic", "t")) == EXIT_OK
+        assert "promoted: lesson" in capsys.readouterr().out
+        assert main(args("promote", "--scope", "global", "--domain", "ci",
+                         "--topic", "t")) == EXIT_ERROR

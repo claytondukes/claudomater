@@ -64,7 +64,17 @@ Phase 0 skeleton — the pieces every pipeline run stands on:
   that produced it. `omater learn sync` = pull → import (latest `updated_at`
   wins, supersession chains relinked) → export → commit with an
   `omater-learn:` prefix; the local index is fully reconstructible from the
-  JSONL at any time.
+  JSONL at any time. **Injection closes the write-only-corpus loop**: a
+  phase gets its scopes' promoted (always-loaded) lessons plus a
+  domain-seeded FTS retrieval (budgeted, refs-ranked) rendered as FRAMED
+  DATA with ids; the injected set is a run-log event before the agent
+  exists, the result's `lessons_applied` is validated against exactly that
+  set (an id never injected mints no credit, failed phases mint nothing),
+  and only validated uses move the `refs`/`sessions` counters. Promotion
+  stays HUMAN-gated: `omater learn candidates` surfaces lessons used 3+
+  times across 2+ runs, and only an operator's `omater learn promote`
+  (scope-budgeted) makes a lesson always-loaded — the tool never
+  self-promotes; auto-promotion is an instruction-injection channel.
 - **`omater init`** — writes a starter `.omater.yaml` and gitignores the
   runs dir. The PreToolUse write fence (denies Write/Edit outside the
   project root, pattern-matches Bash for out-of-tree writes) is RUN-SCOPED
@@ -104,6 +114,8 @@ omater usage         # guardrail snapshot + decision
 | `omater learn refine --scope S --domain D --topic T [--rule R] [--why W]` | Merge better wording into the existing lesson (at least one of `--rule`/`--why`) |
 | `omater learn list [--scope S] [--domain D]` | Live lessons (superseded rows never surface) |
 | `omater learn search QUERY [--scope S]` | FTS over rule+why, live rows only |
+| `omater learn candidates` | Promotion candidates (3+ uses across 2+ runs) for human review |
+| `omater learn promote --scope S --domain D --topic T` | HUMAN-gated: make a lesson always-loaded for its scope (line-budgeted) |
 | `omater learn export\|import\|sync [--push]` | Deterministic per-scope JSONL export; import (latest wins); pull→import→export→commit |
 | `omater resume\|abort\|approve [--run ID]` | Write a control event a paused/escalated run consumes (also under `omater control …`) |
 | `omater hook pre-tool-use --root PATH` | The provisioned PreToolUse write fence (reads the hook payload on stdin) |

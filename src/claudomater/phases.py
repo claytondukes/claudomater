@@ -48,6 +48,10 @@ class PhaseSpec:
     retries: int = 1  # retried once, then escalated
     story_key: str | None = None
     escalated: bool = False  # story has failure history: never runs degraded
+    # ids of lessons injected into this phase's prompt (slice B): the set
+    # `lessons_applied` in the result is validated against — an id that was
+    # never injected can mint no credit
+    injected_lessons: tuple[int, ...] = ()
 
 
 @dataclass
@@ -677,6 +681,7 @@ class PhaseRunner:
         secrets_deny: tuple[str, ...] | list[str] = (),
         guardrail_check: Callable[[], Decision] | None = None,
         project: str | None = None,
+        learn_store: Any | None = None,
     ):
         self.project_root = Path(project_root)
         self.runlog = runlog
@@ -686,6 +691,9 @@ class PhaseRunner:
         self.secrets_deny = tuple(secrets_deny)
         self.guardrail_check = guardrail_check
         self.project = project
+        # optional LearnStore: when present, VERIFIED phases' validated
+        # lessons_applied ids feed refs/sessions via record_applied
+        self.learn_store = learn_store
         self._pre_run_dirt_cache: frozenset[str] | None = None
         # An executor that reports its child PID (`on_spawn`) gets the run
         # log's pid recorder; simpler executors keep the two-arg contract.
@@ -760,6 +768,42 @@ class PhaseRunner:
                         paths = frozenset(p for p in got if isinstance(p, str))
             self._pre_run_dirt_cache = paths
         return self._pre_run_dirt_cache
+
+    def _record_lessons_applied(self, spec: PhaseSpec, result: dict[str, Any]) -> None:
+        """Provenance for the self-reported `lessons_applied` (slice B):
+        the claim is validated against the ids actually injected — an id
+        never injected (or a malformed entry) is REJECTED and logged, never
+        counted; only verified phases reach here, so a failed attempt's
+        claim mints nothing. Counting is best-effort: a learn-store failure
+        is logged, never a verified phase turned into a failure."""
+        claimed = result.get("lessons_applied")
+        if claimed is None and not spec.injected_lessons:
+            return
+        injected = set(spec.injected_lessons)
+        applied: list[int] = []
+        rejected: list[Any] = []
+        for item in claimed if isinstance(claimed, list) else [claimed]:
+            if isinstance(item, int) and not isinstance(item, bool) and item in injected:
+                if item not in applied:
+                    applied.append(item)
+            elif item is not None:
+                rejected.append(item)
+        self.runlog.event(
+            spec.name,
+            "lessons-applied",
+            {"applied": applied, "rejected": rejected},
+            story_key=spec.story_key,
+        )
+        if self.learn_store is not None and applied:
+            try:
+                self.learn_store.record_applied(applied, self.runlog.run_id)
+            except Exception as exc:  # noqa: BLE001 — accounting must not fail the phase
+                self.runlog.event(
+                    spec.name,
+                    "lessons-applied-recording-failed",
+                    {"error": self._scrub(str(exc))},
+                    story_key=spec.story_key,
+                )
 
     def _salvage(self, spec: PhaseSpec) -> None:
         """Commit-first salvage, write-ahead: the intent is logged before git
@@ -861,6 +905,16 @@ class PhaseRunner:
                     )
                     spawn_detail["retry_feedback"] = len(outcome.failure_reasons)
 
+            if spec.injected_lessons:
+                # provenance, write-ahead: WHAT the agent was given is on
+                # record before the agent exists — lessons_applied is later
+                # validated against exactly this set
+                self.runlog.event(
+                    spec.name,
+                    "lessons-injected",
+                    {"ids": list(spec.injected_lessons), "attempt": attempt},
+                    story_key=spec.story_key,
+                )
             # Write-ahead: intent hits the log BEFORE the agent spawns.
             spawn_record = self.runlog.event(
                 spec.name, "phase-spawn", spawn_detail, story_key=spec.story_key
@@ -954,6 +1008,7 @@ class PhaseRunner:
                     self.runlog.event(
                         spec.name, "phase-verified", detail, story_key=spec.story_key
                     )
+                    self._record_lessons_applied(spec, result)
                     outcome.status = "verified"
                     outcome.result = result
                     return outcome
