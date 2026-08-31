@@ -550,3 +550,45 @@ class TestSurfaceRulesConfig:
         ):
             with pytest.raises(ConfigError, match="surface_rules|surface"):
                 load_project_config(write_project(tmp_path, f"project: p\n{bad}"))
+
+
+class TestQaBoardAdapterConfig:
+    """Phase 3 deliverable 3 part 2: the qa_board adapter slot is a
+    mapping (board wiring) or null - validated at load through the
+    adapter's own loader."""
+
+    def test_null_and_absent_stay_legal(self, tmp_path):
+        cfg = load_project_config(
+            write_project(tmp_path, "project: p\nadapters:\n  qa_board: null\n")
+        )
+        assert cfg.adapters["qa_board"] is None
+
+    def test_a_full_mapping_loads(self, tmp_path):
+        cfg = load_project_config(
+            write_project(
+                tmp_path,
+                "project: p\n"
+                "adapters:\n"
+                "  qa_board:\n"
+                "    authoring_dir: art/authoring\n"
+                "    board_url: http://127.0.0.1:8090/api\n"
+                "    gate_dir: art/server\n"
+                "    gate: [./g.sh, \"{epic}\"]\n",
+            )
+        )
+        assert cfg.adapters["qa_board"]["board_url"].startswith("http://127.0.0.1")
+
+    def test_a_half_declared_board_fails_at_load(self, tmp_path):
+        with pytest.raises(ConfigError, match="qa_board"):
+            load_project_config(
+                write_project(
+                    tmp_path,
+                    "project: p\nadapters:\n  qa_board:\n    board_url: http://x/api\n",
+                )
+            )
+        with pytest.raises(ConfigError, match="qa_board"):
+            load_project_config(
+                write_project(
+                    tmp_path, "project: p\nadapters:\n  qa_board: lz-qa-viewer\n"
+                )
+            )

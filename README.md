@@ -113,6 +113,21 @@ Phase 0 skeleton — the pieces every pipeline run stands on:
   waive the gate), and an empty-or-blank changed-file set is refused (a
   broken lookup must not read as "no surface").
 
+- **QA-board finish flow** (`claudomater.qaboard`) — after a story's PR
+  merges and BEFORE its done-flip: classify the MERGED changeset with the
+  project's committed surface rules; a surface story gets its walkthrough
+  step authored (insert-only append to the epic's authoring spec AND a
+  POST to the live board, section resolved by epic, idempotent on the
+  board's unique key), the coverage matrix regenerated and the epic gate
+  run in one shot — judged by EXIT CODE, never by parsing output; a
+  no-surface story gets its waiver EVALUATION (verdict buckets and all)
+  written to the run log, so "no step needed" is a recorded decision, not
+  a silence. Board unreachable, malformed spec, missing step content for
+  a surface story, gate nonzero: each is a loud stop. Wired per project
+  via `adapters.qa_board` (a mapping: authoring_dir / board_url /
+  gate_dir / gate argv with `{epic}` substitution; null = no board),
+  validated at config load.
+
 - **`omater init`** — writes a starter `.omater.yaml` and gitignores the
   runs dir. The PreToolUse write fence (denies Write/Edit outside the
   project root, pattern-matches Bash for out-of-tree writes) is RUN-SCOPED

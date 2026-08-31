@@ -377,6 +377,17 @@ def load_project_config(root: Path | str) -> ProjectConfig:
             f"scope names, got {scopes!r}"
         )
 
+    # adapters.qa_board validates through the adapter's own loader (a
+    # mapping wiring the board, or null for none) - a half-declared board
+    # must fail at LOAD, not at the first story's finish flow. Lazy import
+    # like the siblings below.
+    from claudomater.qaboard import QaBoardConfig, QaBoardError
+
+    try:
+        QaBoardConfig.from_adapter(adapters_raw.get("qa_board"), root)
+    except QaBoardError as exc:
+        raise ConfigError(f"{PROJECT_CONFIG_NAME}: adapters.qa_board: {exc}") from exc
+
     # surface_rules validates through the engine's own loader (one source
     # of truth for the block's grammar), failing at LOAD like every other
     # knob. Lazy import: surface.py is engine code config merely wires.
