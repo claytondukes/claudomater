@@ -101,7 +101,10 @@ def file_list_paths(section: str) -> list[str]:
     malformed entry and raises rather than silently thinning the list."""
     paths: list[str] = []
     for line in section.splitlines():
-        if not line.strip().startswith(("-", "*")):
+        # a BULLET is dash/star followed by whitespace: a bare startswith
+        # read a markdown horizontal rule ('---') as a bullet and raised
+        # a false malformed-entry error
+        if not re.match(r"\s*[-*]\s", line):
             continue
         m = _LIST_ENTRY_RE.match(line)
         if m is None or not m.group("path").strip():
@@ -186,7 +189,9 @@ def merged_files_of(repo: Path | str, sha: str) -> list[str]:
             # quotepath=false: with it on (the default), git backslash-
             # escapes non-ASCII filenames, which would falsely mismatch a
             # File List carrying the real name. Sorted so the caller sees
-            # a deterministic list regardless of git's emit order.
+            # a deterministic list regardless of git's emit order. The
+            # timeout keeps a hung git (FS trouble, credential prompt)
+            # from stalling the whole done-flip.
             [
                 "git", "-c", "core.quotepath=false",
                 "show", "--name-only", "--no-renames", "--format=", sha,
@@ -194,8 +199,9 @@ def merged_files_of(repo: Path | str, sha: str) -> list[str]:
             cwd=repo,
             capture_output=True,
             text=True,
+            timeout=60,
         )
-    except OSError as exc:
+    except (OSError, subprocess.TimeoutExpired) as exc:
         raise CompletionError(f"cannot run git in {repo}: {exc}") from exc
     if proc.returncode != 0:
         raise CompletionError(

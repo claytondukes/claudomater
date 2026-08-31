@@ -226,3 +226,13 @@ class TestRealCorpusReplays:
         assert completion_report(
             story, merged, require_file_list=False
         ).ok
+
+
+class TestRoundTwoPins:
+    def test_a_horizontal_rule_is_not_a_bullet(self):
+        """Copilot round-2: '---' matched startswith('-') and raised a
+        false malformed-entry error; a bullet is dash/star + whitespace."""
+        text = STORY.replace(
+            "### File List\n", "### File List\n\n---\n"
+        )
+        assert completion_report(text, MERGED).ok
