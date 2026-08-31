@@ -238,14 +238,20 @@ class LearnStore:
                 "it is a rebuildable local index — delete it and rebuild "
                 "with `omater learn import`"
             )
-        conn.executescript(SCHEMA)
-        store = cls(
-            conn,
-            export_dir=Path(export_dir).expanduser() if export_dir else None,
-            secrets_deny=secrets_deny,
-            now=now,
-        )
-        store._fts_check_and_rebuild()
+        try:
+            conn.executescript(SCHEMA)
+            store = cls(
+                conn,
+                export_dir=Path(export_dir).expanduser() if export_dir else None,
+                secrets_deny=secrets_deny,
+                now=now,
+            )
+            store._fts_check_and_rebuild()
+        except BaseException:
+            # a failed open must not leak the connection (open fd, and a
+            # held lock on some platforms makes recovery harder)
+            conn.close()
+            raise
         return store
 
     def _fts_check_and_rebuild(self) -> bool:
@@ -456,6 +462,22 @@ class LearnStore:
         return [dict(r) for r in rows]
 
     # ---- deterministic export / import -------------------------------------
+
+    def export_paths(self, export_dir: Path | None = None) -> list[Path]:
+        """The canonical per-scope export file list, derived from DB scopes
+        WITHOUT a serialization pass — for callers (sync staging) that need
+        exactly the artifact list after a write-through export already
+        produced the files. Always identical to what export() returns."""
+        out_dir = export_dir or self.export_dir
+        if out_dir is None:
+            raise LearnStoreError("no export directory configured")
+        out_dir = Path(out_dir).expanduser()
+        return [
+            out_dir / _scope_filename(r[0])
+            for r in self.conn.execute(
+                "SELECT DISTINCT scope FROM lesson ORDER BY scope"
+            ).fetchall()
+        ]
 
     def export(self, export_dir: Path | None = None) -> list[Path]:
         """Write one JSONL file per scope: rows of ALL statuses (the
@@ -701,6 +723,10 @@ def sync(
     if store.export_dir is None:
         raise LearnStoreError("no export directory configured")
     export_dir = store.export_dir
+    # a fresh clone with no local lessons yet has the REPO but not the
+    # export subdirectory; `git -C <missing dir>` would misreport a valid
+    # repo as "not inside a git repository"
+    export_dir.mkdir(parents=True, exist_ok=True)
     top = _git(export_dir, "rev-parse", "--show-toplevel")
     if top.returncode != 0:
         raise LearnStoreError(
@@ -733,12 +759,12 @@ def sync(
                 f"before syncing: {pull.stderr.strip()}"
             )
     stats = store.import_dir()
-    # export() is how sync learns the exact canonical artifact list — the
-    # file writes inside are no-ops (import_dir's write-through already ran,
-    # and unchanged files are skipped). Staging the whole directory instead
-    # would sweep strays (editor backups, OS metadata, a rogue .jsonl) into
-    # a commit that must carry ONLY the lessons export.
-    export_files = store.export()
+    # the canonical artifact list, derived from DB scopes without a second
+    # serialization pass (import_dir's write-through already produced the
+    # files). Staging the whole directory instead would sweep strays
+    # (editor backups, OS metadata) into a commit that must carry ONLY the
+    # lessons export.
+    export_files = store.export_paths()
     if not export_files:
         return {**stats.as_dict(), "committed": False, "pushed": False}
     add = _git(repo, "add", "--", *(str(p) for p in export_files))

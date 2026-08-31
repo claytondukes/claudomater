@@ -918,3 +918,56 @@ class TestSyncStagesOnlyTheExport:
         with pytest.raises(LearnStoreError, match=r"rogue\.jsonl:1"):
             sync(s)
         s.close()
+
+
+class TestRound10Hardening:
+    def test_failed_open_closes_the_connection(self, tmp_path, monkeypatch):
+        """PR #11 round 10: a raise AFTER connect (schema creation, FTS
+        check) must not leak the connection - an open fd and a held lock
+        make recovery harder exactly when open just failed."""
+        db = tmp_path / "l.db"
+        # a conflicting pre-existing `lesson` table without rule/why makes
+        # the FTS content check (and its rebuild) fail deterministically
+        pre = sqlite3.connect(str(db))
+        pre.execute("CREATE TABLE lesson (id INTEGER PRIMARY KEY, other TEXT)")
+        pre.commit()
+        pre.close()
+        captured = []
+        real_connect = sqlite3.connect
+
+        def capturing_connect(*args, **kwargs):
+            conn = real_connect(*args, **kwargs)
+            captured.append(conn)
+            return conn
+
+        monkeypatch.setattr(sqlite3, "connect", capturing_connect)
+        with pytest.raises(sqlite3.DatabaseError):
+            LearnStore.open(db)
+        (conn,) = captured
+        with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+            conn.execute("SELECT 1")
+
+    def test_sync_creates_a_missing_export_subdir_inside_the_repo(self, tmp_path):
+        """PR #11 round 10: a fresh clone has the REPO but not the export
+        subdirectory until the first local lesson; git -C on the missing
+        dir misreported the valid repo as not-a-repo."""
+        repo = tmp_path / "dotfiles"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        git(repo, "config", "user.email", "t@t")
+        git(repo, "config", "user.name", "t")
+        (repo / "seed.txt").write_text("x", encoding="utf-8")
+        git(repo, "add", "-A")
+        git(repo, "commit", "-q", "-m", "seed")
+        s = LearnStore.open(
+            tmp_path / "l.db", export_dir=repo / "omater" / "lessons",
+        )
+        # empty corpus, missing subdir: sync succeeds as a no-op
+        result = sync(s)
+        assert result["committed"] is False
+        s.close()
+
+    def test_export_paths_matches_export_exactly(self, store):
+        seed(store, scope="global")
+        seed(store, scope="stack-ts")
+        assert store.export_paths() == store.export()
