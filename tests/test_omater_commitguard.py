@@ -202,6 +202,37 @@ class TestArming:
         with pytest.raises(GuardError, match="replaced"):
             commitguard.disarm(repo)
 
+    def test_a_corrupt_scope_file_is_healed_by_rearm(self, repo):
+        """Copilot round-1 finding: the idempotence-comparison reads sat
+        outside any handler, so a scope file with undecodable bytes made
+        arm() crash with a raw UnicodeDecodeError instead of doing its
+        job. The scope file is OUR run state and arm() is authoritative:
+        an unreadable one compares as 'changed' and gets rewritten."""
+        commitguard.arm(repo, ["ui"])
+        scope_file = commitguard.git_dir(repo) / commitguard.SCOPE_BASENAME
+        scope_file.write_bytes(b"\xff\xfe garbage")
+        assert commitguard.arm(repo, ["ui"]) is True
+        assert json.loads(scope_file.read_text())["scope"] == ["ui"]
+
+    def test_filesystem_failures_in_arm_and_disarm_are_typed(
+        self, repo, monkeypatch
+    ):
+        """Copilot round-1 finding (+ neighborhood): os.chmod in arm() and
+        the unlinks in disarm() raised raw OSError past start_run's and
+        teardown's typed GuardError handling - a readonly hooks dir
+        crashed with a traceback instead of a user-facing error."""
+        def boom(*_a, **_k):
+            raise OSError("simulated readonly filesystem")
+
+        monkeypatch.setattr(commitguard.os, "chmod", boom)
+        with pytest.raises(GuardError, match="cannot"):
+            commitguard.arm(repo, ["ui"])
+        monkeypatch.undo()
+        commitguard.arm(repo, ["ui"])
+        monkeypatch.setattr(commitguard.Path, "unlink", boom)
+        with pytest.raises(GuardError, match="cannot"):
+            commitguard.disarm(repo)
+
     def test_rearm_restores_executability(self, repo):
         """Matching bytes with a stripped exec bit is a hook git silently
         skips - re-arming must repair the mode, not just the content."""

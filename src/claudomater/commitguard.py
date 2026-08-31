@@ -235,13 +235,20 @@ def arm(repo_root: Path | str, scope: list[str]) -> bool:
     scope_file = _scope_path(gd)
     payload = json.dumps({"scope": normalized}, indent=2) + "\n"
     changed = False
-    if not scope_file.exists() or scope_file.read_text(encoding="utf-8") != payload:
+    # The idempotence comparisons read with _read_or_none: these files are
+    # OUR run state and arm() is authoritative, so one that cannot be read
+    # (permissions, undecodable bytes) simply compares as "changed" and is
+    # rewritten - the rewrite raises typed if the filesystem really is the
+    # problem. Only the FOREIGN-hook check above must raise on an
+    # unreadable file, because a hook we cannot read is one we must not
+    # judge ours to clobber.
+    if _read_or_none(scope_file) != payload:
         try:
             scope_file.write_text(payload, encoding="utf-8")
         except OSError as exc:
             raise GuardError(f"cannot write {scope_file}: {exc}") from exc
         changed = True
-    if not hook.exists() or hook.read_text(encoding="utf-8", errors="replace") != _SCRIPT:
+    if _read_or_none(hook) != _SCRIPT:
         try:
             hook.parent.mkdir(parents=True, exist_ok=True)
             hook.write_text(_SCRIPT, encoding="utf-8")
@@ -251,8 +258,21 @@ def arm(repo_root: Path | str, scope: list[str]) -> bool:
     # chmod unconditionally: the bytes may already match while the mode
     # does not, and a non-executable hook is silently skipped by git -
     # the exact silent-disarm shape this module refuses everywhere else.
-    os.chmod(hook, 0o755)
+    try:
+        os.chmod(hook, 0o755)
+    except OSError as exc:
+        raise GuardError(f"cannot make {hook} executable: {exc}") from exc
     return changed
+
+
+def _read_or_none(path: Path) -> str | None:
+    """The file's text, or None when it does not exist or cannot be read
+    (missing, permissions, undecodable bytes). For idempotence comparisons
+    only - None never equals the canonical content, so the caller rewrites."""
+    try:
+        return path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
 
 
 def disarm(repo_root: Path | str) -> bool:
@@ -281,12 +301,17 @@ def disarm(repo_root: Path | str) -> bool:
             "armed; resolve by hand"
         )
     changed = False
-    if hook_exists and ours:
-        hook.unlink()
-        changed = True
-    if scope_file.exists():
-        scope_file.unlink()
-        changed = True
+    try:
+        if hook_exists and ours:
+            hook.unlink()
+            changed = True
+        if scope_file.exists():
+            scope_file.unlink()
+            changed = True
+    except OSError as exc:
+        # a readonly hooks dir must surface as teardown's typed error,
+        # not a traceback (same contract as every write in this module)
+        raise GuardError(f"cannot remove the commit guard from {root}: {exc}") from exc
     return changed
 
 
