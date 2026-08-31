@@ -528,6 +528,59 @@ class TestOnDiskBytesSurviveExactly:
         assert p.read_bytes() == raw.replace(b"epic-1: backlog", b"epic-1: done")
 
 
+class TestUpdatedAtMeansWhenTheStatusChanged:
+    """PR #13 round 4. `import_doc` documents `updated_at` as "when this
+    status last changed" and skips the write when nothing changed;
+    `set_status` bumped it unconditionally, so the two write paths meant
+    different things by the same column."""
+
+    def _updated_at(self, store, key):
+        return store.conn.execute(
+            "SELECT updated_at FROM story WHERE project='sample' AND key=?", (key,)
+        ).fetchone()[0]
+
+    def test_setting_a_status_to_its_current_value_does_not_bump_updated_at(
+        self, store, workfile
+    ):
+        import_path(store, "sample", workfile)
+        before = self._updated_at(store, "4-3-being-worked")
+        set_status(store, "sample", "4-3-being-worked", "in-progress", workfile)
+        assert self._updated_at(store, "4-3-being-worked") == before
+
+    def test_a_real_change_does_bump_updated_at(self, store, workfile):
+        import_path(store, "sample", workfile)
+        before = self._updated_at(store, "4-3-being-worked")
+        set_status(store, "sample", "4-3-being-worked", "review", workfile)
+        assert self._updated_at(store, "4-3-being-worked") > before
+
+    def test_a_noop_set_still_resyncs_a_diverged_file(self, store, workfile):
+        """The DB not changing does not mean the FILE agrees with it - a
+        hand edit can have moved the file, and write-through is what puts
+        it back."""
+        import_path(store, "sample", workfile)
+        hand_edited = workfile.read_text(encoding="utf-8").replace(
+            "4-3-being-worked: in-progress", "4-3-being-worked: backlog"
+        )
+        workfile.write_text(hand_edited, encoding="utf-8")
+        assert set_status(
+            store, "sample", "4-3-being-worked", "in-progress", workfile
+        ) is True
+        assert SprintDoc.read(workfile).entry("4-3-being-worked").status == "in-progress"
+
+    def test_a_key_in_the_file_but_not_the_db_is_refused_as_untracked(
+        self, store, workfile
+    ):
+        """The 'not tracked' branch: the file carries the key, the DB does
+        not. Distinct from 'no such key', which is the file's answer."""
+        import_path(store, "sample", workfile)
+        with store.conn:
+            store.conn.execute(
+                "DELETE FROM story WHERE project='sample' AND key='4-3-being-worked'"
+            )
+        with pytest.raises(SprintError, match="not tracked"):
+            set_status(store, "sample", "4-3-being-worked", "review", workfile)
+
+
 class TestTheWriterAndItsExportNeverDisagree:
     """Write-through means the file write is PART of the operation: if it
     cannot land, the DB write must not survive it either."""

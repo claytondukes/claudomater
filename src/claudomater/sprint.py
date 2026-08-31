@@ -396,15 +396,29 @@ def set_status(
     entry = SprintDoc.read(path).entry(key)  # raises if the file lacks the key
     _validate_status(entry.kind, status, key)
     with store.conn:
-        cur = store.conn.execute(
-            "UPDATE story SET status = ?, updated_at = ? WHERE project = ? AND key = ?",
-            (status, utc_now(), project, key),
-        )
-        if cur.rowcount == 0:
+        # Existence is checked by READING the row, not by inspecting an
+        # UPDATE's rowcount: it separates "this key is not tracked" from
+        # "this write changed nothing", which a rowcount cannot do.
+        row = store.conn.execute(
+            "SELECT status FROM story WHERE project = ? AND key = ?", (project, key)
+        ).fetchone()
+        if row is None:
             raise SprintError(
                 f"{key!r} is not tracked for project {project!r} — "
                 "run `omater sprint import` first"
             )
+        if row["status"] != status:
+            # `updated_at` means "when this status last changed" — the
+            # same meaning `import_doc` keeps. Bumping it for a write that
+            # changed nothing would make the two writers disagree about
+            # what the column records.
+            store.conn.execute(
+                "UPDATE story SET status = ?, updated_at = ? "
+                "WHERE project = ? AND key = ?",
+                (status, utc_now(), project, key),
+            )
+        # exported unconditionally: an unchanged DB does not mean the FILE
+        # agrees with it, and write-through is what reconciles a hand edit
         return export(store, project, path)
 
 
