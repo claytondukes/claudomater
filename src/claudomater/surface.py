@@ -91,7 +91,10 @@ def _matches(path: str, pattern: str) -> bool:
     if pattern.endswith("/**"):
         prefix = pattern[:-3]
         return path == prefix or path.startswith(prefix + "/")
-    return fnmatch.fnmatch(path, pattern)
+    # fnmatchCASE: plain fnmatch normcases both sides, which makes the
+    # classification OS-dependent (case-insensitive on Windows) - a repo
+    # path's case is data, and 'readme.md' is not 'README*'
+    return fnmatch.fnmatchcase(path, pattern)
 
 
 def classify_path(path: str, rules: SurfaceRules) -> str:

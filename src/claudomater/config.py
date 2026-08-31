@@ -12,11 +12,14 @@ import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import yaml
 
 from claudomater.merge import MergeSeamError, RoundAlarm
+
+if TYPE_CHECKING:  # circular-import-free typing only
+    from claudomater.surface import SurfaceRules
 from claudomater.usage import DEFAULT_MAX_STALE_S
 
 PROJECT_CONFIG_NAME = ".omater.yaml"
@@ -198,7 +201,7 @@ class ProjectConfig:
     # document that governs them (the predecessor hardcoded them in code
     # and they drifted from the document within days). None = the project
     # declares no surface gate.
-    surface_rules: Any = None
+    surface_rules: "SurfaceRules | None" = None
     ci_tier_on_push: str | None = None  # None -> deployment_type default
     ci_tier_on_merge: str = "full"
     gates: dict[str, Any] = field(default_factory=dict)

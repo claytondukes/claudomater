@@ -245,3 +245,13 @@ class TestUi3AcceptanceReplays:
             classify_path("backend/services/health_score.py", _ui3_rules())
             == "surface"
         )
+
+
+class TestCaseSensitivity:
+    def test_matching_is_case_sensitive_on_every_os(self):
+        """Copilot round-1: plain fnmatch normcases both sides, making the
+        classification OS-dependent (case-insensitive on Windows). A repo
+        path's case is data: 'readme.md' is not 'README*'."""
+        rules = SurfaceRules(surface=("app/**",), exclude=("README*",))
+        assert classify_path("README.md", rules) == "excluded"
+        assert classify_path("readme.md", rules) == "neutral"
