@@ -320,8 +320,12 @@ def _cmd_sprint(args: argparse.Namespace) -> int:
         return EXIT_ERROR
     except OSError as exc:
         # `export`/`set` write as well as read, so a fixed "cannot read"
-        # would misdirect triage on a full disk or a failed rename
-        print(f"error: status file I/O failed ({path}): {exc}", file=sys.stderr)
+        # would misdirect triage on a full disk or a failed rename.
+        # Fall back to the RAW argument: resolve() itself can raise, and
+        # reporting "(None)" would drop the one detail that identifies
+        # which file the operator meant.
+        shown = path if path is not None else getattr(args, "path", None)
+        print(f"error: status file I/O failed ({shown}): {exc}", file=sys.stderr)
         return EXIT_ERROR
     except sqlite3.DatabaseError as exc:
         print(f"error: learning DB failure: {exc}", file=sys.stderr)

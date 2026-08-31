@@ -493,6 +493,31 @@ class TestOnDiskBytesSurviveExactly:
             "1-1-after-the-gap",
         ]
 
+    @pytest.mark.parametrize(
+        "line",
+        [
+            "  # Epic 2: a section header with text\n",
+            "#\n",
+            "    #deeply indented, no space after the hash\n",
+            "\n",
+            "   \n",
+        ],
+    )
+    def test_comment_and_blank_shapes_inside_the_block_are_passed_through(
+        self, tmp_path, line
+    ):
+        """PR #13 round 6 raised this as a defect (claiming only a bare
+        `#` matches). It does not reproduce - the pattern is applied with
+        match(), not fullmatch(), so `#` matching the first character is
+        enough - but the real file carries 298 such lines inside its data
+        block, so the behaviour is worth pinning rather than arguing."""
+        p = tmp_path / "c.yaml"
+        raw = ("development_status:\n  epic-1: done\n" + line + "  epic-2: backlog\n")
+        p.write_text(raw, encoding="utf-8")
+        doc = SprintDoc.read(p)
+        assert [e.key for e in doc.entries] == ["epic-1", "epic-2"]
+        assert doc.render() == raw
+
     def test_a_crlf_comment_line_inside_the_block_is_passed_through(self, tmp_path):
         p = tmp_path / "crlf-comment.yaml"
         raw = (
@@ -771,7 +796,11 @@ class TestSprintCli:
         monkeypatch.setattr(Path, "resolve", boom)
         rc = main(self._args(tmp_path, "import", "sprint-status.yaml"))
         assert rc == EXIT_ERROR
-        assert "status file I/O failed" in capsys.readouterr().err
+        err = capsys.readouterr().err
+        assert "status file I/O failed" in err
+        # the raw argument, since resolve() never produced a path - "(None)"
+        # would drop the one detail identifying which file was meant
+        assert "sprint-status.yaml" in err and "None" not in err
 
     def test_import_reports_keys_the_file_no_longer_carries(
         self, tmp_path, workfile, capsys
