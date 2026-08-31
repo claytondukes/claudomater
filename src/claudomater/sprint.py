@@ -35,6 +35,7 @@ from __future__ import annotations
 import os
 import re
 import stat
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping
@@ -110,23 +111,17 @@ class SprintError(Exception):
     pass
 
 
-# Text I/O for this module goes through exactly these two functions, so
-# newline handling is decided in ONE place. `newline=""` disables
-# universal-newline translation in both directions: without it
-# `read_text()` silently turns a CRLF file into LF (on every platform)
-# and `write_text()` turns LF into os.linesep on Windows — either of
-# which rewrites every line of a file this module promises not to touch.
-# The bug that motivated this was invisible to an in-memory test AND to
-# `round_trip_ok`, which compared normalized text to normalized text and
-# so returned True while the on-disk bytes changed.
+# EVERY read in this module goes through here, so newline handling is
+# decided in one place (the matching write side is `_write_atomically`).
+# `newline=""` disables universal-newline translation: without it
+# `read_text()` silently turns a CRLF file into LF on every platform,
+# rewriting every line of a file this module promises not to touch. That
+# bug was invisible to an in-memory test AND to `round_trip_ok`, which
+# compared normalized text to normalized text and so returned True while
+# the on-disk bytes changed.
 def _read_exact(path: Path) -> str:
     with path.open("r", encoding="utf-8", newline="") as fh:
         return fh.read()
-
-
-def _write_exact(path: Path, text: str) -> None:
-    with path.open("w", encoding="utf-8", newline="") as fh:
-        fh.write(text)
 
 
 @dataclass(frozen=True)
@@ -370,10 +365,23 @@ def _write_atomically(path: Path, text: str) -> None:
     record that the tool cannot reconstruct. The temp file is created in
     the SAME directory so `os.replace` is a real atomic rename rather
     than a cross-device copy.
+
+    The temp name is UNIQUE per call, not `.{name}.omater-tmp`: a fixed
+    name is shared state between processes, so a second writer staging to
+    it could overwrite the first writer's bytes (making the first
+    writer's `os.replace` publish content it never wrote) or rename it
+    away first (making the first writer fail for no real reason).
     """
-    tmp = path.with_name(f".{path.name}.omater-tmp")
+    fd, tmp_name = tempfile.mkstemp(
+        dir=path.parent, prefix=f".{path.name}.", suffix=".omater-tmp"
+    )
+    tmp = Path(tmp_name)
     try:
-        _write_exact(tmp, text)
+        # newline="" for the same reason `_read_exact` uses it: the text
+        # already carries the source's own line endings, and translating
+        # them here would rewrite every line
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as fh:
+            fh.write(text)
         os.chmod(tmp, stat.S_IMODE(path.stat().st_mode))
         os.replace(tmp, path)
     except BaseException:

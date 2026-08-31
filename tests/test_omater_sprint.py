@@ -700,6 +700,38 @@ class TestTheWriterAndItsExportNeverDisagree:
         assert leftovers == []
         assert statuses(store, "sample")["4-3-being-worked"] == "in-progress"
 
+    def test_concurrent_writers_do_not_share_a_temp_file(self, tmp_path, monkeypatch):
+        """PR #13 round 7. A fixed temp name let a second writer overwrite
+        the first writer's staged bytes, so the first writer's os.replace
+        published content it never wrote (or failed spuriously because its
+        temp had already been renamed away)."""
+        import claudomater.sprint as sprint_mod
+
+        target = tmp_path / "s.yaml"
+        target.write_text("original\n", encoding="utf-8")
+        seen: list[str] = []
+        real_chmod = os.chmod
+        fired = []
+
+        def chmod_hook(p, mode):
+            seen.append(str(p))
+            # fire once, at the moment writer A has staged its temp but has
+            # not yet replaced: a whole second writer runs start to finish
+            if not fired:
+                fired.append(True)
+                sprint_mod._write_atomically(target, "writer-B\n")
+            return real_chmod(p, mode)
+
+        monkeypatch.setattr(sprint_mod.os, "chmod", chmod_hook)
+        sprint_mod._write_atomically(target, "writer-A\n")
+        monkeypatch.setattr(sprint_mod.os, "chmod", real_chmod)
+
+        # A finished last, so A's bytes win - and A must not have failed
+        assert target.read_text(encoding="utf-8") == "writer-A\n"
+        # the two writers staged to DIFFERENT paths
+        assert len(seen) == 2 and seen[0] != seen[1]
+        assert [p.name for p in tmp_path.iterdir() if "omater-tmp" in p.name] == []
+
     def test_the_files_mode_survives_a_rewrite(self, store, workfile):
         import_path(store, "sample", workfile)
         os.chmod(workfile, 0o640)
@@ -839,6 +871,7 @@ class TestSprintCli:
         assert main(self._args(tmp_path, "status", "--json")) == EXIT_OK
         rows = json.loads(capsys.readouterr().out)
         assert {"key", "epic", "status", "updated_at"} == set(rows[0])
+
 
 
 def _line_for(doc: SprintDoc, key: str) -> str:
