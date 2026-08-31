@@ -1969,7 +1969,8 @@ def evaluate_pre_tool_use(
     # OMATER_SCRATCH_DIR — a hint pointing only at the default sends the
     # agent to the wrong place when a declared dir exists.
     redirect_hint = (
-        f"write inside the project ({root}) or a declared scratch dir "
+        f"write inside the project ({root}), a declared scratch dir, "
+        "or a declared artifact root "
         f"({', '.join(str(d) for d in scratch)})"
     )
 

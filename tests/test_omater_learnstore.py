@@ -639,7 +639,10 @@ class TestRound3Hardening:
 
     def test_unrelated_staged_work_is_excluded_not_refused(self, tmp_path):
         """Pre-existing staged edits in the dotfiles repo must never ride
-        the omater-learn: commit - and the refusal leaves them untouched."""
+        the omater-learn: commit - and sync leaves them staged exactly as
+        the operator had them. (This test predates slice D finding F2: it
+        originally asserted sync REFUSED on a dirty index; the pathspec-
+        limited commit now enforces the same intent without the refusal.)"""
         origin = tmp_path / "origin.git"
         subprocess.run(["git", "init", "-q", "--bare", str(origin)], check=True)
         repo = tmp_path / "dotfiles"
