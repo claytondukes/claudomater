@@ -1944,6 +1944,12 @@ def evaluate_pre_tool_use(
     fence, hook exit codes being what they are)."""
     if not isinstance(payload, dict):
         return True, None
+    # Tool-type gate FIRST: everything below (config read for artifact
+    # roots included) is work, and this hook runs synchronously on every
+    # tool call in a fenced session. A tool that cannot write needs none
+    # of it (PR #14 round 5).
+    if payload.get("tool_name", "") not in (*WRITE_TOOLS, "Bash"):
+        return True, None
     root = Path(os.path.realpath(Path(root).expanduser()))
     scratch = [
         Path(os.path.realpath(d)) for d in scratch_dirs_for(root, env)
