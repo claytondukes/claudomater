@@ -48,6 +48,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from claudomater.sprint import _write_atomically
 from claudomater.surface import SurfaceRules, classify_changed_files
 
 _STORY_ID_RE = re.compile(r"^\d+(?:-\d+)+$")
@@ -211,8 +212,16 @@ def author_step(
     spec["steps"].append(step)
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(
-            json.dumps(spec, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+        if not path.exists():
+            # _write_atomically preserves the target's mode, so the target
+            # must exist; a fresh spec starts with a normal file
+            path.touch()
+        # atomic replace (sprint.py's writer): the spec is a curated
+        # artifact hand edits share - a truncating write interrupted by a
+        # crash or a full disk would corrupt it and strand every future
+        # run behind a parse error
+        _write_atomically(
+            path, json.dumps(spec, indent=2, ensure_ascii=False) + "\n"
         )
     except OSError as exc:
         raise QaBoardError(f"cannot write {path}: {exc}") from exc
