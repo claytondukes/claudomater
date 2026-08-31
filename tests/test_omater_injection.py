@@ -12,6 +12,7 @@ self-promotes.
 from __future__ import annotations
 
 import itertools
+import json
 
 import pytest
 
@@ -460,3 +461,34 @@ class TestCandidacyCountsDistinctAppliedRuns:
         assert store.candidates() == []
         store.record_applied([lid], "run-2")  # second DISTINCT run qualifies
         assert [c["topic"] for c in store.candidates()] == ["single-run-hot"]
+
+
+class TestRejectedEntriesAreScrubbed:
+    """PR #12 round 7: rejected lessons_applied entries are agent-authored
+    text headed for events.jsonl and progress.log - scrubbed like every
+    other retained artifact."""
+
+    def test_denied_values_in_rejected_claims_never_reach_the_log(
+        self, tmp_path, store, monkeypatch
+    ):
+        monkeypatch.setenv("INJ_TEST_TOKEN", "sekret-value-99")
+        lid = lesson(store, "k")
+        log = RunLog.create(tmp_path)
+
+        class LeakyClaim:
+            def run(self, spec, model):
+                return ExecutionResult(
+                    text='x\n```json\n{"status": "ok", '
+                         '"lessons_applied": ["sekret-value-99 leaked"]}\n```'
+                )
+
+        runner = PhaseRunner(
+            tmp_path, log, LeakyClaim(), learn_store=store,
+            secrets_deny=("INJ_TEST_TOKEN",),
+        )
+        runner.run_phase(PhaseSpec("dev", "m", "p", injected_lessons=(lid,)))
+        (ev,) = [e for e in log.events() if e["event"] == "lessons-applied"]
+        assert "sekret-value-99" not in json.dumps(ev["detail"])
+        assert "[REDACTED:INJ_TEST_TOKEN]" in ev["detail"]["rejected"][0]
+        progress = (log.run_dir / "progress.log").read_text(encoding="utf-8")
+        assert "sekret-value-99" not in progress

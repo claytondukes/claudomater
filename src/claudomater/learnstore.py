@@ -578,10 +578,13 @@ class LearnStore:
     def record_applied(self, lesson_ids: Sequence[int], run_id: str) -> None:
         """Count a VERIFIED phase's self-reported `lessons_applied`:
         `refs` increments per use; `sessions` increments only the first
-        time this run uses the lesson (sessions = distinct runs, tracked in
-        the local-only lesson_use table). Callers pass ids already
-        validated against the injected set — nothing here re-checks that,
-        so validation stays where the provenance event is written."""
+        time this run uses the lesson. Note the off-by-one by design:
+        `sessions` starts at the schema default 1 (the CREATING session),
+        so it reads 1 + distinct applied runs — which is why candidacy
+        counts lesson_use rows (applied runs exactly) instead of trusting
+        this column. Callers pass ids already validated against the
+        injected set — nothing here re-checks that, so validation stays
+        where the provenance event is written."""
         # one transaction for the whole batch: the caller swallows failures
         # (a verified phase must not fail on accounting), so a mid-loop
         # raise must roll back cleanly instead of leaving a partial open

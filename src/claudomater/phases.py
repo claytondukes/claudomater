@@ -828,7 +828,11 @@ class PhaseRunner:
                 if item not in applied:
                     applied.append(item)
             else:
-                rejected.append(item)
+                # rejected entries are AGENT-authored values headed for the
+                # run log and progress.log: scrub strings like every other
+                # retained artifact (the contract makes no exception for
+                # malformed claims — those are the likeliest to carry junk)
+                rejected.append(self._scrub(item) if isinstance(item, str) else item)
         self.runlog.event(
             spec.name,
             "lessons-applied",
