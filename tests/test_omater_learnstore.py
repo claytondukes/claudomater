@@ -877,3 +877,38 @@ class TestSyncRemoteErrors:
         with pytest.raises(LearnStoreError, match="git remote failed"):
             sync(s)
         s.close()
+
+
+class TestSyncStagesOnlyTheExport:
+    """PR #11 round 9: `git add` on the whole export directory swept strays
+    (editor backups, OS metadata, rogue jsonl) into a commit that must
+    carry ONLY the lessons export - staging is now the exact canonical
+    per-scope file list."""
+
+    def test_strays_in_the_export_dir_never_ride_the_commit(self, tmp_path):
+        origin = tmp_path / "origin.git"
+        subprocess.run(["git", "init", "-q", "--bare", str(origin)], check=True)
+        repo = tmp_path / "dotfiles"
+        subprocess.run(["git", "clone", "-q", str(origin), str(repo)], check=True)
+        git(repo, "config", "user.email", "t@t")
+        git(repo, "config", "user.name", "t")
+        (repo / "seed.txt").write_text("x", encoding="utf-8")
+        git(repo, "add", "-A")
+        git(repo, "commit", "-q", "-m", "seed")
+        git(repo, "push", "-q")
+        export_dir = repo / "omater" / "lessons"
+        s = LearnStore.open(tmp_path / "l.db", export_dir=export_dir,
+                            now=ticking_now())
+        seed(s)
+        for stray in (".DS_Store", "notes.txt~", "rogue.jsonl"):
+            (export_dir / stray).write_text("stray", encoding="utf-8")
+        result = sync(s)
+        assert result["committed"] is True
+        committed = git(repo, "show", "--name-only", "--format=", "HEAD").stdout
+        assert "global.jsonl" in committed
+        for stray in (".DS_Store", "notes.txt~", "rogue.jsonl"):
+            assert stray not in committed
+        # and the strays are not left staged either
+        staged = git(repo, "diff", "--cached", "--name-only").stdout
+        assert staged.strip() == ""
+        s.close()

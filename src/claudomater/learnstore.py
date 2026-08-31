@@ -732,10 +732,16 @@ def sync(
                 "git pull --ff-only failed - resolve the export repo by hand "
                 f"before syncing: {pull.stderr.strip()}"
             )
-    # import_dir ends with the write-through export (export_dir is
-    # guaranteed configured here), so no second export pass is needed
     stats = store.import_dir()
-    add = _git(repo, "add", "--", str(export_dir))
+    # export() is how sync learns the exact canonical artifact list — the
+    # file writes inside are no-ops (import_dir's write-through already ran,
+    # and unchanged files are skipped). Staging the whole directory instead
+    # would sweep strays (editor backups, OS metadata, a rogue .jsonl) into
+    # a commit that must carry ONLY the lessons export.
+    export_files = store.export()
+    if not export_files:
+        return {**stats.as_dict(), "committed": False, "pushed": False}
+    add = _git(repo, "add", "--", *(str(p) for p in export_files))
     if add.returncode != 0:
         raise LearnStoreError(f"git add failed: {add.stderr.strip()}")
     staged = _git(repo, "diff", "--cached", "--quiet", "--", str(export_dir))
