@@ -23,6 +23,7 @@ from claudomater.sprint import (
     export,
     import_doc,
     import_path,
+    orphaned_keys,
     round_trip_ok,
     set_status,
     statuses,
@@ -581,6 +582,58 @@ class TestUpdatedAtMeansWhenTheStatusChanged:
             set_status(store, "sample", "4-3-being-worked", "review", workfile)
 
 
+class TestImportRefreshesMembershipLoudly:
+    """PR #13 round 5. A key deleted from the file stayed in the DB, so
+    `export` failed with "tracked but absent" immediately after a fresh
+    import and no tool could clear it. Deleting is now possible but never
+    automatic: the DB is on its way to being the writer, so dropping its
+    rows because a DERIVED artifact lost a line is backwards, and a
+    truncated file would silently delete real tracking."""
+
+    def _drop_line(self, path: Path, key: str) -> None:
+        kept = [
+            line
+            for line in path.read_text(encoding="utf-8").splitlines(keepends=True)
+            if not line.strip().startswith(f"{key}:")
+        ]
+        path.write_text("".join(kept), encoding="utf-8")
+
+    def test_a_key_removed_from_the_file_is_reported_not_deleted(
+        self, store, workfile
+    ):
+        import_path(store, "sample", workfile)
+        self._drop_line(workfile, "4-1-already-shipped")
+        import_path(store, "sample", workfile)
+        assert orphaned_keys(store, "sample", SprintDoc.read(workfile)) == [
+            "4-1-already-shipped"
+        ]
+        assert "4-1-already-shipped" in statuses(store, "sample")
+
+    def test_export_names_the_remedy_for_a_stale_tracked_key(self, store, workfile):
+        import_path(store, "sample", workfile)
+        self._drop_line(workfile, "4-1-already-shipped")
+        with pytest.raises(SprintError, match="--prune"):
+            export(store, "sample", workfile)
+
+    def test_prune_removes_them_deliberately(self, store, workfile):
+        import_path(store, "sample", workfile)
+        self._drop_line(workfile, "4-1-already-shipped")
+        import_path(store, "sample", workfile, prune=True)
+        assert "4-1-already-shipped" not in statuses(store, "sample")
+        assert export(store, "sample", workfile) is False
+
+    def test_prune_never_reaches_another_project(self, store, workfile):
+        import_path(store, "sample", workfile)
+        import_path(store, "other", workfile)
+        self._drop_line(workfile, "4-1-already-shipped")
+        import_path(store, "sample", workfile, prune=True)
+        assert "4-1-already-shipped" in statuses(store, "other")
+
+    def test_orphans_are_empty_for_a_matching_file(self, store, workfile):
+        import_path(store, "sample", workfile)
+        assert orphaned_keys(store, "sample", SprintDoc.read(workfile)) == []
+
+
 class TestTheWriterAndItsExportNeverDisagree:
     """Write-through means the file write is PART of the operation: if it
     cannot land, the DB write must not survive it either."""
@@ -703,6 +756,53 @@ class TestSprintCli:
         capsys.readouterr()
         assert main(self._args(tmp_path, "export", str(workfile))) == EXIT_OK
         assert "already in sync" in capsys.readouterr().out
+
+    def test_a_resolve_failure_is_a_cli_error_not_a_traceback(
+        self, tmp_path, capsys, monkeypatch
+    ):
+        """PR #13 round 5. `Path.resolve()` reads the filesystem and calls
+        getcwd() for a relative path, so it raises OSError when the
+        working directory has been deleted. Running it before the try
+        let that escape as a traceback."""
+
+        def boom(self, *a, **kw):
+            raise FileNotFoundError(2, "No such file or directory")
+
+        monkeypatch.setattr(Path, "resolve", boom)
+        rc = main(self._args(tmp_path, "import", "sprint-status.yaml"))
+        assert rc == EXIT_ERROR
+        assert "status file I/O failed" in capsys.readouterr().err
+
+    def test_import_reports_keys_the_file_no_longer_carries(
+        self, tmp_path, workfile, capsys
+    ):
+        assert main(self._args(tmp_path, "import", str(workfile))) == EXIT_OK
+        capsys.readouterr()
+        kept = [
+            line
+            for line in workfile.read_text(encoding="utf-8").splitlines(keepends=True)
+            if not line.strip().startswith("4-1-already-shipped:")
+        ]
+        workfile.write_text("".join(kept), encoding="utf-8")
+        assert main(self._args(tmp_path, "import", str(workfile))) == EXIT_OK
+        out = capsys.readouterr().out
+        assert "tracked but absent from the file: 4-1-already-shipped" in out
+        assert "--prune" in out
+        # reported, NOT deleted
+        assert main(self._args(tmp_path, "export", str(workfile))) == EXIT_ERROR
+
+    def test_prune_clears_them_and_export_recovers(self, tmp_path, workfile, capsys):
+        assert main(self._args(tmp_path, "import", str(workfile))) == EXIT_OK
+        kept = [
+            line
+            for line in workfile.read_text(encoding="utf-8").splitlines(keepends=True)
+            if not line.strip().startswith("4-1-already-shipped:")
+        ]
+        workfile.write_text("".join(kept), encoding="utf-8")
+        capsys.readouterr()
+        assert main(self._args(tmp_path, "import", str(workfile), "--prune")) == EXIT_OK
+        assert "pruned: 4-1-already-shipped" in capsys.readouterr().out
+        assert main(self._args(tmp_path, "export", str(workfile))) == EXIT_OK
 
     def test_status_json_is_machine_readable(self, tmp_path, workfile, capsys):
         assert main(self._args(tmp_path, "import", str(workfile))) == EXIT_OK

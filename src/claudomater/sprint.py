@@ -311,7 +311,19 @@ def _validate_status(kind: str, status: str, key: str) -> None:
 # ---- the DB side -------------------------------------------------------
 
 
-def import_doc(store: LearnStore, project: str, doc: SprintDoc) -> int:
+def orphaned_keys(store: LearnStore, project: str, doc: SprintDoc) -> list[str]:
+    """Keys the DB tracks that the document no longer carries.
+
+    A divergence someone has to decide about, which is why it is reported
+    rather than resolved: see `import_doc`'s `prune`.
+    """
+    known = doc.statuses()
+    return sorted(k for k in statuses(store, project) if k not in known)
+
+
+def import_doc(
+    store: LearnStore, project: str, doc: SprintDoc, prune: bool = False
+) -> int:
     """Seed/refresh the `story` rows from the file. Returns the number of
     entries READ (not the number that changed — `updated_at` deliberately
     only moves when a row's status or epic actually changed, so it keeps
@@ -320,6 +332,15 @@ def import_doc(store: LearnStore, project: str, doc: SprintDoc) -> int:
     The file is the seed, so its values land VERBATIM — a legacy
     `optional` retro line imports as `optional`, because the DB is a
     mirror of the audit record, not a corrected version of it.
+
+    `prune` removes rows for keys the document no longer carries. It is
+    OPT-IN, and deliberately not the default: the DB is on its way to
+    being the writer, so dropping its rows because a DERIVED artifact
+    lost a line is backwards, and an accidentally truncated file would
+    delete real tracking without a word. Without it, orphans are
+    reported (`orphaned_keys`) and `export` refuses until a human
+    decides — the divergence stays visible instead of being resolved by
+    whichever side was read most recently.
     """
     now = utc_now()
     rows = [(project, e.key, e.epic, e.status, now) for e in doc.entries]
@@ -332,6 +353,12 @@ def import_doc(store: LearnStore, project: str, doc: SprintDoc) -> int:
             "OR story.epic != excluded.epic",
             rows,
         )
+        if prune:
+            stale = orphaned_keys(store, project, doc)
+            store.conn.executemany(
+                "DELETE FROM story WHERE project = ? AND key = ?",
+                [(project, key) for key in stale],
+            )
     return len(rows)
 
 
@@ -449,7 +476,9 @@ def export(store: LearnStore, project: str, path: Path) -> bool:
     if missing:
         raise SprintError(
             f"tracked but absent from {path.name}: {', '.join(missing)} — "
-            "the exporter rewrites status tokens, it never adds lines"
+            "the exporter rewrites status tokens, it never adds lines. If "
+            "those keys were deliberately removed from the file, clear "
+            "them with `omater sprint import --prune`"
         )
     updates = {k: v for k, v in db.items() if known[k] != v}
     rendered = doc.with_statuses(updates).render()
@@ -466,8 +495,10 @@ def round_trip_ok(path: Path) -> bool:
     return SprintDoc.parse(text).render() == text
 
 
-def import_path(store: LearnStore, project: str, path: Path) -> int:
-    return import_doc(store, project, SprintDoc.read(path))
+def import_path(
+    store: LearnStore, project: str, path: Path, prune: bool = False
+) -> int:
+    return import_doc(store, project, SprintDoc.read(path), prune=prune)
 
 
 def unknown_statuses(doc: SprintDoc) -> list[SprintEntry]:

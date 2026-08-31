@@ -265,11 +265,20 @@ def _cmd_sprint(args: argparse.Namespace) -> int:
     except (ConfigError, learnstore.LearnStoreError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return EXIT_ERROR
-    path = Path(args.path).resolve() if getattr(args, "path", None) else None
+    path = None
     try:
+        # resolve() INSIDE the try: it reads the filesystem (and calls
+        # getcwd() for a relative path), so it can raise OSError — a
+        # deleted working directory does exactly that — and outside the
+        # try that escapes as a traceback
+        if getattr(args, "path", None):
+            path = Path(args.path).resolve()
         if args.sprint_cmd == "import":
             doc = sprint_mod.SprintDoc.read(path)
-            count = sprint_mod.import_doc(store, args.sprint_project, doc)
+            stale = sprint_mod.orphaned_keys(store, args.sprint_project, doc)
+            count = sprint_mod.import_doc(
+                store, args.sprint_project, doc, prune=args.prune
+            )
             print(f"imported {count} row(s) from {path}")
             for entry in sprint_mod.unknown_statuses(doc):
                 # surfaced, never corrected: legacy values are audit trail
@@ -277,6 +286,16 @@ def _cmd_sprint(args: argparse.Namespace) -> int:
                     f"  legacy value (left untouched): line {entry.line_no} "
                     f"{entry.key}: {entry.status}"
                 )
+            if stale:
+                print(
+                    f"  {'pruned' if args.prune else 'tracked but absent from the file'}: "
+                    f"{', '.join(stale)}"
+                )
+                if not args.prune:
+                    print(
+                        "  export will refuse until these are resolved; "
+                        "clear them with --prune if the removal was deliberate"
+                    )
         elif args.sprint_cmd == "export":
             changed = sprint_mod.export(store, args.sprint_project, path)
             print(f"{path}: {'rewritten' if changed else 'already in sync'}")
@@ -461,6 +480,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = _sprint_parser("import", "seed the DB from an existing sprint-status.yaml")
     sp.add_argument("path", help="path to sprint-status.yaml")
+    sp.add_argument(
+        "--prune",
+        action="store_true",
+        help="also DELETE tracked rows the file no longer carries "
+        "(off by default: an accidentally truncated file would drop real tracking)",
+    )
 
     sp = _sprint_parser("export", "write the DB's statuses through to the file")
     sp.add_argument("path", help="path to sprint-status.yaml")

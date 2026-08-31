@@ -95,7 +95,10 @@ Phase 0 skeleton — the pieces every pipeline run stands on:
   `4-5-1-...` ambiguous between epic 4 and epic 4-5). A key the DB tracks
   but the file lacks is a loud failure, never an appended line: choosing
   where a new story belongs is a planning decision the exporter has no
-  basis to make.
+  basis to make. A key the file drops is the mirror case: reported, and
+  removed only by an explicit `import --prune`, because the DB is on its
+  way to being the writer and a truncated file must not delete real
+  tracking as a side effect.
 - **`omater init`** — writes a starter `.omater.yaml` and gitignores the
   runs dir. The PreToolUse write fence (denies Write/Edit outside the
   project root, pattern-matches Bash for out-of-tree writes) is RUN-SCOPED
@@ -138,7 +141,8 @@ omater usage         # guardrail snapshot + decision
 | `omater learn candidates` | Promotion candidates (3+ uses across 2+ runs) for human review |
 | `omater learn promote --scope S --domain D --topic T` | HUMAN-gated: make a lesson always-loaded for its scope (line-budgeted) |
 | `omater learn export\|import\|sync [--push]` | Deterministic per-scope JSONL export; import (latest wins); pull→import→export→commit |
-| `omater sprint import\|export PATH` | Seed the DB from a `sprint-status.yaml`; write the DB's statuses back through it (byte-exact apart from flipped tokens) |
+| `omater sprint import PATH [--prune]` | Seed the DB from a `sprint-status.yaml`; `--prune` also drops tracked rows the file no longer carries (opt-in, never automatic) |
+| `omater sprint export PATH` | Write the DB's statuses back through the file (byte-exact apart from flipped tokens) |
 | `omater sprint set KEY STATUS PATH` | Flip one status: validated for the key's kind, written to the DB, then written through to the file |
 | `omater sprint status [--epic N] [--json]` | The sprint view, rendered on demand from the tables |
 | `omater resume\|abort\|approve [--run ID]` | Write a control event a paused/escalated run consumes (also under `omater control …`) |
