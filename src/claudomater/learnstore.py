@@ -1061,9 +1061,27 @@ def sync(
         raise LearnStoreError(f"git diff failed: {staged.stderr.strip()}")
     committed = False
     if staged.returncode == 1:
-        message = (
-            f"omater-learn: sync ({stats.new} new, {stats.updated} updated)"
+        # The message reports THE COMMIT'S OWN DIFF, not the pull-side
+        # import counters (epic-47 retro F7: six commits all said
+        # "0 new, 0 updated" while adding 13 lessons - the import counts
+        # what the FILE taught the DB, but the commit carries what the DB
+        # taught the file). One JSONL line = one lesson row, so numstat's
+        # added/deleted line counts ARE row counts.
+        numstat = _git(
+            repo, "diff", "--cached", "--numstat", "--",
+            *(str(pp) for pp in export_files),
         )
+        if numstat.returncode != 0:
+            raise LearnStoreError(f"git diff --numstat failed: {numstat.stderr.strip()}")
+        added = deleted = 0
+        for line in numstat.stdout.splitlines():
+            parts = line.split("\t")
+            if len(parts) >= 2 and parts[0].isdigit() and parts[1].isdigit():
+                added += int(parts[0])
+                deleted += int(parts[1])
+        message = f"omater-learn: sync (+{added}/-{deleted} lesson rows)"
+        if stats.new or stats.updated:
+            message += f"; import: {stats.new} new, {stats.updated} updated"
         # `--only -- <export files>`: commits ONLY these paths, so unrelated
         # staged work stays staged instead of being misfiled under lesson
         # history. --only is already git's default when paths are given

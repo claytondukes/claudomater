@@ -1187,3 +1187,35 @@ class TestStagedCheckMatchesTheCommitPathspec:
         staged = git(repo, "diff", "--cached", "--name-only").stdout
         assert "omater/lessons/.keep" in staged
         s.close()
+
+
+class TestSyncMessageCountsItsOwnDiff:
+    """Epic-47 retro F7: six sync commits all said '0 new, 0 updated'
+    while adding 13 lessons - the import counters describe the pull side,
+    not the commit. The message now reports the STAGED export diff."""
+
+    def test_a_sync_adding_one_lesson_names_one(self, tmp_path):
+        origin = tmp_path / "origin.git"
+        subprocess.run(["git", "init", "-q", "--bare", str(origin)], check=True)
+        repo = tmp_path / "dotfiles"
+        subprocess.run(["git", "clone", "-q", str(origin), str(repo)], check=True)
+        git(repo, "config", "user.email", "t@t")
+        git(repo, "config", "user.name", "t")
+        (repo / "seed.txt").write_text("x", encoding="utf-8")
+        git(repo, "add", "-A")
+        git(repo, "commit", "-q", "-m", "seed")
+        git(repo, "push", "-q")
+        s = LearnStore.open(
+            tmp_path / "l.db", export_dir=repo / "omater" / "lessons",
+            now=ticking_now(),
+        )
+        try:
+            s.add("global", "tooling", "one-rule", "the rule", "the why")
+            sync(s)
+            subject = git(repo, "log", "-1", "--format=%s").stdout.strip()
+            assert "+1/-0 lesson rows" in subject, subject
+            # import taught the DB nothing (the DB taught the file), so no
+            # misleading import clause rides the message
+            assert "0 new" not in subject
+        finally:
+            s.close()

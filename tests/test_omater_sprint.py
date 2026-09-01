@@ -21,6 +21,8 @@ from claudomater.sprint import (
     SprintDoc,
     SprintError,
     export,
+    require_dod,
+    set_story_file_status,
     import_doc,
     import_path,
     orphaned_keys,
@@ -1346,6 +1348,12 @@ class TestSprintCliSliceB:
         )
         return db
 
+    @staticmethod
+    def _dod_file(tmp_path):
+        f = tmp_path / "epic-5-under-test.md"
+        f.write_text("# Epic 5\n\n## Definition of Done\n\n- ships\n")
+        return f
+
     def test_add_epic_cli_creates_and_reports(self, tmp_path, workfile, capsys):
         db = self._seeded(tmp_path, workfile)
         rc = main(
@@ -1364,6 +1372,8 @@ class TestSprintCliSliceB:
                 str(tmp_path / "exp"),
                 "--sprint-project",
                 "sample",
+                "--epic-file",
+                str(self._dod_file(tmp_path)),
             ]
         )
         out = capsys.readouterr().out
@@ -1385,6 +1395,8 @@ class TestSprintCliSliceB:
                 str(tmp_path / "exp"),
                 "--sprint-project",
                 "sample",
+                "--epic-file",
+                str(self._dod_file(tmp_path)),
             ]
         )
         assert rc == EXIT_ERROR
@@ -1469,3 +1481,101 @@ class TestRetroBanScanRoundTwo:
         # the STRIPPED form (separator's single space glued straight onto
         # the key) must not appear - that's what hiding the indent looks like
         assert ": epic-3-retrospective" not in out
+
+
+class TestRequireDod:
+    """Epic-47 retro F8: an epic registers with a machine-checkable DoD or
+    not at all."""
+
+    def test_a_file_with_the_anchored_heading_passes(self, tmp_path):
+        f = tmp_path / "epic-9-thing.md"
+        f.write_text("# Epic 9\n\n## Definition of Done\n\n- [ ] ships\n")
+        require_dod(f)  # no raise
+
+    def test_a_numbered_or_decorated_heading_fails(self, tmp_path):
+        """The epic-26 shape: `## 8 - Definition of Done` misses the
+        anchor, which is exactly why it broke the waiver lookup."""
+        f = tmp_path / "epic-9-thing.md"
+        f.write_text("# Epic 9\n\n## 8 - Definition of Done\n")
+        with pytest.raises(SprintError, match="no `## Definition of Done`"):
+            require_dod(f)
+
+    def test_a_missing_file_is_the_louder_failure(self, tmp_path):
+        with pytest.raises(SprintError, match="cannot read epic file"):
+            require_dod(tmp_path / "absent.md")
+
+    def test_add_epic_refuses_without_a_dod(self, tmp_path):
+        from claudomater.learnstore import LearnStore
+        from claudomater.sprint import add_epic
+
+        store = LearnStore.open(tmp_path / "l.db")
+        try:
+            work = tmp_path / "s.yaml"
+            work.write_text(
+                "development_status:\n  epic-1: done\n"
+                "  epic-1-retrospective: done\n"
+            )
+            epic_file = tmp_path / "epic-2-x.md"
+            epic_file.write_text("# Epic 2\n\nno dod here\n")
+            with pytest.raises(SprintError, match="Definition of Done"):
+                add_epic(store, "p", work, "2", epic_file=epic_file)
+            # BEFORE any write: the file gained no block
+            assert "epic-2" not in work.read_text()
+        finally:
+            store.close()
+
+    def test_add_epic_registers_with_a_dod(self, tmp_path):
+        from claudomater.learnstore import LearnStore
+        from claudomater.sprint import add_epic
+
+        store = LearnStore.open(tmp_path / "l.db")
+        try:
+            work = tmp_path / "s.yaml"
+            work.write_text(
+                "development_status:\n  epic-1: done\n"
+                "  epic-1-retrospective: done\n"
+            )
+            epic_file = tmp_path / "epic-2-x.md"
+            epic_file.write_text("# Epic 2\n\n## Definition of Done\n\n- x\n")
+            keys = add_epic(store, "p", work, "2", epic_file=epic_file)
+            assert keys[0] == "epic-2"
+        finally:
+            store.close()
+
+
+class TestSetStoryFileStatus:
+    """Epic-47 retro F1: the finish flow owns the story FILE's flip too."""
+
+    STORY = "# Story 9-1\n\nStatus: review\n\n## Story\n\ntext\n"
+
+    def test_flips_and_returns_previous(self, tmp_path):
+        f = tmp_path / "9-1-x.md"
+        f.write_text(self.STORY)
+        assert set_story_file_status(f, "done") == "review"
+        assert "Status: done\n" in f.read_text()
+        # every other byte survives
+        assert f.read_text() == self.STORY.replace("Status: review", "Status: done")
+
+    def test_bold_status_lines_flip_too(self, tmp_path):
+        f = tmp_path / "9-1-x.md"
+        f.write_text("# S\n\n**Status:** review\n")
+        assert set_story_file_status(f, "done") == "review"
+        assert "**Status:** done" in f.read_text()
+
+    def test_no_status_line_raises(self, tmp_path):
+        f = tmp_path / "9-1-x.md"
+        f.write_text("# S\n\nno status here\n")
+        with pytest.raises(SprintError, match="no `Status:` line"):
+            set_story_file_status(f, "done")
+
+    def test_multiple_status_lines_refuse_to_guess(self, tmp_path):
+        f = tmp_path / "9-1-x.md"
+        f.write_text("Status: review\n\nStatus: done\n")
+        with pytest.raises(SprintError, match="refusing to guess"):
+            set_story_file_status(f, "done")
+
+    def test_the_write_vocabulary_gates_the_flip(self, tmp_path):
+        f = tmp_path / "9-1-x.md"
+        f.write_text(self.STORY)
+        with pytest.raises(SprintError):
+            set_story_file_status(f, "finished")

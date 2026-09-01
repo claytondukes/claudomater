@@ -316,6 +316,20 @@ def inject_lessons(
     )
 
 
+def inject_conventions(spec: PhaseSpec, cfg: Any) -> PhaseSpec:
+    """Compose the project's `conventions:` block into a phase spec - the
+    ONE seam, mirroring `inject_lessons`, so what every agent receives is
+    exactly what the tracked config's diff shows (epic-47 close
+    follow-up: the GO prompt must not be the load-bearing carrier of
+    standing policy). An empty list returns the spec unchanged."""
+    from claudomater.conventions import conventions_block
+
+    block = conventions_block(getattr(cfg, "conventions", ()))
+    if not block:
+        return spec
+    return replace(spec, prompt=f"{spec.prompt}\n\n{block}")
+
+
 RETRY_FEEDBACK_HEADER = "## Previous attempt failures (address these first)"
 
 # The fixed instruction frame the quoted evidence sits under (parity finding
