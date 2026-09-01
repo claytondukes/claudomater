@@ -163,6 +163,20 @@ class TestAppendIsIdempotent:
         with pytest.raises(MetricsError, match=field):
             load_rows(p)
 
+    def test_a_missing_surface_verdict_is_refused_not_waived(self):
+        """Copilot round 5: a finish_result without surface_touching was
+        silently recorded as a waiver - the wrong outcome, quietly."""
+        with pytest.raises(MetricsError, match="surface_touching"):
+            compose_row("47-1", "47", {"step_key": "47-1-01"}, FACTS)
+        with pytest.raises(MetricsError, match="surface_touching"):
+            compose_row("47-1", "47", {"surface_touching": "yes"}, FACTS)
+
+    def test_non_mapping_inputs_are_typed_errors_at_compose(self):
+        with pytest.raises(MetricsError, match="finish_result"):
+            compose_row("47-1", "47", None, FACTS)
+        with pytest.raises(MetricsError, match="driver_facts"):
+            compose_row("47-1", "47", FINISH_SURFACE, None)
+
     def test_a_mistyped_fact_is_refused_at_compose(self):
         """The same validator runs at WRITE time - a mistyped row must
         never land in the store and poison every later read."""
@@ -188,6 +202,25 @@ class TestAppendIsIdempotent:
         store and only surface at the next load."""
         with pytest.raises(MetricsError, match="missing field"):
             append_row(tmp_path / "stories.jsonl", {"story_id": "47-1"})
+
+    def test_a_non_mapping_row_is_a_typed_error(self, tmp_path):
+        """Copilot round 5: dict() on a non-mapping raised raw TypeError/
+        ValueError instead of the store's MetricsError contract."""
+        with pytest.raises(MetricsError, match="not a mapping"):
+            append_row(tmp_path / "stories.jsonl", ["not", "a", "mapping"])
+
+    def test_numeric_type_does_not_break_idempotency(self, tmp_path):
+        """Copilot round 5: cost 20 (int) vs 20.0 (float) is the same
+        row - a retry differing only in numeric type must converge, not
+        refuse as a DIFFERENT record."""
+        p = tmp_path / "stories.jsonl"
+        row = compose_row(
+            "47-1", "47", FINISH_SURFACE, {**FACTS, "cost_usd": 20.0}
+        )
+        assert append_row(p, row) is True
+        retry = {**row, "cost_usd": 20}
+        assert append_row(p, retry) is False
+        assert len(load_rows(p)) == 1
 
     def test_a_write_io_failure_is_a_typed_error(self, tmp_path):
         """Copilot round 4: an OSError on the write path (here: a

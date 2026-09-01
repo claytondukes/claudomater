@@ -47,6 +47,24 @@ def compose_row(
     story_id: str, epic_id: str, finish_result: Mapping[str, Any],
     driver_facts: Mapping[str, Any],
 ) -> dict[str, Any]:
+    for name, value in (
+        ("finish_result", finish_result),
+        ("driver_facts", driver_facts),
+    ):
+        if not isinstance(value, Mapping):
+            raise MetricsError(
+                f"metrics row for {story_id}: {name} must be a mapping, "
+                f"got {type(value).__name__}"
+            )
+    # the verdict must be stated, and stated as a bool - a finish_result
+    # merely MISSING surface_touching would otherwise record a waiver,
+    # which is the wrong outcome written quietly
+    surface = finish_result.get("surface_touching")
+    if not isinstance(surface, bool):
+        raise MetricsError(
+            f"metrics row for {story_id}: finish_result.surface_touching "
+            f"must be a boolean, got {surface!r}"
+        )
     missing = [k for k in DRIVER_FIELDS if k not in driver_facts]
     if missing:
         raise MetricsError(
@@ -59,7 +77,7 @@ def compose_row(
             f"metrics row for {story_id} has unknown driver fact(s): "
             f"{sorted(unknown)}"
         )
-    if finish_result.get("surface_touching"):
+    if surface:
         step_key = finish_result.get("step_key")
         section_id = finish_result.get("section_id")
         if not (isinstance(step_key, str) and step_key.strip()) or section_id is None:
@@ -216,26 +234,36 @@ def append_row(path: Path | str, row: Mapping[str, Any]) -> bool:
     same story refuses - two conflicting records of one story is worse
     than one wrong one, because nothing downstream can tell which lies."""
     p = Path(path)
+    try:
+        candidate = dict(row)
+    except (TypeError, ValueError) as exc:
+        raise MetricsError(
+            f"row passed to append_row for {p} is not a mapping: {exc}"
+        ) from exc
     # never trust the caller (backfill tooling hand-builds dicts): a
     # malformed row appended here would only surface at the next load
-    _validate_row(dict(row), f"row passed to append_row for {p}")
+    _validate_row(candidate, f"row passed to append_row for {p}")
+    # canonical numeric form: cost 20 and 20.0 are the same row - a retry
+    # differing only in numeric type must converge, not refuse
+    candidate["cost_usd"] = float(candidate["cost_usd"])
+    canon = json.dumps(candidate, sort_keys=True)
     try:
         p.parent.mkdir(parents=True, exist_ok=True)
         with _store_lock(p):
-            existing = load_rows(p)
-            canon = json.dumps(dict(row), sort_keys=True)
-            for prior in existing:
-                if prior.get("story_id") == row.get("story_id"):
-                    if json.dumps(prior, sort_keys=True) == canon:
+            for prior in load_rows(p):
+                if prior.get("story_id") == candidate["story_id"]:
+                    prior_canon = dict(prior)
+                    prior_canon["cost_usd"] = float(prior_canon["cost_usd"])
+                    if json.dumps(prior_canon, sort_keys=True) == canon:
                         return False
                     raise MetricsError(
                         f"{p} already carries a DIFFERENT row for "
-                        f"{row.get('story_id')!r} - refusing a conflicting "
+                        f"{candidate['story_id']!r} - refusing a conflicting "
                         "second record; correct the existing row "
                         "deliberately instead"
                     )
             with p.open("a", encoding="utf-8") as fh:
-                fh.write(json.dumps(dict(row), sort_keys=True) + "\n")
+                fh.write(canon + "\n")
             return True
     except OSError as exc:
         # mkdir/lock/write failures surface typed, matching load_rows -
