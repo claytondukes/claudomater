@@ -26,7 +26,7 @@
 | `omater learn search QUERY [--scope S]` | FTS over rule+why, live rows only |
 | `omater learn candidates` | Promotion candidates (3+ uses across 2+ runs) for human review |
 | `omater learn promote --scope S --domain D --topic T` | HUMAN-gated: make a lesson always-loaded for its scope (line-budgeted) |
-| `omater learn export \| import \| sync [--push]` | Deterministic per-scope JSONL export; import (latest wins); pull-import-export-commit |
+| `omater learn export \| import \| sync [--push]` | Deterministic per-scope JSONL export; import (latest wins); sync = git pull, then import, export, and commit |
 
 ## Sprint
 

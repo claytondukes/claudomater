@@ -18,6 +18,8 @@ omater init           # in the project you want to orchestrate
 omater usage          # guardrail snapshot + decision
 omater start          # arm the fence + commit guard, open the run log
 tail -f .omater/runs/current/progress.log
+...                   # your driver runs phases
+omater teardown       # disarm everything - a driver that starts a run ends it
 ```
 
 No BMAD files or tooling are required - see
