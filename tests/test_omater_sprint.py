@@ -1351,7 +1351,7 @@ class TestSprintCliSliceB:
     @staticmethod
     def _dod_file(tmp_path):
         f = tmp_path / "epic-5-under-test.md"
-        f.write_text("# Epic 5\n\n## Definition of Done\n\n- ships\n")
+        f.write_text("# Epic 5\n\n## Definition of Done\n\n- ships\n", encoding="utf-8")
         return f
 
     def test_add_epic_cli_creates_and_reports(self, tmp_path, workfile, capsys):
