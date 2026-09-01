@@ -144,6 +144,8 @@ class TestAppendIsIdempotent:
         "field,bad",
         [
             ("cost_usd", "20.23"),
+            ("cost_usd", float("nan")),
+            ("cost_usd", float("inf")),
             ("wall_minutes", "82"),
             ("merge_bypass", "yes"),
             ("pr", 386.0),
@@ -168,6 +170,38 @@ class TestAppendIsIdempotent:
             compose_row(
                 "47-1", "47", FINISH_SURFACE, {**FACTS, "cost_usd": "42.72"}
             )
+
+    def test_a_mistyped_section_id_is_refused_at_load(self, tmp_path):
+        """Copilot round 4: section_id comes from the board as an int -
+        a string or bool would silently corrupt the persisted schema."""
+        p = tmp_path / "stories.jsonl"
+        row = compose_row("47-1", "47", FINISH_SURFACE, FACTS)
+        row["outcome"] = {"kind": "step+gate", "step_key": "47-1-01",
+                          "section_id": "39"}
+        p.write_text(json.dumps(row) + "\n")
+        with pytest.raises(MetricsError, match="malformed outcome"):
+            load_rows(p)
+
+    def test_append_validates_its_row_argument(self, tmp_path):
+        """Copilot round 4: append_row must not trust its caller -
+        backfill tooling handing it a hand-built dict would poison the
+        store and only surface at the next load."""
+        with pytest.raises(MetricsError, match="missing field"):
+            append_row(tmp_path / "stories.jsonl", {"story_id": "47-1"})
+
+    def test_a_write_io_failure_is_a_typed_error(self, tmp_path):
+        """Copilot round 4: an OSError on the write path (here: a
+        read-only store directory) must surface as MetricsError, matching
+        load_rows - callers catch MetricsError, not raw OSError."""
+        p = tmp_path / "run-metrics" / "stories.jsonl"
+        p.parent.mkdir()
+        p.parent.chmod(0o555)
+        row = compose_row("47-1", "47", FINISH_SURFACE, FACTS)
+        try:
+            with pytest.raises(MetricsError, match="cannot write"):
+                append_row(p, row)
+        finally:
+            p.parent.chmod(0o755)
 
     def test_append_serializes_under_the_store_lock(self, tmp_path):
         """Copilot round 2: check-then-append needs the inter-process

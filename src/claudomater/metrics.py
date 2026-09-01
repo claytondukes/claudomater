@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import fcntl
 import json
+import math
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterable, Iterator, Mapping, Sequence
@@ -130,9 +131,17 @@ def _validate_row(row: Any, where: str) -> None:
                 f"{where}: {key} must be a non-negative integer, got {v!r}"
             )
     cost = row["cost_usd"]
-    if not isinstance(cost, (int, float)) or isinstance(cost, bool) or cost < 0:
+    # NaN survives every comparison and Python's json round-trips it, so
+    # one poisoned row would turn every aggregate into NaN silently
+    if (
+        not isinstance(cost, (int, float))
+        or isinstance(cost, bool)
+        or not math.isfinite(cost)
+        or cost < 0
+    ):
         raise MetricsError(
-            f"{where}: cost_usd must be a non-negative number, got {cost!r}"
+            f"{where}: cost_usd must be a finite non-negative number, "
+            f"got {cost!r}"
         )
     if not isinstance(row["merge_bypass"], bool):
         raise MetricsError(
@@ -153,11 +162,15 @@ def _validate_row(row: Any, where: str) -> None:
         else {"kind"}
     )
     step_key = outcome.get("step_key")
+    section_id = outcome.get("section_id")
     if set(outcome) != expected_keys or (
         outcome["kind"] == "step+gate"
         and (
             not (isinstance(step_key, str) and step_key.strip())
-            or outcome.get("section_id") is None
+            # the board hands out int section ids - anything else is damage
+            or not isinstance(section_id, int)
+            or isinstance(section_id, bool)
+            or section_id < 0
         )
     ):
         raise MetricsError(f"{where} has a malformed outcome: {outcome!r}")
@@ -203,22 +216,31 @@ def append_row(path: Path | str, row: Mapping[str, Any]) -> bool:
     same story refuses - two conflicting records of one story is worse
     than one wrong one, because nothing downstream can tell which lies."""
     p = Path(path)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    with _store_lock(p):
-        existing = load_rows(p)
-        canon = json.dumps(dict(row), sort_keys=True)
-        for prior in existing:
-            if prior.get("story_id") == row.get("story_id"):
-                if json.dumps(prior, sort_keys=True) == canon:
-                    return False
-                raise MetricsError(
-                    f"{p} already carries a DIFFERENT row for "
-                    f"{row.get('story_id')!r} - refusing a conflicting second "
-                    "record; correct the existing row deliberately instead"
-                )
-        with p.open("a", encoding="utf-8") as fh:
-            fh.write(json.dumps(dict(row), sort_keys=True) + "\n")
-        return True
+    # never trust the caller (backfill tooling hand-builds dicts): a
+    # malformed row appended here would only surface at the next load
+    _validate_row(dict(row), f"row passed to append_row for {p}")
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        with _store_lock(p):
+            existing = load_rows(p)
+            canon = json.dumps(dict(row), sort_keys=True)
+            for prior in existing:
+                if prior.get("story_id") == row.get("story_id"):
+                    if json.dumps(prior, sort_keys=True) == canon:
+                        return False
+                    raise MetricsError(
+                        f"{p} already carries a DIFFERENT row for "
+                        f"{row.get('story_id')!r} - refusing a conflicting "
+                        "second record; correct the existing row "
+                        "deliberately instead"
+                    )
+            with p.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(dict(row), sort_keys=True) + "\n")
+            return True
+    except OSError as exc:
+        # mkdir/lock/write failures surface typed, matching load_rows -
+        # callers catch MetricsError, not raw OSError
+        raise MetricsError(f"cannot write {p}: {exc}") from exc
 
 
 def epic_rows(rows: Iterable[Mapping[str, Any]], epic_id: str) -> list[dict]:
