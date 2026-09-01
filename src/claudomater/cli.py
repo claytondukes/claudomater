@@ -474,6 +474,23 @@ def _cmd_gate_close_epic(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def _cmd_report(args: argparse.Namespace) -> int:
+    """Render per-epic tables or cross-epic trends from the run-metrics
+    JSONL (one row per finished story, written by the finish flow)."""
+    from claudomater import metrics
+
+    try:
+        rows = metrics.load_rows(Path(args.metrics))
+        if args.epic:
+            print(metrics.render_epic_table(metrics.epic_rows(rows, args.epic)))
+        else:
+            print(metrics.render_trends(rows))
+    except metrics.MetricsError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return EXIT_ERROR
+    return EXIT_OK
+
+
 def _cmd_sweep(args: argparse.Namespace) -> int:
     """Pre-push conventions sweep: em-dashes outside backtick spans and
     attribution footers in a diff's ADDED lines (the 47-4 review guard,
@@ -741,6 +758,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sp.add_argument("path", help="path to sprint-status.yaml")
     sp.set_defaults(fn=_cmd_sprint_check_retros)
+
+    p = sub.add_parser(
+        "report",
+        help="per-epic tables and cross-epic trends from the run-metrics "
+        "JSONL the finish flow writes",
+    )
+    p.add_argument(
+        "--metrics", required=True, help="path to run-metrics/stories.jsonl"
+    )
+    p.add_argument("--epic", default=None, help="epic id for the per-epic table")
+    p.set_defaults(fn=_cmd_report)
 
     p = sub.add_parser(
         "sweep",

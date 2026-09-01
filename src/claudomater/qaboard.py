@@ -468,6 +468,48 @@ def close_epic(
     return {"epic": epic_id, "gate": "PASS", "audited": audited, "expected": expected}
 
 
+def _persist_metrics(
+    story_id: str,
+    epic_id: str,
+    result: dict,
+    metrics_facts: Any,
+    metrics_path: Any,
+    runlog: Any,
+) -> dict:
+    """Metrics-row persistence (Clay, epic-47 close follow-up): the row
+    lands in the artifact repo IN THE SAME CHANGE SET as the story's
+    other artifacts. Both knobs or neither - a half-wired metrics store
+    silently recording nothing is the silent-pass shape."""
+    if metrics_facts is None and metrics_path is None:
+        return result
+    if metrics_facts is None or metrics_path is None:
+        raise QaBoardError(
+            "metrics_facts and metrics_path come together - one without "
+            "the other would silently skip the metrics row"
+        )
+    from claudomater.metrics import MetricsError, append_row, compose_row
+
+    try:
+        row = compose_row(story_id, epic_id, result, metrics_facts)
+    except MetricsError as exc:
+        raise QaBoardError(f"metrics row for {story_id}: {exc}") from exc
+    # write-ahead (run-log discipline): intent with the composed row BEFORE
+    # the append, no outcome claim - a crash or refusal mid-write must
+    # leave the log showing what was in flight, and an identical retry
+    # shows up as a second intent over a single JSONL line
+    runlog.event(
+        "merge",
+        "metrics-row",
+        {"story": story_id, "path": str(metrics_path), "row": row},
+        story_key=story_id,
+    )
+    try:
+        append_row(metrics_path, row)
+    except MetricsError as exc:
+        raise QaBoardError(f"metrics row for {story_id}: {exc}") from exc
+    return {**result, "metrics_row": row}
+
+
 def finish_story(
     story_id: str,
     merged_files: list[str],
@@ -476,6 +518,8 @@ def finish_story(
     runlog: Any,
     step_label: str | None = None,
     surface_proof: str | None = None,
+    metrics_facts: Any = None,
+    metrics_path: Any = None,
 ) -> dict:
     """The full flow. Returns a JSON-able result; raises rather than
     guessing. Events are written BEFORE each action (run-log discipline).
@@ -495,7 +539,14 @@ def finish_story(
             {"story": story_id, "epic": epic_id, **verdict.as_dict()},
             story_key=story_id,
         )
-        return {"ok": True, "step_required": False, **verdict.as_dict()}
+        return _persist_metrics(
+            story_id,
+            epic_id,
+            {"ok": True, "step_required": False, **verdict.as_dict()},
+            metrics_facts,
+            metrics_path,
+            runlog,
+        )
     # normalize ONCE here so the intent event, the spec, and the board all
     # carry the same bytes - logging raw values while author_step stripped
     # them let the audit trail disagree with what was persisted
@@ -557,10 +608,17 @@ def finish_story(
         {"story": story_id, "epic": epic_id},
         story_key=story_id,
     )
-    return {
-        "ok": True,
-        "step_required": True,
-        "step_key": step["step_key"],
-        "section_id": section_id,
-        **verdict.as_dict(),
-    }
+    return _persist_metrics(
+        story_id,
+        epic_id,
+        {
+            "ok": True,
+            "step_required": True,
+            "step_key": step["step_key"],
+            "section_id": section_id,
+            **verdict.as_dict(),
+        },
+        metrics_facts,
+        metrics_path,
+        runlog,
+    )
