@@ -69,7 +69,8 @@ def conventions_block(conventions: Sequence[str]) -> str:
 def sweep_added_lines(diff_text: str) -> list[str]:
     """Violations among a unified diff's ADDED lines: em-dashes outside
     backtick code spans, and attribution/co-author footers anywhere.
-    Returns human-readable `file:+line` findings; empty means clean."""
+    Returns human-readable findings naming the file and quoting the
+    offending added line; empty means clean."""
     findings: list[str] = []
     current = "?"
     for line in diff_text.splitlines():
@@ -98,7 +99,10 @@ def sweep_git_range(repo: Path | str, rev_range: str) -> list[str]:
     """Sweep the added lines of `git diff <rev_range>` in `repo`."""
     try:
         proc = subprocess.run(
-            ["git", "-C", str(repo), "diff", rev_range],
+            # determinism flags: an external diff driver, textconv, or
+            # color codes would silently reshape the text this parser reads
+            ["git", "-C", str(repo), "diff", "--no-ext-diff",
+             "--no-textconv", "--no-color", rev_range],
             capture_output=True, text=True, timeout=120,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:

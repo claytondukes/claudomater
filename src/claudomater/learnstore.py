@@ -1075,10 +1075,20 @@ def sync(
             raise LearnStoreError(f"git diff --numstat failed: {numstat.stderr.strip()}")
         added = deleted = 0
         for line in numstat.stdout.splitlines():
+            if not line.strip():
+                continue
             parts = line.split("\t")
-            if len(parts) >= 2 and parts[0].isdigit() and parts[1].isdigit():
-                added += int(parts[0])
-                deleted += int(parts[1])
+            if len(parts) < 2 or not parts[0].isdigit() or not parts[1].isdigit():
+                # '-' (binary) or any other shape: a lessons export is
+                # UTF-8 JSONL, so an uncountable line means the diff is
+                # not what this counter thinks it is - and a message
+                # quietly reporting +0/-0 would be the exact dishonest
+                # numeric claim this fix removes
+                raise LearnStoreError(
+                    f"unparseable numstat line for the lessons export: {line!r}"
+                )
+            added += int(parts[0])
+            deleted += int(parts[1])
         message = f"omater-learn: sync (+{added}/-{deleted} lesson rows)"
         if stats.new or stats.updated:
             message += f"; import: {stats.new} new, {stats.updated} updated"
