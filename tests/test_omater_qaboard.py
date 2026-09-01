@@ -590,7 +590,7 @@ class TestCloseEpic:
         result = close_epic(tmp_path, cfg, "9", sprint, log)
         assert result == {"epic": "9", "gate": "PASS", "audited": 2, "expected": 2}
         kinds = [e[1] for e in log.events]
-        assert kinds == ["close-gate-precheck", "close-gate-count"]
+        assert kinds == ["close-gate-precheck", "close-gate", "close-gate-count"]
         count_detail = log.events[-1][2]
         assert (count_detail["audited"], count_detail["expected"]) == (2, 2)
         pre = log.events[0][2]

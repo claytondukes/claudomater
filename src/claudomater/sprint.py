@@ -561,16 +561,16 @@ def import_path(
     return import_doc(store, project, SprintDoc.read(path), prune=prune)
 
 
-def epic_story_keys(path: Path | str, epic_id: str) -> list[SprintEntry]:
-    """The epic's story entries, read POSITIONALLY from the file (the
-    same membership rule the exporter lives by - a story key cannot be
-    parsed). Superseded stories are excluded: they own no artifacts and
-    no audit row, so counting them would make every close of an epic
-    with a superseded story fail its matrix count forever. An epic id
-    with no epic line raises - "no such epic" and "an epic with zero
-    stories" must never read the same."""
-    doc = SprintDoc.read(Path(path))
-    entries = [ln.entry for ln in doc._lines if ln.entry is not None]
+def epic_story_entries(path: Path | str, epic_id: str) -> list[SprintEntry]:
+    """The epic's story ENTRIES (full SprintEntry rows, not bare keys),
+    read POSITIONALLY from the file (the same membership rule the
+    exporter lives by - a story key cannot be parsed). Superseded
+    stories are excluded: they own no artifacts and no audit row, so
+    counting them would make every close of an epic with a superseded
+    story fail its matrix count forever. An epic id with no epic line
+    raises - "no such epic" and "an epic with zero stories" must never
+    read the same."""
+    entries = SprintDoc.read(Path(path)).entries
     if not any(e.kind == "epic" and e.epic == epic_id for e in entries):
         raise SprintError(f"no epic-{epic_id} line in {path}")
     return [

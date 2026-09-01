@@ -385,6 +385,12 @@ def close_epic(
     """
     from claudomater import sprint as sprint_mod
 
+    root = Path(project_root)
+    sprint_file = Path(sprint_path)
+    if not sprint_file.is_absolute():
+        # anchored to the PROJECT, not the caller's cwd - a gate invoked
+        # from outside the repo must still judge the repo's sprint file
+        sprint_file = root / sprint_file
     artifact_repo = Path(
         _git_out(cfg.authoring_dir, "rev-parse", "--show-toplevel").strip()
     )
@@ -403,7 +409,7 @@ def close_epic(
             "audits the PUSHED tree, so local-only artifacts are invisible "
             "to it (epic-47 retro F4)"
         )
-    stories = sprint_mod.epic_story_keys(sprint_path, epic_id)
+    stories = sprint_mod.epic_story_entries(sprint_file, epic_id)
     expected = len(stories)
     runlog.event(
         "close",
@@ -418,6 +424,7 @@ def close_epic(
         },
     )
     run_gate(cfg, epic_id)
+    runlog.event("close", "close-gate", {"epic": epic_id, "gate": "PASS"})
     # The gate commits the regenerated matrix lab-side; read it back
     # through git, not trust.
     _git_out(artifact_repo, "pull", "--rebase", "-q")
