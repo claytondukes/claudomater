@@ -641,7 +641,8 @@ class TestCloseEpic:
         )
         m = _AUDITED_RE.search(production)
         assert m and m.group(1) == "1"
-        assert _AUDITED_RE.search("Story files audited: 4").group(1) == "4"
+        plain = _AUDITED_RE.search("Story files audited: 4")
+        assert plain and plain.group(1) == "4"
 
     def test_a_matrix_without_the_count_line_fails(self, tmp_path):
         cfg, sprint = self._arrange(tmp_path, audited=2)
