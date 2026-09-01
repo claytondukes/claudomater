@@ -550,7 +550,7 @@ class TestCloseEpic:
         (artifacts / "qa-viewer" / "authoring").mkdir(parents=True)
         (artifacts / "qa-viewer" / "coverage").mkdir(parents=True)
         (artifacts / "qa-viewer" / "coverage" / "epic-9-coverage.md").write_text(
-            "# Epic 9 coverage\n\nStory files audited: 1\n"
+            "# Epic 9 coverage\n\n- **Story files audited:** 1\n"
         )
         git(artifacts, "add", "-A")
         git(artifacts, "commit", "-qm", "seed")
@@ -569,7 +569,7 @@ class TestCloseEpic:
         gate.write_text(
             "#!/bin/sh\nset -e\n"
             f"cd {artifacts}\n"
-            f"printf '# Epic 9 coverage\\n\\nStory files audited: {audited}\\n'"
+            f"printf '# Epic 9 coverage\\n\\n- **Story files audited:** {audited}\\n'"
             " > qa-viewer/coverage/epic-9-coverage.md\n"
             "if [ -n \"$(git status --porcelain)\" ]; then\n"
             "  git add -A && git commit -qm 'matrix regen' && git push -q\n"
@@ -625,6 +625,23 @@ class TestCloseEpic:
         cfg, sprint = self._arrange(tmp_path, audited=3)
         with pytest.raises(QaBoardError, match="audited 3"):
             close_epic(tmp_path, cfg, "9", sprint, _Log())
+
+    def test_the_regex_reads_the_real_gen_coverage_header(self):
+        """The epic-48 live run: gen_coverage.py writes markdown bold, and
+        the plain-form-only regex refused the real matrix. Verbatim
+        production header block, both forms pinned."""
+        from claudomater.qaboard import _AUDITED_RE
+
+        production = (
+            "# Coverage matrix - Epic 48: Epic 48 - Notification Deep-Link "
+            "Filter Contract\n\n"
+            "- **Epic:** 48\n"
+            "- **Current (non-retired) steps in DB:** 1\n"
+            "- **Story files audited:** 1\n"
+        )
+        m = _AUDITED_RE.search(production)
+        assert m and m.group(1) == "1"
+        assert _AUDITED_RE.search("Story files audited: 4").group(1) == "4"
 
     def test_a_matrix_without_the_count_line_fails(self, tmp_path):
         cfg, sprint = self._arrange(tmp_path, audited=2)
