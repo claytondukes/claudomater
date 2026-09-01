@@ -30,6 +30,11 @@
 
 ## Sprint
 
+Sprint rows are keyed by a project name. Every command below takes
+`--sprint-project NAME`; when omitted, the name comes from the `project` key
+of `.omater.yaml` in the current directory. With neither, the command refuses
+rather than guess - a wrong guess silently keys rows under the wrong project.
+
 | Command | What it does |
 |---|---|
 | `omater sprint import PATH [--prune]` | Seed the DB from a `sprint-status.yaml`; `--prune` also drops tracked rows the file no longer carries (opt-in). Run before the first `set` of any session |

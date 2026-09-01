@@ -1,4 +1,4 @@
-"""Run-metrics store (Clay, epic-47 close follow-up): one JSONL row per
+"""Run-metrics store (epic close-review follow-up): one JSONL row per
 finished story, idempotent by story_id, rendered by `omater report`."""
 
 from __future__ import annotations

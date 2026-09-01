@@ -60,7 +60,9 @@ BMAD config). If you are starting fresh, use v2 and ignore v1. See
 - `omater sprint import path/to/sprint-status.yaml` seeds claudomater's local
   SQLite index from your existing file. The file stays exactly where it is
   and stays the reviewable artifact; the DB is a private index
-  (`learning.db_path`, never committed).
+  (`learning.db_path`, never committed). Rows are keyed by your
+  `.omater.yaml`'s `project` name (run from the project dir, or pass
+  `--sprint-project` explicitly).
 - Writes go DB-first, then **write through to the file byte-exactly**: every
   line keeps its raw bytes and only the flipped status token changes. Your
   preamble, per-line comments, and structural change log survive by

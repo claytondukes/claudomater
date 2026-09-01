@@ -2601,7 +2601,7 @@ class TestProvisioning:
 
 
 class TestFenceScopeP11:
-    """Parity finding P1-1 (2026-08-30, hit live on ui3): the project-level
+    """Parity finding P1-1 (2026-08-30, hit live): the project-level
     fence hook applies to EVERY Claude session in the repo and denied an
     unrelated interactive session's legitimate out-of-repo write while a run
     was live - the run fencing the HUMAN's environment, the exact inversion
@@ -2953,7 +2953,7 @@ class TestInit:
 
 class TestDeclaredArtifactRoots:
     """Slice D acceptance run, 2026-08-31. The write fence denied EVERY write
-    to ui3's `_bmad-output/` - the story file's home - because that directory
+    to the consumer's `_bmad-output/` - the story file's home - because it
     is a symlink out of the tree, so realpath put it outside the root. The
     create phase burned $10.75 fighting it.
 

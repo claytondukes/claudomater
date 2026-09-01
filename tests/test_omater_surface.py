@@ -39,26 +39,28 @@ RULES = SurfaceRules(
     exclude_root_dotfiles=True,
 )
 
-# The ui3 checkout the acceptance replays run against. READ-ONLY - rules
-# come from its committed .omater.yaml, file sets from `git show` on real
-# merges; nothing is copied into this repo.
-UI3 = Path(os.environ.get("OMATER_UI3_ROOT", Path.home() / "sourcecode/ui3"))
+# The consumer parity checkout the acceptance replays run against.
+# READ-ONLY - rules come from its committed .omater.yaml, file sets from
+# `git show` on real merges; nothing is copied into this repo. OPT-IN:
+# point OMATER_PARITY_ROOT at the checkout to run them; unset skips.
+PARITY = Path(os.environ.get("OMATER_PARITY_ROOT") or "/nonexistent")
 
-def _ui3_replayable() -> bool:
+def _parity_replayable() -> bool:
     """Config present AND the replayed merges resolvable: a directory that
     carries a .omater.yaml but not the git history (shallow clone, plain
     dir) must SKIP, not fail confusingly mid-replay."""
-    if not (UI3 / ".omater.yaml").is_file():
+    if not (PARITY / ".omater.yaml").is_file():
         return False
     probe = subprocess.run(
         ["git", "cat-file", "-e", "a5105e31^{commit}"],
-        cwd=UI3, capture_output=True,
+        cwd=PARITY, capture_output=True,
     )
     return probe.returncode == 0
 
 
-requires_ui3 = pytest.mark.skipif(
-    not _ui3_replayable(), reason="ui3 checkout with replay history not present"
+requires_parity = pytest.mark.skipif(
+    not _parity_replayable(),
+    reason="parity checkout not configured (OMATER_PARITY_ROOT)",
 )
 
 
@@ -187,18 +189,18 @@ class TestClassifyChangedFiles:
             classify_changed_files(["  ", ""], RULES)
 
 
-def _ui3_rules():
+def _parity_rules():
     from claudomater.config import load_project_config
 
-    rules = load_project_config(UI3).surface_rules
-    assert rules is not None, "ui3 .omater.yaml must declare surface_rules"
+    rules = load_project_config(PARITY).surface_rules
+    assert rules is not None, "parity .omater.yaml must declare surface_rules"
     return rules
 
 
 def _merged_files(sha: str) -> list[str]:
     out = subprocess.run(
         ["git", "show", "--name-only", "--format=", sha],
-        cwd=UI3,
+        cwd=PARITY,
         capture_output=True,
         text=True,
         check=True,
@@ -206,10 +208,10 @@ def _merged_files(sha: str) -> list[str]:
     return [line for line in out.splitlines() if line.strip()]
 
 
-@requires_ui3
-class TestUi3AcceptanceReplays:
+@requires_parity
+class TestParityAcceptanceReplays:
     """The named acceptance proofs, replayed through the REAL rules in
-    ui3's committed .omater.yaml against the REAL merged file sets - the
+    the consumer's committed .omater.yaml against the REAL merged file sets - the
     same discipline as the sprint round-trip proof: read-only, operator's
     machine only, nothing copied into this repo.
 
@@ -220,7 +222,7 @@ class TestUi3AcceptanceReplays:
     """
 
     def test_34_36_replays_surface(self):
-        verdict = classify_changed_files(_merged_files("a5105e31"), _ui3_rules())
+        verdict = classify_changed_files(_merged_files("a5105e31"), _parity_rules())
         assert verdict.surface_touching is True
         # the one excluded path is the shared test utility under the
         # test-dir exclusion; the co-located component tests are NOT
@@ -231,7 +233,7 @@ class TestUi3AcceptanceReplays:
         assert len(verdict.surface) == 18
 
     def test_46_7_replays_no_surface_with_claude_md_neutral(self):
-        verdict = classify_changed_files(_merged_files("5b26c746"), _ui3_rules())
+        verdict = classify_changed_files(_merged_files("5b26c746"), _parity_rules())
         assert verdict.surface_touching is False
         # CLAUDE.md matches NEITHER list: neutral must not read as surface,
         # and must not need an exclusion to avoid the gate
@@ -239,7 +241,7 @@ class TestUi3AcceptanceReplays:
         assert len(verdict.excluded) == 3  # two workflow files + docs
 
     def test_epic_43_replays_match_the_regression_corpus(self):
-        rules = _ui3_rules()
+        rules = _parity_rules()
         for sha, expect_surface in (
             ("91b45132", True),   # 43-1: UI correctness fixes
             ("cd87c3ea", True),   # 43-2: license-lock UI chain
@@ -255,7 +257,7 @@ class TestUi3AcceptanceReplays:
         predecessor's hardcoded list missed it for four days. The committed
         rules must classify it surface from day one."""
         assert (
-            classify_path("backend/services/health_score.py", _ui3_rules())
+            classify_path("backend/services/health_score.py", _parity_rules())
             == "surface"
         )
 

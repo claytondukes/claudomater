@@ -3,7 +3,7 @@ byte-exact write-through export (design §Phase 2, "Sprint bridge").
 
 The file this exports is not a data file that happens to have comments —
 it is a hand-curated audit record that happens to carry a status map. In
-ui3's copy, 745 of 1328 lines are prose: a rules preamble, a status
+one consumer's copy, 745 of 1328 lines are prose: a rules preamble, a status
 vocabulary with the reasoning behind each value, per-line justifications,
 and a STRUCTURAL CHANGE LOG whose dated entries are the only record of
 why epics were re-sliced. A regenerating exporter that serialized the
@@ -176,7 +176,7 @@ def _epic_of(key: str, kind: str, current_epic: str) -> str:
 
     Derived from the KEY where the key states it, and from DOCUMENT
     POSITION otherwise — because a story key genuinely cannot be parsed.
-    ui3 has a sub-epic `epic-4-5` whose stories are `4-5-1-...`, so
+    A real file has a sub-epic `epic-4-5` whose stories are `4-5-1-...`, so
     `4-5-1-ec-api-research` is ambiguous between "epic 4, story 5-1" and
     "epic 4-5, story 1" from the key alone. It also carries a key whose
     second segment is not a number at all:
@@ -470,8 +470,8 @@ def set_status(
 ) -> bool:
     """Write a status to the DB, then write through to the export.
 
-    Write-through is not a convenience here: the yaml is what ui3's
-    CLAUDE.md gates and skills still read, so a DB write that did not
+    Write-through is not a convenience here: the yaml is what the
+    consumer project's gates and skills still read, so a DB write that did not
     reach the file would be invisible to every consumer that matters
     until cutover. Validated against the file's own vocabulary BEFORE
     the DB write, so a rejected value never lands anywhere.

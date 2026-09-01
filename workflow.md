@@ -155,7 +155,7 @@ not yet `COMPLETE` or `STOPPED`:
      verdict")
 
 2. Do NOT skip this step. Skipping it means the orchestration silently
-   stalls and Clay has to manually nudge.
+   stalls and the operator has to manually nudge.
 
 2b. **On every wake, refresh the marker heartbeat FIRST:**
    ```bash

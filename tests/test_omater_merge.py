@@ -201,12 +201,12 @@ class TestPolicyBypassDetail:
         detail = policy_bypass_detail(
             unmet_rule="required_approving_review_count: 1",
             mechanism="gh pr merge --admin",
-            authorized_by="Clay order 2026-08-30",
+            authorized_by="operator order 2026-08-30",
         )
         assert detail == {
             "unmet_rule": "required_approving_review_count: 1",
             "mechanism": "gh pr merge --admin",
-            "authorized_by": "Clay order 2026-08-30",
+            "authorized_by": "operator order 2026-08-30",
         }
         # the event name is a stable, grep-able constant — audits key on it
         assert POLICY_BYPASS_EVENT == "merge-policy-bypass"

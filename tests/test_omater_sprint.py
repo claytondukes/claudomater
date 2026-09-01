@@ -35,15 +35,12 @@ from claudomater.sprint import (
 
 FIXTURE = Path(__file__).parent / "fixtures" / "sprint-status-sample.yaml"
 
-# The ui3 file the acceptance proof runs against. READ-ONLY, never
-# committed, never quoted in this repo: the proof reports pass/fail, the
-# fixture above carries the shapes.
-UI3_SPRINT_STATUS = Path(
-    os.environ.get(
-        "OMATER_UI3_SPRINT_STATUS",
-        Path.home()
-        / "sourcecode/ui3/_bmad-output/implementation-artifacts/sprint-status.yaml",
-    )
+# The real consumer sprint file the acceptance proofs replay against.
+# READ-ONLY, never committed, never quoted in this repo: the proof
+# reports pass/fail, the fixture above carries the shapes. OPT-IN: point
+# OMATER_PARITY_SPRINT_STATUS at the file to run them; unset skips.
+PARITY_SPRINT_STATUS = Path(
+    os.environ.get("OMATER_PARITY_SPRINT_STATUS") or "/nonexistent"
 )
 
 
@@ -176,7 +173,7 @@ class TestFlipTouchesExactlyOneToken:
 
 
 class TestLegacyValuesAreNeverCorrected:
-    """Clay's rider: `optional` is banned for new epics but historical
+    """Operator rider: `optional` is banned for new epics but historical
     lines are audit records. Reading never validates; only writes do."""
 
     def test_an_optional_retro_survives_a_full_export(self, store, workfile):
@@ -362,24 +359,24 @@ class TestDatabaseRoundTrip:
         assert keys == sorted(keys)
 
 
-class TestUi3AcceptanceProof:
+class TestParityAcceptanceProof:
     """The slice C acceptance: byte-exact round-trip against the REAL
-    ui3 sprint-status.yaml. READ-ONLY - this never writes to it, and its
+    consumer sprint-status.yaml. READ-ONLY - this never writes to it, and its
     content is never copied into this repo. Skipped where the file is not
     present, which is every machine but the operator's."""
 
     @pytest.mark.skipif(
-        not UI3_SPRINT_STATUS.is_file(), reason="ui3 sprint-status.yaml not present"
+        not PARITY_SPRINT_STATUS.is_file(), reason="parity sprint file not configured (OMATER_PARITY_SPRINT_STATUS)"
     )
     def test_the_real_file_round_trips_byte_exactly(self):
-        assert round_trip_ok(UI3_SPRINT_STATUS)
+        assert round_trip_ok(PARITY_SPRINT_STATUS)
 
     @pytest.mark.skipif(
-        not UI3_SPRINT_STATUS.is_file(), reason="ui3 sprint-status.yaml not present"
+        not PARITY_SPRINT_STATUS.is_file(), reason="parity sprint file not configured (OMATER_PARITY_SPRINT_STATUS)"
     )
     def test_a_flip_on_a_copy_of_the_real_file_touches_one_line(self, tmp_path):
         copy = tmp_path / "sprint-status.yaml"
-        copy.write_bytes(UI3_SPRINT_STATUS.read_bytes())
+        copy.write_bytes(PARITY_SPRINT_STATUS.read_bytes())
         doc = SprintDoc.read(copy)
         # pick ANY story and flip it to a status it does not already hold:
         # requiring a non-done story would raise StopIteration - failing an
@@ -1012,6 +1009,76 @@ class TestSprintCli:
         assert {"key", "epic", "status", "updated_at"} == set(rows[0])
 
 
+class TestSprintProjectResolution:
+    """--sprint-project must never guess. The shipped default used to be
+    a hardcoded consumer project name, so a fresh install that omitted
+    the flag silently keyed every sprint row under someone else's
+    project. An omitted flag now resolves from `.omater.yaml`'s
+    `project` key in the cwd, and with neither the command refuses."""
+
+    def _args(self, tmp_path, *rest):
+        # like TestSprintCli._args, but WITHOUT --sprint-project: the
+        # resolution path under test only runs when the flag is absent
+        return [
+            "sprint", *rest,
+            "--user-config", str(tmp_path / "missing.yaml"),
+            "--db", str(tmp_path / "cli.db"),
+            "--export-dir", str(tmp_path / "cli-lessons"),
+        ]
+
+    def test_an_omitted_flag_reads_the_cwds_omater_yaml(
+        self, tmp_path, workfile, monkeypatch, capsys
+    ):
+        (tmp_path / ".omater.yaml").write_text(
+            "project: fromconfig\n", encoding="utf-8"
+        )
+        monkeypatch.chdir(tmp_path)
+        assert main(self._args(tmp_path, "import", str(workfile))) == EXIT_OK
+        capsys.readouterr()
+        # the rows really landed under the config's key, not a constant
+        assert main(
+            self._args(
+                tmp_path, "status", "--sprint-project", "fromconfig", "--json"
+            )
+        ) == EXIT_OK
+        rows = json.loads(capsys.readouterr().out)
+        assert "4-3-being-worked" in {r["key"] for r in rows}
+
+    def test_an_explicit_flag_beats_the_config(
+        self, tmp_path, workfile, monkeypatch, capsys
+    ):
+        (tmp_path / ".omater.yaml").write_text(
+            "project: fromconfig\n", encoding="utf-8"
+        )
+        monkeypatch.chdir(tmp_path)
+        assert main(
+            self._args(
+                tmp_path, "import", str(workfile), "--sprint-project", "explicit"
+            )
+        ) == EXIT_OK
+        capsys.readouterr()
+        # nothing under the config's name...
+        assert main(self._args(tmp_path, "status")) == EXIT_OK
+        assert "0 tracked row(s)" in capsys.readouterr().out
+        # ...everything under the explicit one
+        assert main(
+            self._args(tmp_path, "status", "--sprint-project", "explicit")
+        ) == EXIT_OK
+        assert "4-3-being-worked" in capsys.readouterr().out
+
+    def test_neither_flag_nor_config_refuses_loudly(
+        self, tmp_path, workfile, monkeypatch, capsys
+    ):
+        monkeypatch.chdir(tmp_path)  # no .omater.yaml here
+        rc = main(self._args(tmp_path, "import", str(workfile)))
+        assert rc == EXIT_ERROR
+        err = capsys.readouterr().err
+        # the message names both remedies: the flag and the config key
+        assert "--sprint-project" in err and ".omater.yaml" in err
+        # resolution runs BEFORE the store opens: the refusal must not
+        # leave a freshly created DB behind
+        assert not (tmp_path / "cli.db").exists()
+
 
 def _line_for(doc: SprintDoc, key: str) -> str:
     """The rendered line carrying `key`, with its line ending."""
@@ -1433,19 +1500,19 @@ class TestSprintCliSliceB:
         assert "never read" in capsys.readouterr().err
 
 
-class TestUi3RetroGateProof:
-    """READ-ONLY against the real ui3 file, like TestUi3AcceptanceProof:
+class TestParityRetroGateProof:
+    """READ-ONLY against the real parity file, like TestParityAcceptanceProof:
     the wider scan (sub-epic + project retros included) must agree with
     the file's own hygiene rule. Measured at slice B build time: 46 retro
     lines, all in the legal write vocabulary."""
 
     @pytest.mark.skipif(
-        not UI3_SPRINT_STATUS.is_file(), reason="ui3 sprint-status.yaml not present"
+        not PARITY_SPRINT_STATUS.is_file(), reason="parity sprint file not configured (OMATER_PARITY_SPRINT_STATUS)"
     )
     def test_the_real_file_is_clean_under_the_wider_scan(self):
         from claudomater.sprint import retro_ban_scan
 
-        violations, distribution = retro_ban_scan(UI3_SPRINT_STATUS)
+        violations, distribution = retro_ban_scan(PARITY_SPRINT_STATUS)
         assert violations == []
         assert set(distribution) <= {"fable-review-required", "done"}
 

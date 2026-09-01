@@ -139,7 +139,7 @@ class TestClassifiedWrites:
 
 
 class TestScrubDiscipline:
-    """Clay's Phase 2 rider: the corpus outlives the run that produced it,
+    """Operator rider (Phase 2): the corpus outlives the run that produced it,
     so deny-listed values must never land in the DB or the export."""
 
     def test_denied_values_never_reach_db_or_export(self, store, tmp_path):
@@ -177,11 +177,11 @@ class TestFtsGhosts:
         assert len(store.search("rewritten", ["global"])) == 1
 
     def test_search_scopes_and_hides_superseded(self, store):
-        seed(store, scope="ui3-like")
+        seed(store, scope="consumer-like")
         assert store.search("suppressed", ["global"]) == []  # wrong scope
-        store.supersede("ui3-like", "review", "copilot-suppressed-block",
+        store.supersede("consumer-like", "review", "copilot-suppressed-block",
                         "new judgment", "newer evidence")
-        hits = store.search("judgment OR suppressed", ["ui3-like"])
+        hits = store.search("judgment OR suppressed", ["consumer-like"])
         assert [h["rule"] for h in hits] == ["new judgment"]
 
     def test_invalid_fts_query_fails_loudly(self, store):

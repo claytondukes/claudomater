@@ -125,7 +125,7 @@ def result_file_exists(
 
     `artifact_roots` is the declared exception (parity finding F1): an
     in-tree directory that is deliberately a symlink to another checkout
-    (ui3's `_bmad-output` is a separate git repo) resolves outside the
+    (the artifact checkout is a separate git repo) resolves outside the
     project root and failed containment for a legitimate artifact — a $12
     live failure. Each entry names an in-tree RELATIVE path whose resolved
     location is trusted; a claimed path resolving under one passes
