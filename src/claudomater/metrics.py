@@ -57,10 +57,19 @@ def compose_row(
             f"{sorted(unknown)}"
         )
     if finish_result.get("surface_touching"):
+        step_key = finish_result.get("step_key")
+        section_id = finish_result.get("section_id")
+        if not (isinstance(step_key, str) and step_key.strip()) or section_id is None:
+            # a step+gate row full of None reads as complete downstream
+            raise MetricsError(
+                f"metrics row for {story_id}: a surface outcome needs its "
+                f"step_key and section_id, got step_key={step_key!r}, "
+                f"section_id={section_id!r}"
+            )
         outcome = {
             "kind": "step+gate",
-            "step_key": finish_result.get("step_key"),
-            "section_id": finish_result.get("section_id"),
+            "step_key": step_key,
+            "section_id": section_id,
         }
     else:
         outcome = {"kind": "waiver"}
@@ -70,6 +79,30 @@ def compose_row(
         **{k: driver_facts[k] for k in DRIVER_FIELDS},
         "outcome": outcome,
     }
+
+
+# every key a compose_row-written row carries; only compose_row writes
+# this file, so a deviation at load means something else did
+_ROW_KEYS = frozenset(("story_id", "epic", "outcome", *DRIVER_FIELDS))
+
+
+def _validate_row(row: Any, where: str) -> None:
+    """Full row schema at LOAD: a row missing a field crashed the
+    renderers with a raw KeyError instead of the CLI's error: contract."""
+    if not isinstance(row, dict) or not row.get("story_id"):
+        raise MetricsError(f"{where} is not a metrics row (no story_id)")
+    missing = sorted(_ROW_KEYS - set(row))
+    if missing:
+        raise MetricsError(f"{where} is missing field(s): {', '.join(missing)}")
+    unknown = sorted(set(row) - _ROW_KEYS)
+    if unknown:
+        raise MetricsError(f"{where} has unknown field(s): {', '.join(unknown)}")
+    outcome = row["outcome"]
+    if not isinstance(outcome, dict) or outcome.get("kind") not in (
+        "step+gate",
+        "waiver",
+    ):
+        raise MetricsError(f"{where} has a malformed outcome: {outcome!r}")
 
 
 def load_rows(path: Path | str) -> list[dict[str, Any]]:
@@ -89,8 +122,7 @@ def load_rows(path: Path | str) -> list[dict[str, Any]]:
         except ValueError as exc:
             # a malformed line poisons every aggregate silently - stop
             raise MetricsError(f"{p}:{i} is not valid JSON: {exc}") from exc
-        if not isinstance(row, dict) or not row.get("story_id"):
-            raise MetricsError(f"{p}:{i} is not a metrics row (no story_id)")
+        _validate_row(row, f"{p}:{i}")
         rows.append(row)
     return rows
 

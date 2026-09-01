@@ -56,6 +56,18 @@ class TestComposeRow:
         with pytest.raises(MetricsError, match="unknown driver fact"):
             compose_row("47-1", "47", FINISH_SURFACE, {**FACTS, "vibes": 10})
 
+    def test_a_surface_outcome_without_its_step_is_refused(self):
+        """Copilot: surface_touching with no step_key/section_id would
+        write a step+gate row full of None that reads as complete."""
+        with pytest.raises(MetricsError, match="step_key and section_id"):
+            compose_row("47-1", "47", {"surface_touching": True}, FACTS)
+        with pytest.raises(MetricsError, match="step_key and section_id"):
+            compose_row(
+                "47-1", "47",
+                {"surface_touching": True, "step_key": "  ", "section_id": 39},
+                FACTS,
+            )
+
 
 class TestAppendIsIdempotent:
     def test_identical_retry_converges(self, tmp_path):
@@ -74,8 +86,38 @@ class TestAppendIsIdempotent:
 
     def test_a_malformed_line_poisons_loudly(self, tmp_path):
         p = tmp_path / "stories.jsonl"
-        p.write_text('{"story_id": "x"}\nnot json\n')
+        good = json.dumps(compose_row("47-1", "47", FINISH_SURFACE, FACTS))
+        p.write_text(f"{good}\nnot json\n")
         with pytest.raises(MetricsError, match="not valid JSON"):
+            load_rows(p)
+
+    def test_a_schema_broken_row_is_refused_at_load(self, tmp_path):
+        """Copilot: a JSON-valid row missing a required field slipped
+        through load and crashed the renderers with a raw KeyError - the
+        CLI printed a traceback instead of its error: contract."""
+        p = tmp_path / "stories.jsonl"
+        row = compose_row("47-1", "47", FINISH_SURFACE, FACTS)
+        del row["cost_usd"]
+        p.write_text(json.dumps(row) + "\n")
+        with pytest.raises(MetricsError, match="missing field.*cost_usd"):
+            load_rows(p)
+
+    def test_an_unknown_field_is_refused_at_load(self, tmp_path):
+        """Only compose_row writes this file - an unexpected field means
+        something else did."""
+        p = tmp_path / "stories.jsonl"
+        row = compose_row("47-1", "47", FINISH_SURFACE, FACTS)
+        row["vibes"] = 10
+        p.write_text(json.dumps(row) + "\n")
+        with pytest.raises(MetricsError, match="unknown field"):
+            load_rows(p)
+
+    def test_a_malformed_outcome_is_refused_at_load(self, tmp_path):
+        p = tmp_path / "stories.jsonl"
+        row = compose_row("47-1", "47", FINISH_SURFACE, FACTS)
+        row["outcome"] = {"kind": "vibes"}
+        p.write_text(json.dumps(row) + "\n")
+        with pytest.raises(MetricsError, match="malformed outcome"):
             load_rows(p)
 
 
