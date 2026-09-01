@@ -481,8 +481,10 @@ def _cmd_sweep(args: argparse.Namespace) -> int:
     from claudomater import conventions as conv
 
     try:
+        # resolve() itself can raise OSError (deleted cwd, unreadable
+        # path) - same clean exit as any other sweep error
         findings = conv.sweep_git_range(Path(args.repo).resolve(), args.range)
-    except conv.ConventionsError as exc:
+    except (OSError, conv.ConventionsError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return EXIT_ERROR
     if findings:

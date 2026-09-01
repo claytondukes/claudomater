@@ -352,3 +352,17 @@ class TestSweepCommand:
     def test_range_is_required(self):
         with pytest.raises(SystemExit):
             main(["sweep", "--repo", "."])
+
+    def test_an_unresolvable_repo_path_is_a_clean_error(self, capsys, monkeypatch):
+        """Copilot round 8: resolve() raising OSError (deleted cwd,
+        unreadable path) must exit like every other sweep error - a
+        clean 'error:' line, not a traceback."""
+        import pathlib
+
+        def boom(self, strict=False):
+            raise OSError("simulated unresolvable path")
+
+        monkeypatch.setattr(pathlib.Path, "resolve", boom)
+        rc = main(["sweep", "--repo", ".", "--range", "HEAD~1..HEAD"])
+        assert rc == EXIT_ERROR
+        assert "error:" in capsys.readouterr().err
