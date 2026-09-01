@@ -716,7 +716,7 @@ def build_parser() -> argparse.ArgumentParser:
             default=None,
             help="project name the story rows are keyed by "
             "(default: the 'project' key of .omater.yaml in the current "
-            "directory, or in --project's root when given)",
+            "directory)",
         )
         sp.set_defaults(fn=_cmd_sprint)
         return sp

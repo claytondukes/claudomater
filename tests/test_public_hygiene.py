@@ -20,8 +20,6 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
-_TEXT_SUFFIXES = {".py", ".md", ".yaml", ".yml", ".toml", ".sh", ".json", ".txt"}
-
 # Fragment pairs, joined at runtime: private project / infra names that
 # must never appear in shipped text. Matching is case-insensitive.
 _BANNED_FRAGMENTS: tuple[tuple[str, str], ...] = (
@@ -38,6 +36,11 @@ def _banned_tokens() -> tuple[str, ...]:
 
 
 def _tracked_text_files() -> list[Path]:
+    """Every git-tracked file that is text, decided by content (a NUL
+    byte means binary), never by suffix - a suffix allowlist skipped
+    extensionless files like `.gitignore` and `LICENSE`, which can leak
+    a private path just as well as source can. A tracked-but-missing
+    file raises here on purpose: a stale index entry is its own bug."""
     out = subprocess.run(
         ["git", "ls-files"],
         cwd=REPO_ROOT,
@@ -46,9 +49,9 @@ def _tracked_text_files() -> list[Path]:
         check=True,
     ).stdout
     files = [
-        REPO_ROOT / rel
+        path
         for rel in out.splitlines()
-        if Path(rel).suffix in _TEXT_SUFFIXES
+        if b"\0" not in (path := REPO_ROOT / rel).read_bytes()
     ]
     assert files, "git ls-files returned no text files - the scan is broken"
     return files
