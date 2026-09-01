@@ -94,6 +94,14 @@ class TestSweep:
         diff = DIFF_TEMPLATE.format(added="clean added line")
         assert sweep_added_lines(diff) == []
 
+    def test_an_added_line_starting_with_plus_plus_is_still_swept(self):
+        """An added content line that itself begins with '++' renders as
+        '+++...' in the unified diff - it must not be mistaken for a
+        file header and escape the sweep."""
+        diff = DIFF_TEMPLATE.format(added="++prefix prose — with an em-dash")
+        findings = sweep_added_lines(diff)
+        assert len(findings) == 1 and "em-dash" in findings[0]
+
     @pytest.mark.parametrize(
         "footer",
         [

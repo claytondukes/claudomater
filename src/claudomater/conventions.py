@@ -73,12 +73,24 @@ def sweep_added_lines(diff_text: str) -> list[str]:
     offending added line; empty means clean."""
     findings: list[str] = []
     current = "?"
+    in_hunk = False
     for line in diff_text.splitlines():
-        m = _DIFF_FILE_RE.match(line)
-        if m:
-            current = m.group("path")
+        if line.startswith("diff --git "):
+            in_hunk = False
             continue
-        if not line.startswith("+") or line.startswith("+++"):
+        if line.startswith("@@"):
+            in_hunk = True
+            continue
+        if not in_hunk:
+            # header context: '+++ b/path' names the file. An added
+            # content line that itself starts with '++' renders as
+            # '+++...' but can only appear INSIDE a hunk, so parsing
+            # headers here never skips real added content
+            m = _DIFF_FILE_RE.match(line)
+            if m:
+                current = m.group("path")
+            continue
+        if not line.startswith("+"):
             continue
         added = line[1:]
         if _ATTRIBUTION_RE.search(added):
