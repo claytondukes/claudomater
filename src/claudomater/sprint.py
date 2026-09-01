@@ -592,7 +592,12 @@ def unknown_statuses(doc: SprintDoc) -> list[SprintEntry]:
 
 _DOD_HEADING_RE = re.compile(r"^##\s+Definition of Done\s*$", re.MULTILINE)
 _STATUS_LINE_RE = re.compile(
-    r"^(?P<prefix>\*{0,2}Status:?\*{0,2}\s*:?\s+)(?P<status>[A-Za-z-]+)",
+    # the colon is MANDATORY in every accepted form ('Status:',
+    # '**Status:**', '**Status**:') - 'Status review' opening a prose
+    # line is prose, and matching it would rewrite a sentence or falsely
+    # refuse a healthy file on 'multiple Status lines'
+    r"^(?P<prefix>(?:Status:|\*\*Status:\*\*|\*\*Status\*\*\s*:)\s+)"
+    r"(?P<status>[A-Za-z-]+)",
     re.MULTILINE,
 )
 

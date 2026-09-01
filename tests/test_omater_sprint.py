@@ -1568,6 +1568,29 @@ class TestSetStoryFileStatus:
         with pytest.raises(SprintError, match="no `Status:` line"):
             set_story_file_status(f, "done")
 
+    def test_a_colonless_status_word_is_prose_not_the_marker(self, tmp_path):
+        """Copilot round 5: 'Status review' (no colon) must read as prose -
+        matching it would rewrite a sentence, or falsely refuse a healthy
+        file on 'multiple Status lines'."""
+        f = tmp_path / "9-1-x.md"
+        f.write_text("# S\n\nStatus review\n")
+        with pytest.raises(SprintError, match="no `Status:` line"):
+            set_story_file_status(f, "done")
+
+    def test_status_prose_beside_the_real_marker_is_ignored(self, tmp_path):
+        f = tmp_path / "9-1-x.md"
+        f.write_text("Status: review\n\nStatus review happened on Tuesday.\n")
+        assert set_story_file_status(f, "done") == "review"
+        text = f.read_text()
+        assert "Status: done" in text
+        assert "Status review happened on Tuesday." in text
+
+    def test_bold_with_outside_colon_flips_too(self, tmp_path):
+        f = tmp_path / "9-1-x.md"
+        f.write_text("# S\n\n**Status**: review\n")
+        assert set_story_file_status(f, "done") == "review"
+        assert "**Status**: done" in f.read_text()
+
     def test_multiple_status_lines_refuse_to_guess(self, tmp_path):
         f = tmp_path / "9-1-x.md"
         f.write_text("Status: review\n\nStatus: done\n")
