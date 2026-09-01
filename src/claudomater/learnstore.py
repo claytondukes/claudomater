@@ -1061,9 +1061,43 @@ def sync(
         raise LearnStoreError(f"git diff failed: {staged.stderr.strip()}")
     committed = False
     if staged.returncode == 1:
-        message = (
-            f"omater-learn: sync ({stats.new} new, {stats.updated} updated)"
+        # The message reports THE COMMIT'S OWN DIFF, not the pull-side
+        # import counters (epic-47 retro F7: six commits all said
+        # "0 new, 0 updated" while adding 13 lessons - the import counts
+        # what the FILE taught the DB, but the commit carries what the DB
+        # taught the file). One JSONL line = one lesson row, so numstat's
+        # added/deleted line counts ARE row counts.
+        numstat = _git(
+            repo, "diff", "--cached", "--numstat", "--",
+            *(str(pp) for pp in export_files),
         )
+        if numstat.returncode != 0:
+            raise LearnStoreError(f"git diff --numstat failed: {numstat.stderr.strip()}")
+        added = deleted = 0
+        for line in numstat.stdout.splitlines():
+            if not line.strip():
+                continue
+            # split at most twice: the path is the third field verbatim
+            parts = line.split("\t", 2)
+            if (
+                len(parts) != 3
+                or not parts[0].isdigit()
+                or not parts[1].isdigit()
+                or not parts[2].strip()
+            ):
+                # '-' (binary), a missing path, or any other shape: a
+                # lessons export is UTF-8 JSONL, so an uncountable line
+                # means the diff is not what this counter thinks it is -
+                # and a message quietly reporting +0/-0 would be the exact
+                # dishonest numeric claim this fix removes
+                raise LearnStoreError(
+                    f"unparseable numstat line for the lessons export: {line!r}"
+                )
+            added += int(parts[0])
+            deleted += int(parts[1])
+        message = f"omater-learn: sync (+{added}/-{deleted} lesson rows)"
+        if stats.new or stats.updated:
+            message += f"; import: {stats.new} new, {stats.updated} updated"
         # `--only -- <export files>`: commits ONLY these paths, so unrelated
         # staged work stays staged instead of being misfiled under lesson
         # history. --only is already git's default when paths are given

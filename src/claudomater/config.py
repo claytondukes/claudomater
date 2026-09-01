@@ -207,6 +207,10 @@ class ProjectConfig:
     # so every verdict is reproducible from the repo; an absent block
     # means the strict gate, never a call-site widening.
     completion_exempt: tuple[str, ...] = ()
+    # Standing style/policy rules injected verbatim into every phase
+    # prompt (epic-47 close follow-up): config-carried so the GO prompt
+    # stops being the load-bearing carrier of policy.
+    conventions: tuple[str, ...] = ()
     ci_tier_on_push: str | None = None  # None -> deployment_type default
     ci_tier_on_merge: str = "full"
     gates: dict[str, Any] = field(default_factory=dict)
@@ -408,6 +412,13 @@ def load_project_config(root: Path | str) -> ProjectConfig:
     # like the siblings above.
     from claudomater.completion import CompletionError, normalize_exempt
 
+    from claudomater.conventions import ConventionsError, normalize_conventions
+
+    try:
+        conventions = normalize_conventions(data.get("conventions"))
+    except ConventionsError as exc:
+        raise ConfigError(f"{PROJECT_CONFIG_NAME}: {exc}") from exc
+
     completion_raw = _require_mapping("completion", data.get("completion"))
     unknown_completion = set(completion_raw) - {"exempt"}
     if unknown_completion:
@@ -464,6 +475,7 @@ def load_project_config(root: Path | str) -> ProjectConfig:
         commit_scope=commit_scope,
         surface_rules=surface_rules,
         completion_exempt=completion_exempt,
+        conventions=conventions,
         ci_tier_on_push=ci_raw.get("tier_on_push"),
         ci_tier_on_merge=ci_raw.get("tier_on_merge", "full"),
         gates=gates_raw,

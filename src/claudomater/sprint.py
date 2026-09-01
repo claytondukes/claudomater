@@ -590,6 +590,64 @@ def unknown_statuses(doc: SprintDoc) -> list[SprintEntry]:
     return [e for e in doc.entries if e.status not in _WRITABLE[e.kind]]
 
 
+_DOD_HEADING_RE = re.compile(r"^##\s+Definition of Done\s*$", re.MULTILINE)
+_STATUS_LINE_RE = re.compile(
+    # the colon is MANDATORY in every accepted form ('Status:',
+    # '**Status:**', '**Status**:') - 'Status review' opening a prose
+    # line is prose, and matching it would rewrite a sentence or falsely
+    # refuse a healthy file on 'multiple Status lines'
+    r"^(?P<prefix>(?:Status:|\*\*Status:\*\*|\*\*Status\*\*\s*:)\s+)"
+    r"(?P<status>[A-Za-z-]+)",
+    re.MULTILINE,
+)
+
+
+def require_dod(epic_file: Path | str) -> None:
+    """Refuse to register an epic whose file has no machine-checkable
+    `## Definition of Done` heading (epic-47 retro F8: epic 47 shipped
+    without one - the exact fleet defect its own story fixed). A missing
+    FILE is the louder failure: registering an epic that exists only as a
+    sprint line is the epic-44 F1 shape."""
+    p = Path(epic_file)
+    try:
+        text = p.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise SprintError(f"cannot read epic file {p}: {exc}") from exc
+    if not _DOD_HEADING_RE.search(text):
+        raise SprintError(
+            f"{p} has no `## Definition of Done` section - an epic "
+            "registers with a machine-checkable DoD or not at all "
+            "(epic-47 retro F8; the anchored heading is what the waiver "
+            "lookup and the close review match)"
+        )
+
+
+def set_story_file_status(path: Path | str, status: str) -> str:
+    """Flip the story FILE's own Status line (epic-47 retro F1: all four
+    epic-47 story files sat at `Status: review` after their sprint rows
+    said done - the finish flow owns both flips or the two records
+    drift). Only the status token is rewritten; every other byte
+    survives. Returns the previous value. Exactly one Status line must
+    match - none is a malformed story file, and rewriting more than one
+    would guess which one is authoritative."""
+    _validate_status("story", status, key=str(path))
+    p = Path(path)
+    text = _read_exact(p)
+    matches = list(_STATUS_LINE_RE.finditer(text))
+    if not matches:
+        raise SprintError(f"{p} has no `Status:` line to flip")
+    if len(matches) > 1:
+        raise SprintError(
+            f"{p} has {len(matches)} `Status:` lines - refusing to guess "
+            "which one is the story's status"
+        )
+    m = matches[0]
+    previous = m.group("status")
+    new_text = text[: m.start("status")] + status + text[m.end("status") :]
+    _write_atomically(p, new_text)
+    return previous
+
+
 # ---- epic creation (the planning-tool seam) ------------------------------
 #
 # `export`'s contract says adding lines "stays with the planning tool";
@@ -610,6 +668,7 @@ def add_epic(
     stories: tuple[str, ...] | list[str] = (),
     epic_status: str = "backlog",
     story_status: str = "backlog",
+    epic_file: Path | str | None = None,
 ) -> list[str]:
     """Create `epic-{epic}` in the file AND the DB: the epic line, the
     story lines in the given order, and - always, last inside the block -
@@ -634,6 +693,11 @@ def add_epic(
     share one transaction (`set_status` discipline): if the file cannot
     be written, the DB keeps no record of the phantom epic.
     """
+    if epic_file is not None:
+        # BEFORE any write: an epic whose file lacks a machine-checkable
+        # DoD does not register (epic-47 retro F8). None stays legal for
+        # callers registering ahead of the file - the CLI requires it.
+        require_dod(epic_file)
     if not _EPIC_ID_RE.match(epic):
         raise SprintError(
             f"epic id must be digits with optional sub-epic segments "

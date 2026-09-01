@@ -381,6 +381,7 @@ def _cmd_sprint(args: argparse.Namespace) -> int:
                 stories=tuple(args.story or ()),
                 epic_status=args.epic_status,
                 story_status=args.story_status,
+                epic_file=args.epic_file,
             )
             print(f"created epic-{args.epic} ({len(new_keys)} line(s)):")
             for key in new_keys:
@@ -470,6 +471,28 @@ def _cmd_gate_close_epic(args: argparse.Namespace) -> int:
         print(f"FATAL: {exc}", file=sys.stderr)
         return EXIT_ERROR
     print(json_mod.dumps(result, indent=2))
+    return EXIT_OK
+
+
+def _cmd_sweep(args: argparse.Namespace) -> int:
+    """Pre-push conventions sweep: em-dashes outside backtick spans and
+    attribution footers in a diff's ADDED lines (the 47-4 review guard,
+    generalized). Exit 0 clean, 2 on findings or error."""
+    from claudomater import conventions as conv
+
+    try:
+        # resolve() itself can raise OSError (deleted cwd, unreadable
+        # path) - same clean exit as any other sweep error
+        findings = conv.sweep_git_range(Path(args.repo).resolve(), args.range)
+    except (OSError, conv.ConventionsError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return EXIT_ERROR
+    if findings:
+        for f in findings:
+            print(f)
+        print(f"FATAL: {len(findings)} conventions violation(s)", file=sys.stderr)
+        return EXIT_ERROR
+    print("OK: no conventions violations in added lines")
     return EXIT_OK
 
 
@@ -702,6 +725,12 @@ def build_parser() -> argparse.ArgumentParser:
         default="backlog",
         help="initial status for every listed story (default: backlog)",
     )
+    sp.add_argument(
+        "--epic-file",
+        required=True,
+        help="the epic's planning artifact; must carry a `## Definition of "
+        "Done` section (epic-47 retro F8) - registration refuses without it",
+    )
 
     # No store, no DB side effects: a pure read gate over the file, so it
     # gets its own handler instead of _cmd_sprint's store-opening path.
@@ -712,6 +741,19 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sp.add_argument("path", help="path to sprint-status.yaml")
     sp.set_defaults(fn=_cmd_sprint_check_retros)
+
+    p = sub.add_parser(
+        "sweep",
+        help="conventions sweep over a git diff's added lines "
+        "(em-dashes outside code spans, attribution footers)",
+    )
+    p.add_argument("--repo", default=".", help="git repo to diff (default: cwd)")
+    p.add_argument(
+        "--range",
+        required=True,
+        help="git diff range, e.g. origin/main..HEAD",
+    )
+    p.set_defaults(fn=_cmd_sweep)
 
     p = sub.add_parser(
         "gate", help="production gates (completion-integrity, epic close)"
