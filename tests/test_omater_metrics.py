@@ -120,6 +120,51 @@ class TestAppendIsIdempotent:
         with pytest.raises(MetricsError, match="malformed outcome"):
             load_rows(p)
 
+    def test_a_step_gate_outcome_without_its_fields_is_refused_at_load(
+        self, tmp_path
+    ):
+        """Copilot round 2: {'kind': 'step+gate'} alone passed validation
+        and rendered as 'step None+gate' - silent data corruption."""
+        p = tmp_path / "stories.jsonl"
+        row = compose_row("47-1", "47", FINISH_SURFACE, FACTS)
+        row["outcome"] = {"kind": "step+gate"}
+        p.write_text(json.dumps(row) + "\n")
+        with pytest.raises(MetricsError, match="malformed outcome"):
+            load_rows(p)
+
+    def test_an_outcome_with_unknown_keys_is_refused_at_load(self, tmp_path):
+        p = tmp_path / "stories.jsonl"
+        row = compose_row("47-1", "47", FINISH_SURFACE, FACTS)
+        row["outcome"] = {"kind": "waiver", "extra": 1}
+        p.write_text(json.dumps(row) + "\n")
+        with pytest.raises(MetricsError, match="malformed outcome"):
+            load_rows(p)
+
+    def test_append_serializes_under_the_store_lock(self, tmp_path):
+        """Copilot round 2: check-then-append needs the inter-process
+        lock (the RunLog._append_lock discipline) - a backfill racing a
+        finish flow could interleave or double-write."""
+        import fcntl
+        import threading
+
+        p = tmp_path / "stories.jsonl"
+        row = compose_row("47-1", "47", FINISH_SURFACE, FACTS)
+        lock = tmp_path / "stories.jsonl.lock"
+        holder = open(lock, "w")
+        fcntl.flock(holder.fileno(), fcntl.LOCK_EX)
+        done: list[bool] = []
+        t = threading.Thread(target=lambda: done.append(append_row(p, row)))
+        t.start()
+        t.join(0.3)
+        try:
+            assert t.is_alive(), "append_row must block while the store lock is held"
+        finally:
+            fcntl.flock(holder.fileno(), fcntl.LOCK_UN)
+            holder.close()
+        t.join(5)
+        assert not t.is_alive() and done == [True]
+        assert load_rows(p)[0]["story_id"] == "47-1"
+
 
 def _epic47_rows():
     """The four epic-47 rows with the REPORT TABLE's exact cell values."""
@@ -165,6 +210,25 @@ class TestRendering:
     def test_an_unknown_epic_is_a_loud_error(self):
         with pytest.raises(MetricsError, match="no metrics rows for epic"):
             epic_rows(_epic47_rows(), "99")
+
+    def test_the_epic_table_orders_stories_numerically(self):
+        """Copilot round 2: lexicographic sort puts 47-10 before 47-2."""
+        rows = [
+            compose_row("47-10", "47", FINISH_WAIVER, {**FACTS, "pr": 400}),
+            compose_row("47-2", "47", FINISH_WAIVER, {**FACTS, "pr": 388}),
+        ]
+        table = render_epic_table(rows)
+        assert table.index("47-2 |") < table.index("47-10 |")
+
+    def test_a_malformed_story_id_renders_a_typed_error(self):
+        rows = [compose_row("47-x", "47", FINISH_WAIVER, FACTS)]
+        with pytest.raises(MetricsError, match="malformed story_id"):
+            render_epic_table(rows)
+
+    def test_a_malformed_epic_id_in_trends_is_a_typed_error(self):
+        row = compose_row("47-1", "oops", FINISH_WAIVER, FACTS)
+        with pytest.raises(MetricsError, match="malformed epic"):
+            render_trends([row])
 
     def test_trends_aggregate_per_epic(self):
         out = render_trends(_epic47_rows())

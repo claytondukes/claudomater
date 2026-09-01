@@ -15,9 +15,11 @@ line (the author_step discipline)."""
 
 from __future__ import annotations
 
+import fcntl
 import json
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Iterable, Iterator, Mapping, Sequence
 
 # Driver-supplied facts, all REQUIRED - a metrics row with holes reads
 # exactly like a complete one in a trend, so holes are refused at write.
@@ -103,6 +105,23 @@ def _validate_row(row: Any, where: str) -> None:
         "waiver",
     ):
         raise MetricsError(f"{where} has a malformed outcome: {outcome!r}")
+    # per-kind shape: only compose_row writes these, so any deviation is
+    # damage - a {'kind': 'step+gate'} with no step renders as
+    # 'step None+gate', which is silent corruption, not a report
+    expected_keys = (
+        {"kind", "step_key", "section_id"}
+        if outcome["kind"] == "step+gate"
+        else {"kind"}
+    )
+    step_key = outcome.get("step_key")
+    if set(outcome) != expected_keys or (
+        outcome["kind"] == "step+gate"
+        and (
+            not (isinstance(step_key, str) and step_key.strip())
+            or outcome.get("section_id") is None
+        )
+    ):
+        raise MetricsError(f"{where} has a malformed outcome: {outcome!r}")
 
 
 def load_rows(path: Path | str) -> list[dict[str, Any]]:
@@ -127,27 +146,40 @@ def load_rows(path: Path | str) -> list[dict[str, Any]]:
     return rows
 
 
+@contextmanager
+def _store_lock(p: Path) -> Iterator[None]:
+    """Exclusive inter-process lock over the store: append_row's
+    check-then-append must be atomic (the RunLog._append_lock
+    discipline) - a backfill racing a finish flow could otherwise
+    interleave writes or record a duplicate story row."""
+    with open(p.with_name(p.name + ".lock"), "w") as fh:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+        # closing the fd releases the flock
+        yield
+
+
 def append_row(path: Path | str, row: Mapping[str, Any]) -> bool:
     """Append one row; idempotent on story_id. Returns True if written,
     False when the identical row already exists. A DIFFERENT row for the
     same story refuses - two conflicting records of one story is worse
     than one wrong one, because nothing downstream can tell which lies."""
     p = Path(path)
-    existing = load_rows(p)
-    canon = json.dumps(dict(row), sort_keys=True)
-    for prior in existing:
-        if prior.get("story_id") == row.get("story_id"):
-            if json.dumps(prior, sort_keys=True) == canon:
-                return False
-            raise MetricsError(
-                f"{p} already carries a DIFFERENT row for "
-                f"{row.get('story_id')!r} - refusing a conflicting second "
-                "record; correct the existing row deliberately instead"
-            )
     p.parent.mkdir(parents=True, exist_ok=True)
-    with p.open("a", encoding="utf-8") as fh:
-        fh.write(json.dumps(dict(row), sort_keys=True) + "\n")
-    return True
+    with _store_lock(p):
+        existing = load_rows(p)
+        canon = json.dumps(dict(row), sort_keys=True)
+        for prior in existing:
+            if prior.get("story_id") == row.get("story_id"):
+                if json.dumps(prior, sort_keys=True) == canon:
+                    return False
+                raise MetricsError(
+                    f"{p} already carries a DIFFERENT row for "
+                    f"{row.get('story_id')!r} - refusing a conflicting second "
+                    "record; correct the existing row deliberately instead"
+                )
+        with p.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(dict(row), sort_keys=True) + "\n")
+        return True
 
 
 def epic_rows(rows: Iterable[Mapping[str, Any]], epic_id: str) -> list[dict]:
@@ -155,6 +187,16 @@ def epic_rows(rows: Iterable[Mapping[str, Any]], epic_id: str) -> list[dict]:
     if not out:
         raise MetricsError(f"no metrics rows for epic {epic_id!r}")
     return out
+
+
+def _numeric_id_key(value: str, what: str) -> list[int]:
+    """Sort key for dash-separated numeric ids: lexicographic order puts
+    47-10 before 47-2. Non-numeric segments raise typed, so the CLI
+    prints its error: line instead of a ValueError traceback."""
+    try:
+        return [int(seg) for seg in str(value).split("-")]
+    except ValueError as exc:
+        raise MetricsError(f"malformed {what}: {value!r}") from exc
 
 
 def render_epic_table(rows: Sequence[Mapping[str, Any]]) -> str:
@@ -165,7 +207,7 @@ def render_epic_table(rows: Sequence[Mapping[str, Any]]) -> str:
         " | wall_min | cost_usd | parks | outcome | bypass"
     )
     lines = [header, "-" * len(header)]
-    for r in sorted(rows, key=lambda x: x["story_id"]):
+    for r in sorted(rows, key=lambda x: _numeric_id_key(x["story_id"], "story_id")):
         o = r.get("outcome") or {}
         outcome = (
             f"step {o.get('step_key')}+gate" if o.get("kind") == "step+gate"
@@ -196,7 +238,7 @@ def render_trends(rows: Sequence[Mapping[str, Any]]) -> str:
     for r in rows:
         by_epic.setdefault(str(r["epic"]), []).append(r)
     lines = ["epic | stories | avg_rounds | cost/story | dismissal_rate"]
-    for epic in sorted(by_epic, key=lambda e: [int(x) for x in e.split("-")]):
+    for epic in sorted(by_epic, key=lambda e: _numeric_id_key(e, "epic")):
         er = by_epic[epic]
         n = len(er)
         avg_rounds = sum(r["converge_rounds"] for r in er) / n
