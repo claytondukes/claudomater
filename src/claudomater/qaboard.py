@@ -346,7 +346,10 @@ def run_gate(cfg: QaBoardConfig, epic_id: str) -> None:
         )
 
 
-_AUDITED_RE = re.compile(r"Story files audited:\s*(\d+)")
+# gen_coverage.py writes the line markdown-bold ('- **Story files
+# audited:** 1'); the epic-48 live run caught the plain-form-only regex
+# refusing the real matrix - tolerate the closing ** between colon and count
+_AUDITED_RE = re.compile(r"Story files audited:(?:\*\*)?\s*(\d+)")
 
 
 def _git_out(repo: Path, *args: str) -> str:
