@@ -26,9 +26,10 @@ comments survive by construction.
 - A key the DB tracks but the file lacks is a loud report, removed only by
   an explicit `import --prune`.
 - `add-epic` requires `--epic-file` pointing at an epic markdown that
-  carries a `## Definition of Done` section, checked BEFORE any write. The
-  retro line is always appended as `epic-N-retrospective:
-  fable-review-required` - the banned `optional` is unrepresentable.
+  carries a `## Definition of Done` section, checked BEFORE any write.
+  The retro line is always appended as
+  `epic-N-retrospective: fable-review-required` - the banned `optional`
+  is unrepresentable.
 - `check-retros` fails if any `*-retrospective:` line carries `optional`; a
   missing file fails loudly.
 - **Discipline:** `omater sprint import` before the first `set` of any
@@ -101,8 +102,9 @@ omater gate close-epic EPIC --sprint PATH [ROOT]
 
 Ordered and counted:
 
-1. Precheck: the artifact repo is clean AND pushed (`git rev-list
-   @{u}..HEAD` empty) - story artifacts land before the close.
+1. Precheck: the artifact repo is clean AND pushed
+   (`git rev-list @{u}..HEAD` empty) - story artifacts land before the
+   close.
 2. Write-ahead `close-gate` run event (no outcome claim), then the board
    gate runs and the matrix regenerates.
 3. The regenerated matrix's `Story files audited: N` (plain or

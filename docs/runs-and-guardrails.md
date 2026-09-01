@@ -9,17 +9,17 @@ omater teardown [ROOT]   # disarm everything
 ```
 
 A driver that started a run ends it with `omater teardown` after the
-terminal event. Between runs the fence must not exist - `omater init
---verify` is the drift check. `omater start` refuses a second live run and
+terminal event. Between runs the fence must not exist -
+`omater init --verify` is the drift check. `omater start` refuses a second live run and
 refuses provisioning drift.
 
 ## Run log
 
 Every run writes `.omater/runs/<run-id>/`:
 
-- `progress.log` - human-readable, append-only. `tail -f
-  .omater/runs/current/progress.log` is the replacement for watching a
-  terminal pane.
+- `progress.log` - human-readable, append-only.
+  `tail -f .omater/runs/current/progress.log` is the replacement for
+  watching a terminal pane.
 - `events.jsonl` - structured events. State transitions are written BEFORE
   the action executes (write-ahead), so a fresh orchestrator can adopt an
   orphaned run by replaying events against reality.
