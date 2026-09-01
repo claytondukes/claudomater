@@ -140,6 +140,35 @@ class TestAppendIsIdempotent:
         with pytest.raises(MetricsError, match="malformed outcome"):
             load_rows(p)
 
+    @pytest.mark.parametrize(
+        "field,bad",
+        [
+            ("cost_usd", "20.23"),
+            ("wall_minutes", "82"),
+            ("merge_bypass", "yes"),
+            ("pr", 386.0),
+            ("merge_sha", ""),
+        ],
+    )
+    def test_a_mistyped_field_is_refused_at_load(self, tmp_path, field, bad):
+        """Copilot round 3: '20.23' as a string passed load and crashed
+        the renderer with a TypeError - a traceback, not the CLI's
+        error: contract."""
+        p = tmp_path / "stories.jsonl"
+        row = compose_row("47-1", "47", FINISH_SURFACE, FACTS)
+        row[field] = bad
+        p.write_text(json.dumps(row) + "\n")
+        with pytest.raises(MetricsError, match=field):
+            load_rows(p)
+
+    def test_a_mistyped_fact_is_refused_at_compose(self):
+        """The same validator runs at WRITE time - a mistyped row must
+        never land in the store and poison every later read."""
+        with pytest.raises(MetricsError, match="cost_usd"):
+            compose_row(
+                "47-1", "47", FINISH_SURFACE, {**FACTS, "cost_usd": "42.72"}
+            )
+
     def test_append_serializes_under_the_store_lock(self, tmp_path):
         """Copilot round 2: check-then-append needs the inter-process
         lock (the RunLog._append_lock discipline) - a backfill racing a

@@ -75,22 +75,39 @@ def compose_row(
         }
     else:
         outcome = {"kind": "waiver"}
-    return {
+    row = {
         "story_id": story_id,
         "epic": epic_id,
         **{k: driver_facts[k] for k in DRIVER_FIELDS},
         "outcome": outcome,
     }
+    # the same validator load_rows runs - a mistyped fact must refuse at
+    # WRITE, never land in the store and poison every later read
+    _validate_row(row, f"composed row for {story_id}")
+    return row
 
 
 # every key a compose_row-written row carries; only compose_row writes
 # this file, so a deviation at load means something else did
 _ROW_KEYS = frozenset(("story_id", "epic", "outcome", *DRIVER_FIELDS))
+_STR_FIELDS = ("story_id", "epic", "merge_sha")
+_INT_FIELDS = (
+    "pr",
+    "converge_rounds",
+    "threads_fixed",
+    "threads_dismissed",
+    "suppressed_fixed",
+    "suppressed_dismissed",
+    "wall_minutes",
+    "parks",
+)
 
 
 def _validate_row(row: Any, where: str) -> None:
-    """Full row schema at LOAD: a row missing a field crashed the
-    renderers with a raw KeyError instead of the CLI's error: contract."""
+    """Full row schema, enforced at WRITE (compose_row) and LOAD alike: a
+    row missing a field crashed the renderers with a raw KeyError, and a
+    mistyped one ('20.23' as a string) with a raw TypeError - tracebacks
+    where the CLI promises an error: line."""
     if not isinstance(row, dict) or not row.get("story_id"):
         raise MetricsError(f"{where} is not a metrics row (no story_id)")
     missing = sorted(_ROW_KEYS - set(row))
@@ -99,6 +116,28 @@ def _validate_row(row: Any, where: str) -> None:
     unknown = sorted(set(row) - _ROW_KEYS)
     if unknown:
         raise MetricsError(f"{where} has unknown field(s): {', '.join(unknown)}")
+    for key in _STR_FIELDS:
+        v = row[key]
+        if not isinstance(v, str) or not v.strip():
+            raise MetricsError(
+                f"{where}: {key} must be a non-blank string, got {v!r}"
+            )
+    for key in _INT_FIELDS:
+        v = row[key]
+        # bool is an int subclass - True would count as 1 silently
+        if not isinstance(v, int) or isinstance(v, bool) or v < 0:
+            raise MetricsError(
+                f"{where}: {key} must be a non-negative integer, got {v!r}"
+            )
+    cost = row["cost_usd"]
+    if not isinstance(cost, (int, float)) or isinstance(cost, bool) or cost < 0:
+        raise MetricsError(
+            f"{where}: cost_usd must be a non-negative number, got {cost!r}"
+        )
+    if not isinstance(row["merge_bypass"], bool):
+        raise MetricsError(
+            f"{where}: merge_bypass must be a boolean, got {row['merge_bypass']!r}"
+        )
     outcome = row["outcome"]
     if not isinstance(outcome, dict) or outcome.get("kind") not in (
         "step+gate",
