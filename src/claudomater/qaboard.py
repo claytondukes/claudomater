@@ -479,7 +479,7 @@ def _persist_metrics(
     metrics_path: Any,
     runlog: Any,
 ) -> dict:
-    """Metrics-row persistence (Clay, epic-47 close follow-up): the row
+    """Metrics-row persistence (epic close-review follow-up): the row
     lands in the artifact repo IN THE SAME CHANGE SET as the story's
     other artifacts. Both knobs or neither - a half-wired metrics store
     silently recording nothing is the silent-pass shape."""

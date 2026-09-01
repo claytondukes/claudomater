@@ -163,7 +163,7 @@ class TestArming:
             commitguard.arm(repo, ["ui"])
 
     def test_arm_accepts_hookspath_naming_the_repos_own_default(self, repo):
-        """Measured on the real target 2026-08-31: ui3 sets core.hooksPath
+        """Measured on the real target 2026-08-31: it sets core.hooksPath
         to its own absolute .git/hooks. Git reads hooks from exactly where
         the guard installs, so refusing on the config key's mere presence
         would refuse the primary target repo for nothing."""

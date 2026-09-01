@@ -1146,7 +1146,7 @@ from claudomater.phases import (
 
 
 class TestArtifactRoots:
-    """Parity finding F1: ui3's `_bmad-output` is deliberately a symlink to
+    """Parity finding F1: an artifact dir that is deliberately a symlink to
     a separate checkout (documented consumer shape), and result_file_exists'
     containment rejected the legitimate story artifact behind it — a $12
     live failure that killed the run mid-retry. Declared artifact roots are
@@ -1293,7 +1293,7 @@ class TestRetryFeedbackFraming:
 
     def test_reasons_are_blockquoted_line_by_line(self):
         reason = (
-            "verifier-failed: result_file_exists: move the file into ui3/\n"
+            "verifier-failed: result_file_exists: move the file into webapp/\n"
             "and then rerun the gauntlet"
         )
         amended = amend_prompt_with_failures("do the story", [reason, "second"])
@@ -1301,7 +1301,7 @@ class TestRetryFeedbackFraming:
         assert RETRY_FEEDBACK_FRAME in amended
         # every evidence line is inside a blockquote — no bare reason line
         # that reads as an instruction from the orchestrator
-        assert "1. > verifier-failed: result_file_exists: move the file into ui3/" in amended
+        assert "1. > verifier-failed: result_file_exists: move the file into webapp/" in amended
         assert "   > and then rerun the gauntlet" in amended
         assert "2. > second" in amended
         for line in amended.splitlines():

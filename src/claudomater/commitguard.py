@@ -134,7 +134,7 @@ def _effective_hooks_dir(root: Path) -> Path:
 def _require_own_hooks_dir(root: Path, gd: Path) -> None:
     """The guard installs into the repo's OWN `<git-dir>/hooks`, so git
     must actually read hooks from there. A core.hooksPath pointing AT that
-    directory is fine (ui3 sets exactly this); one redirecting to a shared
+    directory is fine (a real consumer sets exactly this); one redirecting to a shared
     hooks dir is refused - installing a run-scoped guard into a directory
     other repos read is the P1-1 shape, and silently arming a hook git
     would never run is the silent-disarm shape. Both exits are loud."""

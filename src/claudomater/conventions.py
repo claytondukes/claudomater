@@ -1,10 +1,10 @@
 """Project conventions: standing style/policy rules as CONFIG, not
-GO-prompt restatement (Clay, epic-47 close follow-up).
+GO-prompt restatement (epic close-review follow-up).
 
 The lessons store deliberately carries zero style rows - style rules are
 policy, not incidents - and until now their load-bearing carrier was the
-GO prompt itself: the conventions-held-only-by-memory shape ui3's own
-lesson warns about. Two mechanisms close it:
+GO prompt itself: the conventions-held-only-by-memory shape the lesson
+corpus itself warns about. Two mechanisms close it:
 
 - `conventions_block(...)` renders the project's `conventions:` list as a
   framed prompt section every phase agent receives verbatim

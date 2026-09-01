@@ -38,9 +38,10 @@ RULES = SurfaceRules(
     exclude_root_dotfiles=True,
 )
 
-UI3 = Path(os.environ.get("OMATER_UI3_ROOT", Path.home() / "sourcecode/ui3"))
-requires_ui3 = pytest.mark.skipif(
-    not (UI3 / ".omater.yaml").is_file(), reason="ui3 checkout not present"
+PARITY = Path(os.environ.get("OMATER_PARITY_ROOT") or "/nonexistent")
+requires_parity = pytest.mark.skipif(
+    not (PARITY / ".omater.yaml").is_file(),
+    reason="parity checkout not configured (OMATER_PARITY_ROOT)",
 )
 
 
@@ -336,13 +337,13 @@ class TestFinishFlow:
 def _merged_files(sha: str) -> list[str]:
     out = subprocess.run(
         ["git", "show", "--name-only", "--format=", sha],
-        cwd=UI3, capture_output=True, text=True, check=True,
+        cwd=PARITY, capture_output=True, text=True, check=True,
     ).stdout
     return [line for line in out.splitlines() if line.strip()]
 
 
-@requires_ui3
-class TestUi3FinishReplays:
+@requires_parity
+class TestParityFinishReplays:
     """The named acceptance proofs: the real merged file sets, the real
     committed rules, the full flow against the stub board + fake gate.
     Story 34-36's merge must drive the SURFACE path (it shipped without a
@@ -352,7 +353,7 @@ class TestUi3FinishReplays:
     def _rules(self):
         from claudomater.config import load_project_config
 
-        rules = load_project_config(UI3).surface_rules
+        rules = load_project_config(PARITY).surface_rules
         assert rules is not None
         return rules
 

@@ -35,15 +35,12 @@ from claudomater.sprint import (
 
 FIXTURE = Path(__file__).parent / "fixtures" / "sprint-status-sample.yaml"
 
-# The ui3 file the acceptance proof runs against. READ-ONLY, never
-# committed, never quoted in this repo: the proof reports pass/fail, the
-# fixture above carries the shapes.
-UI3_SPRINT_STATUS = Path(
-    os.environ.get(
-        "OMATER_UI3_SPRINT_STATUS",
-        Path.home()
-        / "sourcecode/ui3/_bmad-output/implementation-artifacts/sprint-status.yaml",
-    )
+# The real consumer sprint file the acceptance proofs replay against.
+# READ-ONLY, never committed, never quoted in this repo: the proof
+# reports pass/fail, the fixture above carries the shapes. OPT-IN: point
+# OMATER_PARITY_SPRINT_STATUS at the file to run them; unset skips.
+PARITY_SPRINT_STATUS = Path(
+    os.environ.get("OMATER_PARITY_SPRINT_STATUS") or "/nonexistent"
 )
 
 
@@ -176,7 +173,7 @@ class TestFlipTouchesExactlyOneToken:
 
 
 class TestLegacyValuesAreNeverCorrected:
-    """Clay's rider: `optional` is banned for new epics but historical
+    """Operator rider: `optional` is banned for new epics but historical
     lines are audit records. Reading never validates; only writes do."""
 
     def test_an_optional_retro_survives_a_full_export(self, store, workfile):
@@ -362,24 +359,24 @@ class TestDatabaseRoundTrip:
         assert keys == sorted(keys)
 
 
-class TestUi3AcceptanceProof:
+class TestParityAcceptanceProof:
     """The slice C acceptance: byte-exact round-trip against the REAL
-    ui3 sprint-status.yaml. READ-ONLY - this never writes to it, and its
+    consumer sprint-status.yaml. READ-ONLY - this never writes to it, and its
     content is never copied into this repo. Skipped where the file is not
     present, which is every machine but the operator's."""
 
     @pytest.mark.skipif(
-        not UI3_SPRINT_STATUS.is_file(), reason="ui3 sprint-status.yaml not present"
+        not PARITY_SPRINT_STATUS.is_file(), reason="parity sprint file not configured (OMATER_PARITY_SPRINT_STATUS)"
     )
     def test_the_real_file_round_trips_byte_exactly(self):
-        assert round_trip_ok(UI3_SPRINT_STATUS)
+        assert round_trip_ok(PARITY_SPRINT_STATUS)
 
     @pytest.mark.skipif(
-        not UI3_SPRINT_STATUS.is_file(), reason="ui3 sprint-status.yaml not present"
+        not PARITY_SPRINT_STATUS.is_file(), reason="parity sprint file not configured (OMATER_PARITY_SPRINT_STATUS)"
     )
     def test_a_flip_on_a_copy_of_the_real_file_touches_one_line(self, tmp_path):
         copy = tmp_path / "sprint-status.yaml"
-        copy.write_bytes(UI3_SPRINT_STATUS.read_bytes())
+        copy.write_bytes(PARITY_SPRINT_STATUS.read_bytes())
         doc = SprintDoc.read(copy)
         # pick ANY story and flip it to a status it does not already hold:
         # requiring a non-done story would raise StopIteration - failing an
@@ -1503,19 +1500,19 @@ class TestSprintCliSliceB:
         assert "never read" in capsys.readouterr().err
 
 
-class TestUi3RetroGateProof:
-    """READ-ONLY against the real ui3 file, like TestUi3AcceptanceProof:
+class TestParityRetroGateProof:
+    """READ-ONLY against the real parity file, like TestParityAcceptanceProof:
     the wider scan (sub-epic + project retros included) must agree with
     the file's own hygiene rule. Measured at slice B build time: 46 retro
     lines, all in the legal write vocabulary."""
 
     @pytest.mark.skipif(
-        not UI3_SPRINT_STATUS.is_file(), reason="ui3 sprint-status.yaml not present"
+        not PARITY_SPRINT_STATUS.is_file(), reason="parity sprint file not configured (OMATER_PARITY_SPRINT_STATUS)"
     )
     def test_the_real_file_is_clean_under_the_wider_scan(self):
         from claudomater.sprint import retro_ban_scan
 
-        violations, distribution = retro_ban_scan(UI3_SPRINT_STATUS)
+        violations, distribution = retro_ban_scan(PARITY_SPRINT_STATUS)
         assert violations == []
         assert set(distribution) <= {"fable-review-required", "done"}
 

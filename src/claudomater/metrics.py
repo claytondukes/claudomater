@@ -1,6 +1,6 @@
 """Run-metrics store: one structured JSONL row per finished story,
 committed to the artifact repo beside the story's other artifacts
-(Clay, epic-47 close follow-up).
+(epic close-review follow-up).
 
 The finish flow already computes the per-story report row at flip time;
 this module persists it so per-epic tables and cross-epic trends render

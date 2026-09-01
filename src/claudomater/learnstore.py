@@ -12,7 +12,7 @@ The division of authority is the point:
   committed): FTS retrieval and the volatile `refs`/`sessions` counters live
   here. Counters stay OUT of the export on purpose — every use of a hot
   lesson would otherwise churn the export and make conflicts the common case.
-- **lesson content is scrubbed on every write** (Clay's Phase 2 rider): the
+- **lesson content is scrubbed on every write** (operator rider): the
   corpus outlives the run that produced it, so a lesson must never carry
   customer hostnames, tokens, or other deny-listed values — `scrub_text`
   runs against the store's `secrets_deny` before anything touches the DB.
@@ -993,7 +993,7 @@ def sync(
 ) -> dict[str, Any]:
     """`omater learn sync` (design rev 2): git pull --ff-only → import the
     JSONL → export → commit. The export directory must live inside a git
-    repo (Clay's setup: the private dotfiles repo). Commits carry the
+    repo (typical setup: a private dotfiles repo). Commits carry the
     `omater-learn:` prefix so dotfiles history stays legible (Phase 2
     rider); a non-fast-forward pull fails loudly for the operator to
     resolve — sync never merges for you. `push` is opt-in."""

@@ -41,7 +41,7 @@ SCRATCH_ENV = "OMATER_SCRATCH_DIR"
 # The marker only omater-spawned phase agents carry (injected by
 # ClaudeCliExecutor). Project-level hooks apply to EVERY Claude session in
 # the repo - including the human's - so the fence must self-disarm when the
-# marker is absent. Parity finding P1-1 (2026-08-30): the ui3 run's fence
+# marker is absent. Parity finding P1-1 (2026-08-30): a live run's fence
 # denied an unrelated interactive session's legitimate out-of-repo write -
 # the run fencing the HUMAN's environment, the exact inversion of the
 # sandbox contract (the fence exists to contain bypassed-permissions agents,
@@ -1119,7 +1119,7 @@ def resolved_bash_targets(
     """Each recognized write target paired with the path it resolves to,
     honoring in-command `cd`/`pushd` when resolving RELATIVE targets.
 
-    Measured false deny this exists to close (Phase 0.5, bugtool):
+    Measured false deny this exists to close (Phase 0.5 rehearsal):
     `cd <root>/server && cat > ../.omater/scratch/probe.py` resolved the
     redirect against the SESSION cwd (the repo root), landing one level
     above the repo — denied, though the real target was in-root scratch.
@@ -1897,8 +1897,8 @@ def scratch_dirs_for(root: Path, env: dict[str, str] | None = None) -> list[Path
 def artifact_roots_for(root: Path) -> list[Path]:
     """Declared artifact directories that may sit OUTSIDE the tree.
 
-    Slice D acceptance run: the fence denied every write to ui3's
-    `_bmad-output/` - where the story file lives - because that directory is
+    Slice D acceptance run: the fence denied every write to the
+    consumer's `_bmad-output/` - where the story file lives - because that directory is
     a symlink out of the checkout, so realpath placed it outside the root.
     Phase 1 hit the same wall (all 8 of its denials) and survived only
     because the fence is a redirector, not a jail: the agent rewrote the
