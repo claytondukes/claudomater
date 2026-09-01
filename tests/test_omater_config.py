@@ -596,3 +596,40 @@ class TestQaBoardAdapterConfig:
                     tmp_path, "project: p\nadapters:\n  qa_board: lz-qa-viewer\n"
                 )
             )
+
+
+class TestCompletionExemptConfig:
+    """Epic-47 retro F3 / retirement condition 1: the completion gate's
+    exempt list is config-owned, validated at LOAD through the gate's own
+    grammar."""
+
+    def test_absent_means_the_strict_gate(self, tmp_path):
+        cfg = load_project_config(write_project(tmp_path, "project: p\n"))
+        assert cfg.completion_exempt == ()
+
+    def test_a_valid_block_normalizes(self, tmp_path):
+        cfg = load_project_config(
+            write_project(
+                tmp_path,
+                "project: p\ncompletion:\n  exempt:\n    - _bmad-output/\n",
+            )
+        )
+        assert cfg.completion_exempt == ("_bmad-output",)
+
+    def test_unknown_keys_are_refused(self, tmp_path):
+        with pytest.raises(ConfigError, match="completion has unknown key"):
+            load_project_config(
+                write_project(
+                    tmp_path, "project: p\ncompletion:\n  exemptions: [x/]\n"
+                )
+            )
+
+    def test_dangerous_entries_fail_at_load(self, tmp_path):
+        for bad in ("/abs", "a/../b", "."):
+            with pytest.raises(ConfigError, match="completion.exempt"):
+                load_project_config(
+                    write_project(
+                        tmp_path,
+                        f'project: p\ncompletion:\n  exempt: ["{bad}"]\n',
+                    )
+                )

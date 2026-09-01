@@ -55,6 +55,50 @@ class CompletionError(Exception):
     """The gate cannot be evaluated honestly. Never a pass."""
 
 
+def normalize_exempt(entries: object) -> tuple[str, ...]:
+    """Validated exempt prefixes from config. Entries are repo-relative
+    path prefixes (the same segment-boundary semantics `_exempt` matches
+    on). Anything that could silently match nothing - absolute paths,
+    backslashes, `..`, blank strings - fails loudly at LOAD (epic-47
+    retro F3: an exemption nobody can reproduce from the repo is a
+    verdict nobody can trust)."""
+    if entries is None:
+        return ()
+    if not isinstance(entries, list):
+        raise CompletionError(
+            f"completion.exempt must be a list of path prefixes, got {entries!r}"
+        )
+    out: list[str] = []
+    for raw in entries:
+        if not isinstance(raw, str) or not raw.strip():
+            raise CompletionError(
+                f"completion.exempt entries must be non-blank strings, got {raw!r}"
+            )
+        entry = raw.strip()
+        if "\\" in entry:
+            raise CompletionError(
+                f"completion.exempt entries use forward slashes, got {raw!r}"
+            )
+        if entry.startswith("./"):
+            entry = entry[2:]
+        entry = entry.rstrip("/")
+        if not entry or entry == ".":
+            raise CompletionError(
+                f"completion.exempt entry {raw!r} normalizes to nothing - "
+                "an exempt-everything entry must be impossible to write"
+            )
+        if entry.startswith("/") or entry.startswith("~"):
+            raise CompletionError(
+                f"completion.exempt entries are repo-relative, got {raw!r}"
+            )
+        if ".." in entry.split("/"):
+            raise CompletionError(
+                f"completion.exempt entries must not traverse with '..': {raw!r}"
+            )
+        out.append(entry)
+    return tuple(out)
+
+
 @dataclass
 class CompletionReport:
     """The gate's verdict with its evidence. `ok` is True only when both
@@ -122,11 +166,72 @@ def file_list_paths(section: str) -> list[str]:
 def completion_report(
     story_text: str,
     merged_files: Sequence[str],
+    require_file_list: bool = True,
+) -> CompletionReport:
+    """Evaluate both blades with NO exemptions. The exempt-carrying seam
+    is `run_completion_gate`, which reads the list from project config
+    and logs the invocation - a call site choosing its own exemptions is
+    exactly the unreproducible-verdict mechanism epic-47 retro F3 named
+    (retirement condition 1). Ad-hoc callers get the strict gate only."""
+    return _completion_report(
+        story_text, merged_files, exempt=(), require_file_list=require_file_list
+    )
+
+
+def run_completion_gate(
+    project_root: Path | str,
+    cfg: "object",
+    story_file: Path | str,
+    merge_sha: str,
+    runlog: "object",
+    require_file_list: bool = True,
+) -> CompletionReport:
+    """THE production completion gate (retirement condition 1): exempt
+    prefixes come from `.omater.yaml` `completion.exempt` (already
+    normalized on the config object), the inputs and the exempt list
+    actually used ride into the run log BEFORE the verdict is returned,
+    and there is no argument through which a driver can widen the
+    exemptions for one call."""
+    root = Path(project_root)
+    exempt = tuple(getattr(cfg, "completion_exempt"))
+    story_path = Path(story_file)
+    if not story_path.is_absolute():
+        story_path = root / story_path
+    try:
+        story_text = story_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise CompletionError(f"cannot read story file {story_path}: {exc}") from exc
+    merged = merged_files_of(root, merge_sha)
+    report = _completion_report(
+        story_text, merged, exempt=exempt, require_file_list=require_file_list
+    )
+    # One event carrying the inputs, the exempt list USED (not the
+    # config's state at some later read), and the verdict.
+    runlog.event(
+        "gate",
+        "completion-gate",
+        {
+            "story_file": str(story_path),
+            "merge_sha": merge_sha,
+            "exempt": list(exempt),
+            "merged_files": len(merged),
+            "require_file_list": require_file_list,
+            **report.as_dict(),
+        },
+    )
+    return report
+
+
+def _completion_report(
+    story_text: str,
+    merged_files: Sequence[str],
     exempt: Sequence[str] = (),
     require_file_list: bool = True,
 ) -> CompletionReport:
     """Evaluate both blades against the story file's text and the ACTUAL
-    merged file set (use `merged_files_of` to read it from git)."""
+    merged file set (use `merged_files_of` to read it from git). Module
+    private: `exempt` is config-owned state, reachable in production only
+    through `run_completion_gate`."""
     cleaned = [p.strip() for p in merged_files if p and p.strip()]
     if not cleaned:
         # same contract as the surface classifier: an empty changeset is a

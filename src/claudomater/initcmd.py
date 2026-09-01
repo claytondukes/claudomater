@@ -70,6 +70,11 @@ learning:
 #   exclude: [docs/**]      #   kept beside the process doc that governs them
 #   exclude_root_dotfiles: true
 
+# completion: {{}}           # completion-integrity gate: File List prefixes
+#   exempt: [artifacts/]    #   that legitimately ride outside the merge
+#                           #   (driver-owned artifacts in a separate repo).
+#                           #   Config is the ONLY source of exemptions.
+
 ci:
   tier_on_push: fast       # fast | full
   tier_on_merge: full

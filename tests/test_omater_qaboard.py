@@ -21,6 +21,7 @@ from claudomater.qaboard import (
     QaBoardConfig,
     QaBoardError,
     author_step,
+    close_epic,
     epic_of,
     finish_story,
     load_spec,
@@ -513,3 +514,133 @@ class TestRoundTwoHardening:
                 cfg, 7,
                 {"step_key": "34-3-01", "label": "34-3 x", "surface_proof": "  "},
             )
+
+
+class TestCloseEpic:
+    """Retirement condition 2 (epic-47 retro F4): artifacts pushed before
+    the gate, and the regenerated matrix's audited count vs the epic's
+    story count - a mismatch FAILS, it is not a warning."""
+
+    SPRINT = (
+        "# preamble\n"
+        "development_status:\n"
+        "  epic-9: done\n"
+        "  9-1-first-thing: done\n"
+        "  9-2-second-thing: done\n"
+        "  9-3-abandoned: superseded\n"
+        "  epic-9-retrospective: fable-review-required\n"
+    )
+
+    def _arrange(self, tmp_path, audited=2, dirty=False, unpushed=False):
+        import subprocess as sp
+
+        env = {**os.environ, "GIT_CONFIG_GLOBAL": os.devnull,
+               "GIT_CONFIG_SYSTEM": os.devnull}
+
+        def git(cwd, *args):
+            sp.run(["git", *args], cwd=cwd, env=env, check=True, capture_output=True)
+
+        upstream = tmp_path / "upstream.git"
+        upstream.mkdir()
+        git(upstream, "init", "-q", "--bare")
+        artifacts = tmp_path / "artifacts"
+        git(tmp_path, "clone", "-q", str(upstream), str(artifacts))
+        git(artifacts, "config", "user.email", "t@example.invalid")
+        git(artifacts, "config", "user.name", "T")
+        (artifacts / "qa-viewer" / "authoring").mkdir(parents=True)
+        (artifacts / "qa-viewer" / "coverage").mkdir(parents=True)
+        (artifacts / "qa-viewer" / "coverage" / "epic-9-coverage.md").write_text(
+            "# Epic 9 coverage\n\nStory files audited: 1\n"
+        )
+        git(artifacts, "add", "-A")
+        git(artifacts, "commit", "-qm", "seed")
+        git(artifacts, "push", "-q", "-u", "origin", "HEAD")
+        if unpushed:
+            (artifacts / "late-story.md").write_text("late\n")
+            git(artifacts, "add", "-A")
+            git(artifacts, "commit", "-qm", "late artifacts, not pushed")
+        if dirty:
+            (artifacts / "wip.md").write_text("wip\n")
+        sprint = tmp_path / "sprint-status.yaml"
+        sprint.write_text(self.SPRINT)
+        # the fake lab gate: rewrites the matrix (like --write-coverage),
+        # commits and pushes it - the real gate's observable contract
+        gate = tmp_path / "gate.sh"
+        gate.write_text(
+            "#!/bin/sh\nset -e\n"
+            f"cd {artifacts}\n"
+            f"printf '# Epic 9 coverage\\n\\nStory files audited: {audited}\\n'"
+            " > qa-viewer/coverage/epic-9-coverage.md\n"
+            "if [ -n \"$(git status --porcelain)\" ]; then\n"
+            "  git add -A && git commit -qm 'matrix regen' && git push -q\n"
+            "fi\n"
+        )
+        gate.chmod(0o755)
+        cfg = QaBoardConfig(
+            authoring_dir=artifacts / "qa-viewer" / "authoring",
+            board_url="http://board.invalid/api",
+            gate_dir=tmp_path,
+            gate=("./gate.sh", "{epic}"),
+        )
+        return cfg, sprint
+
+    def test_happy_path_logs_the_matching_count(self, tmp_path):
+        cfg, sprint = self._arrange(tmp_path, audited=2)
+        log = _Log()
+        result = close_epic(tmp_path, cfg, "9", sprint, log)
+        assert result == {"epic": "9", "gate": "PASS", "audited": 2, "expected": 2}
+        kinds = [e[1] for e in log.events]
+        assert kinds == ["close-gate-precheck", "close-gate-count"]
+        count_detail = log.events[-1][2]
+        assert (count_detail["audited"], count_detail["expected"]) == (2, 2)
+        pre = log.events[0][2]
+        assert pre["story_keys"] == ["9-1-first-thing", "9-2-second-thing"]
+
+    def test_red_the_47_4_shape_unpushed_artifacts_stop_the_close(self, tmp_path):
+        """One story's artifacts sit local-only at gate time - the exact
+        F4 incident. The precheck stops BEFORE the gate runs."""
+        cfg, sprint = self._arrange(tmp_path, unpushed=True)
+        log = _Log()
+        with pytest.raises(QaBoardError, match="unpushed commit"):
+            close_epic(tmp_path, cfg, "9", sprint, log)
+        assert log.events == []  # write-ahead: nothing passed the precheck
+
+    def test_uncommitted_artifacts_stop_the_close(self, tmp_path):
+        cfg, sprint = self._arrange(tmp_path, dirty=True)
+        with pytest.raises(QaBoardError, match="uncommitted"):
+            close_epic(tmp_path, cfg, "9", sprint, _Log())
+
+    def test_a_count_mismatch_fails_loudly_not_a_warning(self, tmp_path):
+        cfg, sprint = self._arrange(tmp_path, audited=1)
+        log = _Log()
+        with pytest.raises(QaBoardError, match="audited 1 story file"):
+            close_epic(tmp_path, cfg, "9", sprint, log)
+        count_detail = log.events[-1][2]
+        assert count_detail["ok"] is False
+
+    def test_superseded_stories_do_not_count(self, tmp_path):
+        """9-3 is superseded: expected is 2, so a matrix auditing 2 passes
+        and one auditing 3 would fail - superseded stories own no
+        artifacts and no audit row."""
+        cfg, sprint = self._arrange(tmp_path, audited=3)
+        with pytest.raises(QaBoardError, match="audited 3"):
+            close_epic(tmp_path, cfg, "9", sprint, _Log())
+
+    def test_a_matrix_without_the_count_line_fails(self, tmp_path):
+        cfg, sprint = self._arrange(tmp_path, audited=2)
+        gate = tmp_path / "gate.sh"
+        gate.write_text(
+            "#!/bin/sh\nset -e\n"
+            f"cd {cfg.authoring_dir.parent.parent}\n"
+            "printf 'no count here\\n' > qa-viewer/coverage/epic-9-coverage.md\n"
+            "git add -A && git commit -qm regen && git push -q\n"
+        )
+        with pytest.raises(QaBoardError, match="no 'Story files audited"):
+            close_epic(tmp_path, cfg, "9", sprint, _Log())
+
+    def test_an_unknown_epic_id_raises_from_the_sprint_file(self, tmp_path):
+        from claudomater.sprint import SprintError
+
+        cfg, sprint = self._arrange(tmp_path)
+        with pytest.raises(SprintError, match="no epic-77 line"):
+            close_epic(tmp_path, cfg, "77", sprint, _Log())
