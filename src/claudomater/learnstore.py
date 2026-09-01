@@ -1077,13 +1077,19 @@ def sync(
         for line in numstat.stdout.splitlines():
             if not line.strip():
                 continue
-            parts = line.split("\t")
-            if len(parts) < 2 or not parts[0].isdigit() or not parts[1].isdigit():
-                # '-' (binary) or any other shape: a lessons export is
-                # UTF-8 JSONL, so an uncountable line means the diff is
-                # not what this counter thinks it is - and a message
-                # quietly reporting +0/-0 would be the exact dishonest
-                # numeric claim this fix removes
+            # split at most twice: the path is the third field verbatim
+            parts = line.split("\t", 2)
+            if (
+                len(parts) != 3
+                or not parts[0].isdigit()
+                or not parts[1].isdigit()
+                or not parts[2].strip()
+            ):
+                # '-' (binary), a missing path, or any other shape: a
+                # lessons export is UTF-8 JSONL, so an uncountable line
+                # means the diff is not what this counter thinks it is -
+                # and a message quietly reporting +0/-0 would be the exact
+                # dishonest numeric claim this fix removes
                 raise LearnStoreError(
                     f"unparseable numstat line for the lessons export: {line!r}"
                 )

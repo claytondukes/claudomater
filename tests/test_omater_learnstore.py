@@ -1255,3 +1255,39 @@ class TestSyncMessageCountsItsOwnDiff:
                 sync(s)
         finally:
             s.close()
+
+    def test_a_pathless_numstat_line_fails_loudly(self, tmp_path, monkeypatch):
+        """Copilot round 6: '1\\t0' (two fields, no path) is not a numstat
+        row - counting it would launder malformed output into an
+        'honest' +A/-D claim."""
+        import claudomater.learnstore as ls
+
+        origin = tmp_path / "origin.git"
+        subprocess.run(["git", "init", "-q", "--bare", str(origin)], check=True)
+        repo = tmp_path / "dotfiles"
+        subprocess.run(["git", "clone", "-q", str(origin), str(repo)], check=True)
+        git(repo, "config", "user.email", "t@t")
+        git(repo, "config", "user.name", "t")
+        (repo / "seed.txt").write_text("x", encoding="utf-8")
+        git(repo, "add", "-A")
+        git(repo, "commit", "-q", "-m", "seed")
+        git(repo, "push", "-q")
+        s = LearnStore.open(
+            tmp_path / "l.db", export_dir=repo / "omater" / "lessons",
+            now=ticking_now(),
+        )
+        try:
+            s.add("global", "tooling", "one-rule", "the rule", "the why")
+            real_git = ls._git
+
+            def numstat_loses_its_path(cwd, *args):
+                proc = real_git(cwd, *args)
+                if "--numstat" in args:
+                    proc.stdout = "1\t0\n"
+                return proc
+
+            monkeypatch.setattr(ls, "_git", numstat_loses_its_path)
+            with pytest.raises(LearnStoreError, match="unparseable numstat"):
+                sync(s)
+        finally:
+            s.close()
