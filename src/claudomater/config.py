@@ -202,6 +202,11 @@ class ProjectConfig:
     # and they drifted from the document within days). None = the project
     # declares no surface gate.
     surface_rules: "SurfaceRules | None" = None
+    # Completion-gate exempt prefixes (epic-47 retro F3; retirement
+    # condition 1): the ONLY source of File-List exemptions. Config-owned
+    # so every verdict is reproducible from the repo; an absent block
+    # means the strict gate, never a call-site widening.
+    completion_exempt: tuple[str, ...] = ()
     ci_tier_on_push: str | None = None  # None -> deployment_type default
     ci_tier_on_merge: str = "full"
     gates: dict[str, Any] = field(default_factory=dict)
@@ -398,6 +403,23 @@ def load_project_config(root: Path | str) -> ProjectConfig:
     except SurfaceError as exc:
         raise ConfigError(f"{PROJECT_CONFIG_NAME}: {exc}") from exc
 
+    # completion.exempt validates through the gate's own loader (one
+    # grammar, owned where it is matched), failing at LOAD. Lazy import
+    # like the siblings above.
+    from claudomater.completion import CompletionError, normalize_exempt
+
+    completion_raw = _require_mapping("completion", data.get("completion"))
+    unknown_completion = set(completion_raw) - {"exempt"}
+    if unknown_completion:
+        raise ConfigError(
+            f"{PROJECT_CONFIG_NAME}: completion has unknown key(s): "
+            f"{sorted(unknown_completion)} (only 'exempt' is defined)"
+        )
+    try:
+        completion_exempt = normalize_exempt(completion_raw.get("exempt"))
+    except CompletionError as exc:
+        raise ConfigError(f"{PROJECT_CONFIG_NAME}: {exc}") from exc
+
     gates_raw = _require_mapping("gates", data.get("gates"))
     # Gates are scalar knobs, and the mapping rides verbatim into policy()
     # — the run-log snapshot json.dumps'es. yaml.safe_load happily produces
@@ -441,6 +463,7 @@ def load_project_config(root: Path | str) -> ProjectConfig:
         artifact_roots=list(artifact_roots),
         commit_scope=commit_scope,
         surface_rules=surface_rules,
+        completion_exempt=completion_exempt,
         ci_tier_on_push=ci_raw.get("tier_on_push"),
         ci_tier_on_merge=ci_raw.get("tier_on_merge", "full"),
         gates=gates_raw,

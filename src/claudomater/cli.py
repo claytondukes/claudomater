@@ -405,6 +405,74 @@ def _cmd_sprint(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def _cmd_gate_completion(args: argparse.Namespace) -> int:
+    """The completion-integrity gate as a versioned, configured, logged
+    invocation (epic-47 retro F3; retirement condition 1). Exempt
+    prefixes come from `.omater.yaml` only; the invocation, its inputs,
+    and the exempt list actually used land in the LIVE run's log. Exit 0
+    verdict-ok, 2 blocked-or-error."""
+    import json as json_mod
+
+    from claudomater import completion, runlog as runlog_mod
+
+    try:
+        root = Path(args.root).resolve()
+        cfg = load_project_config(root)
+        log = runlog_mod.RunLog.attach(root)
+    except (ConfigError, OSError, runlog_mod.RunError) as exc:
+        print(
+            f"error: {exc} (the gate logs its verdict, so it requires the "
+            "live run it is gating)",
+            file=sys.stderr,
+        )
+        return EXIT_ERROR
+    try:
+        report = completion.run_completion_gate(
+            root, cfg, args.story_file, args.merge_sha, log
+        )
+    except (completion.CompletionError, runlog_mod.RunError) as exc:
+        # RunError: the run can end or park between attach and the event
+        # append - a clean CLI failure, not a traceback
+        print(f"FATAL: {exc}", file=sys.stderr)
+        return EXIT_ERROR
+    print(json_mod.dumps(report.as_dict(), indent=2))
+    return EXIT_OK if report.ok else EXIT_ERROR
+
+
+def _cmd_gate_close_epic(args: argparse.Namespace) -> int:
+    """The epic-close gate with ordering + count checks (epic-47 retro
+    F4; retirement condition 2)."""
+    import json as json_mod
+
+    from claudomater import qaboard, runlog as runlog_mod
+
+    try:
+        root = Path(args.root).resolve()
+        cfg = load_project_config(root)
+        qb = qaboard.QaBoardConfig.from_adapter(cfg.adapters.get("qa_board"), root)
+        if qb is None:
+            print("error: adapters.qa_board is null - no board gate is wired",
+                  file=sys.stderr)
+            return EXIT_ERROR
+        log = runlog_mod.RunLog.attach(root)
+    except (ConfigError, qaboard.QaBoardError, OSError, runlog_mod.RunError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return EXIT_ERROR
+    from claudomater import sprint as sprint_mod
+
+    try:
+        result = qaboard.close_epic(root, qb, args.epic, args.sprint, log)
+    except (
+        qaboard.QaBoardError,
+        sprint_mod.SprintError,
+        runlog_mod.RunError,
+    ) as exc:
+        print(f"FATAL: {exc}", file=sys.stderr)
+        return EXIT_ERROR
+    print(json_mod.dumps(result, indent=2))
+    return EXIT_OK
+
+
 def _cmd_sprint_check_retros(args: argparse.Namespace) -> int:
     """The retro-vocabulary gate, as a command a verifier or a workflow's
     on_complete can run. Exit 0 ONLY after actually reading the file and
@@ -644,6 +712,29 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sp.add_argument("path", help="path to sprint-status.yaml")
     sp.set_defaults(fn=_cmd_sprint_check_retros)
+
+    p = sub.add_parser(
+        "gate", help="production gates (completion-integrity, epic close)"
+    )
+    gate_sub = p.add_subparsers(dest="gate_cmd", required=True)
+    gp = gate_sub.add_parser(
+        "completion",
+        help="completion-integrity gate: exempt list from .omater.yaml, "
+        "invocation logged to the live run (retirement condition 1)",
+    )
+    gp.add_argument("--story-file", required=True, help="story markdown path")
+    gp.add_argument("--merge-sha", required=True, help="the merge commit to diff")
+    gp.add_argument("root", nargs="?", default=".")
+    gp.set_defaults(fn=_cmd_gate_completion)
+    gp = gate_sub.add_parser(
+        "close-epic",
+        help="epic-close gate: artifact-repo pushed precheck, board gate, "
+        "matrix audited-count vs story count (retirement condition 2)",
+    )
+    gp.add_argument("epic", help="epic id, e.g. 47")
+    gp.add_argument("--sprint", required=True, help="path to sprint-status.yaml")
+    gp.add_argument("root", nargs="?", default=".")
+    gp.set_defaults(fn=_cmd_gate_close_epic)
 
     p = sub.add_parser(
         "start", help="start a run (drift check + run log + policy record)"

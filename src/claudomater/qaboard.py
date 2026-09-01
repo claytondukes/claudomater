@@ -346,6 +346,128 @@ def run_gate(cfg: QaBoardConfig, epic_id: str) -> None:
         )
 
 
+_AUDITED_RE = re.compile(r"Story files audited:\s*(\d+)")
+
+
+def _git_out(repo: Path, *args: str) -> str:
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(repo), *args],
+            capture_output=True, text=True, timeout=120,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        # same single user-facing error type as run_gate: a hung or absent
+        # git must not crash the close as a raw traceback
+        raise QaBoardError(f"git {' '.join(args)} failed to run in {repo}: {exc}") from exc
+    if proc.returncode != 0:
+        raise QaBoardError(
+            f"git {' '.join(args)} failed in {repo}: {proc.stderr.strip()[:300]}"
+        )
+    return proc.stdout
+
+
+def close_epic(
+    project_root: Path | str,
+    cfg: QaBoardConfig,
+    epic_id: str,
+    sprint_path: Path | str,
+    runlog: Any,
+) -> dict:
+    """The epic-close gate with its ordering and count checks (epic-47
+    retro F4; retirement condition 2). Three stages, each logged, each a
+    loud stop on failure:
+
+    1. PRECHECK - the artifact repo holding the authoring/coverage tree is
+       fully committed AND fully pushed. The 47-4 shape (story artifacts
+       still local when the lab gate regenerated the matrix) becomes
+       impossible instead of invisible.
+    2. THE GATE - `run_gate` (exit code only), which commits the
+       regenerated matrix lab-side.
+    3. COUNT - pull the artifact repo and validate the regenerated
+       matrix's "Story files audited: N" against the epic's story count
+       from the sprint file (positional membership, superseded excluded).
+       A matrix that silently audits 3 of 4 is the silent-pass shape, so
+       a mismatch FAILS - it is not a warning.
+    """
+    from claudomater import sprint as sprint_mod
+
+    root = Path(project_root)
+    sprint_file = Path(sprint_path)
+    if not sprint_file.is_absolute():
+        # anchored to the PROJECT, not the caller's cwd - a gate invoked
+        # from outside the repo must still judge the repo's sprint file
+        sprint_file = root / sprint_file
+    artifact_repo = Path(
+        _git_out(cfg.authoring_dir, "rev-parse", "--show-toplevel").strip()
+    )
+    dirty = _git_out(artifact_repo, "status", "--porcelain").strip()
+    if dirty:
+        raise QaBoardError(
+            f"epic-close precheck FAILED: {artifact_repo} has uncommitted "
+            f"changes - story artifacts must be committed and pushed before "
+            f"the gate:\n{dirty[:500]}"
+        )
+    unpushed = _git_out(artifact_repo, "rev-list", "@{u}..HEAD").strip()
+    if unpushed:
+        raise QaBoardError(
+            f"epic-close precheck FAILED: {artifact_repo} has "
+            f"{len(unpushed.splitlines())} unpushed commit(s) - the lab gate "
+            "audits the PUSHED tree, so local-only artifacts are invisible "
+            "to it (epic-47 retro F4)"
+        )
+    stories = sprint_mod.epic_story_entries(sprint_file, epic_id)
+    expected = len(stories)
+    runlog.event(
+        "close",
+        "close-gate-precheck",
+        {
+            "epic": epic_id,
+            "artifact_repo": str(artifact_repo),
+            "clean": True,
+            "pushed": True,
+            "expected_stories": expected,
+            "story_keys": [e.key for e in stories],
+        },
+    )
+    # Write-ahead: intent BEFORE the action, and no outcome claim - the
+    # count stage completing is what implies the gate passed.
+    runlog.event("close", "close-gate", {"epic": epic_id})
+    run_gate(cfg, epic_id)
+    # The gate commits the regenerated matrix lab-side; read it back
+    # through git, not trust.
+    _git_out(artifact_repo, "pull", "--rebase", "-q")
+    matrix = cfg.authoring_dir.parent / "coverage" / f"epic-{epic_id}-coverage.md"
+    try:
+        matrix_text = matrix.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise QaBoardError(
+            f"epic-close count check FAILED: cannot read the regenerated "
+            f"matrix {matrix}: {exc}"
+        ) from exc
+    m = _AUDITED_RE.search(matrix_text)
+    if m is None:
+        raise QaBoardError(
+            f"epic-close count check FAILED: {matrix} carries no 'Story "
+            "files audited: N' line - a count that cannot be read must "
+            "not read as matching"
+        )
+    audited = int(m.group(1))
+    runlog.event(
+        "close",
+        "close-gate-count",
+        {"epic": epic_id, "audited": audited, "expected": expected,
+         "ok": audited == expected},
+    )
+    if audited != expected:
+        raise QaBoardError(
+            f"epic-close count check FAILED for epic {epic_id}: the "
+            f"regenerated matrix audited {audited} story file(s), the "
+            f"sprint file carries {expected} non-superseded stories - a "
+            "matrix missing part of the epic must never pass its close"
+        )
+    return {"epic": epic_id, "gate": "PASS", "audited": audited, "expected": expected}
+
+
 def finish_story(
     story_id: str,
     merged_files: list[str],
