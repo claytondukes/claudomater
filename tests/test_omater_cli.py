@@ -366,3 +366,51 @@ class TestSweepCommand:
         rc = main(["sweep", "--repo", ".", "--range", "HEAD~1..HEAD"])
         assert rc == EXIT_ERROR
         assert "error:" in capsys.readouterr().err
+
+
+class TestReportCommand:
+    """CLI wiring for `omater report` (the rendering itself is covered in
+    test_omater_metrics.py): flag parsing, exit codes, output routing."""
+
+    @staticmethod
+    def _seed(tmp_path):
+        from claudomater.metrics import append_row, compose_row
+
+        facts = {
+            "pr": 386, "merge_sha": "a" * 40, "converge_rounds": 2,
+            "threads_fixed": 2, "threads_dismissed": 0,
+            "suppressed_fixed": 0, "suppressed_dismissed": 0,
+            "wall_minutes": 82, "cost_usd": 42.72, "parks": 0,
+            "merge_bypass": True,
+        }
+        p = tmp_path / "run-metrics" / "stories.jsonl"
+        append_row(p, compose_row(
+            "47-1", "47",
+            {"surface_touching": True, "step_key": "47-1-01", "section_id": 39},
+            facts,
+        ))
+        return p
+
+    def test_epic_routes_to_the_per_epic_table(self, tmp_path, capsys):
+        p = self._seed(tmp_path)
+        rc = main(["report", "--metrics", str(p), "--epic", "47"])
+        out = capsys.readouterr().out
+        assert rc == EXIT_OK
+        assert "47-1 | #386" in out and "TOTAL: 1 stories" in out
+
+    def test_no_epic_routes_to_trends(self, tmp_path, capsys):
+        p = self._seed(tmp_path)
+        rc = main(["report", "--metrics", str(p)])
+        out = capsys.readouterr().out
+        assert rc == EXIT_OK
+        assert "avg_rounds" in out and "47 | 1 | 2.0" in out
+
+    def test_a_missing_store_is_a_loud_error(self, tmp_path, capsys):
+        rc = main(["report", "--metrics", str(tmp_path / "absent.jsonl"),
+                   "--epic", "47"])
+        assert rc == EXIT_ERROR
+        assert "no metrics rows for epic" in capsys.readouterr().err
+
+    def test_metrics_flag_is_required(self):
+        with pytest.raises(SystemExit):
+            main(["report", "--epic", "47"])

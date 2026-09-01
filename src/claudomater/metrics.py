@@ -1,0 +1,347 @@
+"""Run-metrics store: one structured JSONL row per finished story,
+committed to the artifact repo beside the story's other artifacts
+(Clay, epic-47 close follow-up).
+
+The finish flow already computes the per-story report row at flip time;
+this module persists it so per-epic tables and cross-epic trends render
+from data instead of being reassembled from run logs after the fact.
+
+The row is DRIVER facts (PR, merge sha, converge ledger, wall, cost,
+parks, bypass) merged with FINISH-FLOW outcome (surface verdict, the
+step-and-gate or waiver result). Appends are idempotent by story_id:
+retrying a crashed finish with the identical row converges; a DIFFERENT
+row for an already-recorded story is a loud stop, never a silent second
+line (the author_step discipline)."""
+
+from __future__ import annotations
+
+import fcntl
+import json
+import math
+from contextlib import contextmanager
+from pathlib import Path
+from typing import Any, Iterable, Iterator, Mapping, Sequence
+
+# Driver-supplied facts, all REQUIRED - a metrics row with holes reads
+# exactly like a complete one in a trend, so holes are refused at write.
+DRIVER_FIELDS = (
+    "pr",
+    "merge_sha",
+    "converge_rounds",
+    "threads_fixed",
+    "threads_dismissed",
+    "suppressed_fixed",
+    "suppressed_dismissed",
+    "wall_minutes",
+    "cost_usd",
+    "parks",
+    "merge_bypass",
+)
+
+
+class MetricsError(Exception):
+    pass
+
+
+def compose_row(
+    story_id: str, epic_id: str, finish_result: Mapping[str, Any],
+    driver_facts: Mapping[str, Any],
+) -> dict[str, Any]:
+    for name, value in (
+        ("finish_result", finish_result),
+        ("driver_facts", driver_facts),
+    ):
+        if not isinstance(value, Mapping):
+            raise MetricsError(
+                f"metrics row for {story_id}: {name} must be a mapping, "
+                f"got {type(value).__name__}"
+            )
+    # the verdict must be stated, and stated as a bool - a finish_result
+    # merely MISSING surface_touching would otherwise record a waiver,
+    # which is the wrong outcome written quietly
+    surface = finish_result.get("surface_touching")
+    if not isinstance(surface, bool):
+        raise MetricsError(
+            f"metrics row for {story_id}: finish_result.surface_touching "
+            f"must be a boolean, got {surface!r}"
+        )
+    missing = [k for k in DRIVER_FIELDS if k not in driver_facts]
+    if missing:
+        raise MetricsError(
+            f"metrics row for {story_id} is missing driver fact(s): "
+            f"{', '.join(missing)} - a row with holes must not be written"
+        )
+    unknown = set(driver_facts) - set(DRIVER_FIELDS)
+    if unknown:
+        raise MetricsError(
+            f"metrics row for {story_id} has unknown driver fact(s): "
+            f"{sorted(unknown)}"
+        )
+    if surface:
+        step_key = finish_result.get("step_key")
+        section_id = finish_result.get("section_id")
+        if not (isinstance(step_key, str) and step_key.strip()) or section_id is None:
+            # a step+gate row full of None reads as complete downstream
+            raise MetricsError(
+                f"metrics row for {story_id}: a surface outcome needs its "
+                f"step_key and section_id, got step_key={step_key!r}, "
+                f"section_id={section_id!r}"
+            )
+        outcome = {
+            "kind": "step+gate",
+            "step_key": step_key,
+            "section_id": section_id,
+        }
+    else:
+        outcome = {"kind": "waiver"}
+    row = {
+        "story_id": story_id,
+        "epic": epic_id,
+        **{k: driver_facts[k] for k in DRIVER_FIELDS},
+        "outcome": outcome,
+    }
+    # the same validator load_rows runs - a mistyped fact must refuse at
+    # WRITE, never land in the store and poison every later read
+    _validate_row(row, f"composed row for {story_id}")
+    return row
+
+
+# every key a compose_row-written row carries; only compose_row writes
+# this file, so a deviation at load means something else did
+_ROW_KEYS = frozenset(("story_id", "epic", "outcome", *DRIVER_FIELDS))
+_STR_FIELDS = ("story_id", "epic", "merge_sha")
+_INT_FIELDS = (
+    "pr",
+    "converge_rounds",
+    "threads_fixed",
+    "threads_dismissed",
+    "suppressed_fixed",
+    "suppressed_dismissed",
+    "wall_minutes",
+    "parks",
+)
+
+
+def _validate_row(row: Any, where: str) -> None:
+    """Full row schema, enforced at WRITE (compose_row) and LOAD alike: a
+    row missing a field crashed the renderers with a raw KeyError, and a
+    mistyped one ('20.23' as a string) with a raw TypeError - tracebacks
+    where the CLI promises an error: line."""
+    if not isinstance(row, dict) or not row.get("story_id"):
+        raise MetricsError(f"{where} is not a metrics row (no story_id)")
+    missing = sorted(_ROW_KEYS - set(row))
+    if missing:
+        raise MetricsError(f"{where} is missing field(s): {', '.join(missing)}")
+    unknown = sorted(set(row) - _ROW_KEYS)
+    if unknown:
+        raise MetricsError(f"{where} has unknown field(s): {', '.join(unknown)}")
+    for key in _STR_FIELDS:
+        v = row[key]
+        if not isinstance(v, str) or not v.strip():
+            raise MetricsError(
+                f"{where}: {key} must be a non-blank string, got {v!r}"
+            )
+    for key in _INT_FIELDS:
+        v = row[key]
+        # bool is an int subclass - True would count as 1 silently
+        if not isinstance(v, int) or isinstance(v, bool) or v < 0:
+            raise MetricsError(
+                f"{where}: {key} must be a non-negative integer, got {v!r}"
+            )
+    cost = row["cost_usd"]
+    # NaN survives every comparison and Python's json round-trips it, so
+    # one poisoned row would turn every aggregate into NaN silently
+    if (
+        not isinstance(cost, (int, float))
+        or isinstance(cost, bool)
+        or not math.isfinite(cost)
+        or cost < 0
+    ):
+        raise MetricsError(
+            f"{where}: cost_usd must be a finite non-negative number, "
+            f"got {cost!r}"
+        )
+    if not isinstance(row["merge_bypass"], bool):
+        raise MetricsError(
+            f"{where}: merge_bypass must be a boolean, got {row['merge_bypass']!r}"
+        )
+    outcome = row["outcome"]
+    if not isinstance(outcome, dict) or outcome.get("kind") not in (
+        "step+gate",
+        "waiver",
+    ):
+        raise MetricsError(f"{where} has a malformed outcome: {outcome!r}")
+    # per-kind shape: only compose_row writes these, so any deviation is
+    # damage - a {'kind': 'step+gate'} with no step renders as
+    # 'step None+gate', which is silent corruption, not a report
+    expected_keys = (
+        {"kind", "step_key", "section_id"}
+        if outcome["kind"] == "step+gate"
+        else {"kind"}
+    )
+    step_key = outcome.get("step_key")
+    section_id = outcome.get("section_id")
+    if set(outcome) != expected_keys or (
+        outcome["kind"] == "step+gate"
+        and (
+            not (isinstance(step_key, str) and step_key.strip())
+            # the board hands out int section ids - anything else is damage
+            or not isinstance(section_id, int)
+            or isinstance(section_id, bool)
+            or section_id < 0
+        )
+    ):
+        raise MetricsError(f"{where} has a malformed outcome: {outcome!r}")
+
+
+def load_rows(path: Path | str) -> list[dict[str, Any]]:
+    p = Path(path)
+    try:
+        text = p.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return []
+    except OSError as exc:
+        raise MetricsError(f"cannot read {p}: {exc}") from exc
+    rows: list[dict[str, Any]] = []
+    for i, line in enumerate(text.splitlines(), 1):
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line)
+        except ValueError as exc:
+            # a malformed line poisons every aggregate silently - stop
+            raise MetricsError(f"{p}:{i} is not valid JSON: {exc}") from exc
+        _validate_row(row, f"{p}:{i}")
+        rows.append(row)
+    return rows
+
+
+@contextmanager
+def _store_lock(p: Path) -> Iterator[None]:
+    """Exclusive inter-process lock over the store: append_row's
+    check-then-append must be atomic (the RunLog._append_lock
+    discipline) - a backfill racing a finish flow could otherwise
+    interleave writes or record a duplicate story row."""
+    with open(p.with_name(p.name + ".lock"), "w") as fh:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+        # closing the fd releases the flock
+        yield
+
+
+def append_row(path: Path | str, row: Mapping[str, Any]) -> bool:
+    """Append one row; idempotent on story_id. Returns True if written,
+    False when the identical row already exists. A DIFFERENT row for the
+    same story refuses - two conflicting records of one story is worse
+    than one wrong one, because nothing downstream can tell which lies."""
+    p = Path(path)
+    try:
+        candidate = dict(row)
+    except (TypeError, ValueError) as exc:
+        raise MetricsError(
+            f"row passed to append_row for {p} is not a mapping: {exc}"
+        ) from exc
+    # never trust the caller (backfill tooling hand-builds dicts): a
+    # malformed row appended here would only surface at the next load
+    _validate_row(candidate, f"row passed to append_row for {p}")
+    # canonical numeric form: cost 20 and 20.0 are the same row - a retry
+    # differing only in numeric type must converge, not refuse
+    candidate["cost_usd"] = float(candidate["cost_usd"])
+    canon = json.dumps(candidate, sort_keys=True)
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        with _store_lock(p):
+            for prior in load_rows(p):
+                if prior.get("story_id") == candidate["story_id"]:
+                    prior_canon = dict(prior)
+                    prior_canon["cost_usd"] = float(prior_canon["cost_usd"])
+                    if json.dumps(prior_canon, sort_keys=True) == canon:
+                        return False
+                    raise MetricsError(
+                        f"{p} already carries a DIFFERENT row for "
+                        f"{candidate['story_id']!r} - refusing a conflicting "
+                        "second record; correct the existing row "
+                        "deliberately instead"
+                    )
+            with p.open("a", encoding="utf-8") as fh:
+                fh.write(canon + "\n")
+            return True
+    except OSError as exc:
+        # mkdir/lock/write failures surface typed, matching load_rows -
+        # callers catch MetricsError, not raw OSError
+        raise MetricsError(f"cannot write {p}: {exc}") from exc
+
+
+def epic_rows(rows: Iterable[Mapping[str, Any]], epic_id: str) -> list[dict]:
+    out = [dict(r) for r in rows if r.get("epic") == epic_id]
+    if not out:
+        raise MetricsError(f"no metrics rows for epic {epic_id!r}")
+    return out
+
+
+def _numeric_id_key(value: str, what: str) -> list[int]:
+    """Sort key for dash-separated numeric ids: lexicographic order puts
+    47-10 before 47-2. Non-numeric segments raise typed, so the CLI
+    prints its error: line instead of a ValueError traceback."""
+    try:
+        return [int(seg) for seg in str(value).split("-")]
+    except ValueError as exc:
+        raise MetricsError(f"malformed {what}: {value!r}") from exc
+
+
+def render_epic_table(rows: Sequence[Mapping[str, Any]]) -> str:
+    """A fixed-column table of every row's cell VALUES - the acceptance
+    is value fidelity, not layout."""
+    header = (
+        "story | pr | merge_sha | rounds | fixed(thr/sup) | dismissed(thr/sup)"
+        " | wall_min | cost_usd | parks | outcome | bypass"
+    )
+    lines = [header, "-" * len(header)]
+    for r in sorted(rows, key=lambda x: _numeric_id_key(x["story_id"], "story_id")):
+        o = r.get("outcome") or {}
+        outcome = (
+            f"step {o.get('step_key')}+gate" if o.get("kind") == "step+gate"
+            else "waiver"
+        )
+        lines.append(
+            f"{r['story_id']} | #{r['pr']} | {str(r['merge_sha'])[:8]} | "
+            f"{r['converge_rounds']} | "
+            f"{r['threads_fixed']}/{r['suppressed_fixed']} | "
+            f"{r['threads_dismissed']}/{r['suppressed_dismissed']} | "
+            f"{r['wall_minutes']} | {r['cost_usd']:.2f} | {r['parks']} | "
+            f"{outcome} | {'yes' if r['merge_bypass'] else 'no'}"
+        )
+    total_cost = sum(r["cost_usd"] for r in rows)
+    lines.append(
+        f"TOTAL: {len(rows)} stories, {sum(r['wall_minutes'] for r in rows)} "
+        f"wall_min, ${total_cost:.2f}"
+    )
+    return "\n".join(lines)
+
+
+def render_trends(rows: Sequence[Mapping[str, Any]]) -> str:
+    """Cross-epic trends: rounds-to-converge, cost per story, dismissal
+    rate - per epic, in epic order."""
+    if not rows:
+        raise MetricsError("no metrics rows to render trends from")
+    by_epic: dict[str, list[Mapping[str, Any]]] = {}
+    for r in rows:
+        by_epic.setdefault(str(r["epic"]), []).append(r)
+    lines = ["epic | stories | avg_rounds | cost/story | dismissal_rate"]
+    for epic in sorted(by_epic, key=lambda e: _numeric_id_key(e, "epic")):
+        er = by_epic[epic]
+        n = len(er)
+        avg_rounds = sum(r["converge_rounds"] for r in er) / n
+        cost = sum(r["cost_usd"] for r in er) / n
+        found = sum(
+            r["threads_fixed"] + r["threads_dismissed"]
+            + r["suppressed_fixed"] + r["suppressed_dismissed"]
+            for r in er
+        )
+        dismissed = sum(
+            r["threads_dismissed"] + r["suppressed_dismissed"] for r in er
+        )
+        rate = f"{dismissed}/{found}" if found else "0/0"
+        lines.append(
+            f"{epic} | {n} | {avg_rounds:.1f} | ${cost:.2f} | {rate}"
+        )
+    return "\n".join(lines)

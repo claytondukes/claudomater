@@ -644,3 +644,79 @@ class TestCloseEpic:
         cfg, sprint = self._arrange(tmp_path)
         with pytest.raises(SprintError, match="no epic-77 line"):
             close_epic(tmp_path, cfg, "77", sprint, _Log())
+
+
+class TestFinishStoryPersistsMetrics:
+    def test_a_waiver_story_writes_its_row_in_the_flow(self, tmp_path):
+        from claudomater.metrics import load_rows
+
+        facts = {
+            "pr": 389, "merge_sha": "f" * 40, "converge_rounds": 2,
+            "threads_fixed": 0, "threads_dismissed": 0,
+            "suppressed_fixed": 0, "suppressed_dismissed": 0,
+            "wall_minutes": 100, "cost_usd": 20.23, "parks": 1,
+            "merge_bypass": True,
+        }
+        cfg = QaBoardConfig(
+            authoring_dir=tmp_path / "authoring",
+            board_url="http://board.invalid/api",
+            gate_dir=tmp_path,
+            gate=("true",),
+        )
+        mpath = tmp_path / "run-metrics" / "stories.jsonl"
+        log = _Log()
+        result = finish_story(
+            "9-1", ["docs/x.md"], RULES, cfg, log,
+            metrics_facts=facts, metrics_path=mpath,
+        )
+        assert result["metrics_row"]["outcome"] == {"kind": "waiver"}
+        assert load_rows(mpath)[0]["story_id"] == "9-1"
+        assert any(e[1] == "metrics-row" for e in log.events)
+
+    def test_half_wired_metrics_refuse(self, tmp_path):
+        cfg = QaBoardConfig(
+            authoring_dir=tmp_path / "authoring",
+            board_url="http://board.invalid/api",
+            gate_dir=tmp_path,
+            gate=("true",),
+        )
+        with pytest.raises(QaBoardError, match="come together"):
+            finish_story(
+                "9-1", ["docs/x.md"], RULES, cfg, _Log(),
+                metrics_path=tmp_path / "m.jsonl",
+            )
+
+    def test_the_intent_event_survives_a_failed_append(self, tmp_path):
+        """Write-ahead discipline: the metrics-row event lands BEFORE the
+        append, so a refusal (or crash) mid-write leaves the run log
+        showing what was in flight - and the event claims no outcome."""
+        from claudomater.metrics import append_row, compose_row
+
+        facts = {
+            "pr": 389, "merge_sha": "f" * 40, "converge_rounds": 2,
+            "threads_fixed": 0, "threads_dismissed": 0,
+            "suppressed_fixed": 0, "suppressed_dismissed": 0,
+            "wall_minutes": 100, "cost_usd": 20.23, "parks": 1,
+            "merge_bypass": True,
+        }
+        cfg = QaBoardConfig(
+            authoring_dir=tmp_path / "authoring",
+            board_url="http://board.invalid/api",
+            gate_dir=tmp_path,
+            gate=("true",),
+        )
+        mpath = tmp_path / "run-metrics" / "stories.jsonl"
+        append_row(mpath, compose_row(
+            "9-1", "9", {"surface_touching": False},
+            {**facts, "cost_usd": 1.0},
+        ))
+        log = _Log()
+        with pytest.raises(QaBoardError, match="DIFFERENT row"):
+            finish_story(
+                "9-1", ["docs/x.md"], RULES, cfg, log,
+                metrics_facts=facts, metrics_path=mpath,
+            )
+        intents = [e for e in log.events if e[1] == "metrics-row"]
+        assert intents, "write-ahead intent event missing after failed append"
+        assert intents[0][2]["row"]["story_id"] == "9-1"
+        assert "written" not in intents[0][2]
