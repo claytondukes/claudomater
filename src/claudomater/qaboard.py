@@ -429,8 +429,10 @@ def close_epic(
             "story_keys": [e.key for e in stories],
         },
     )
+    # Write-ahead: intent BEFORE the action, and no outcome claim - the
+    # count stage completing is what implies the gate passed.
+    runlog.event("close", "close-gate", {"epic": epic_id})
     run_gate(cfg, epic_id)
-    runlog.event("close", "close-gate", {"epic": epic_id, "gate": "PASS"})
     # The gate commits the regenerated matrix lab-side; read it back
     # through git, not trust.
     _git_out(artifact_repo, "pull", "--rebase", "-q")

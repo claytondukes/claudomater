@@ -430,7 +430,9 @@ def _cmd_gate_completion(args: argparse.Namespace) -> int:
         report = completion.run_completion_gate(
             root, cfg, args.story_file, args.merge_sha, log
         )
-    except completion.CompletionError as exc:
+    except (completion.CompletionError, runlog_mod.RunError) as exc:
+        # RunError: the run can end or park between attach and the event
+        # append - a clean CLI failure, not a traceback
         print(f"FATAL: {exc}", file=sys.stderr)
         return EXIT_ERROR
     print(json_mod.dumps(report.as_dict(), indent=2))
@@ -460,7 +462,11 @@ def _cmd_gate_close_epic(args: argparse.Namespace) -> int:
 
     try:
         result = qaboard.close_epic(root, qb, args.epic, args.sprint, log)
-    except (qaboard.QaBoardError, sprint_mod.SprintError) as exc:
+    except (
+        qaboard.QaBoardError,
+        sprint_mod.SprintError,
+        runlog_mod.RunError,
+    ) as exc:
         print(f"FATAL: {exc}", file=sys.stderr)
         return EXIT_ERROR
     print(json_mod.dumps(result, indent=2))
