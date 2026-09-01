@@ -314,12 +314,32 @@ def _cmd_learn(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def _resolve_sprint_project(args: argparse.Namespace) -> str:
+    """The project name sprint rows are keyed by. An explicit
+    --sprint-project wins; otherwise it comes from `.omater.yaml`'s
+    `project` key (in --project's root when given, else the cwd). No
+    hardcoded fallback: a guessed name silently keys rows under the
+    wrong project, which is exactly the bug a default constant was."""
+    if args.sprint_project:
+        return args.sprint_project
+    root = Path(args.project).resolve() if args.project else Path.cwd()
+    try:
+        return load_project_config(root).project
+    except ConfigError as exc:
+        raise ConfigError(
+            "--sprint-project not given and no usable project key in "
+            f"{root}: {exc}"
+        ) from exc
+
+
 def _cmd_sprint(args: argparse.Namespace) -> int:
     from claudomater import learnstore, sprint as sprint_mod
 
     try:
+        sprint_project = _resolve_sprint_project(args)
         store = _open_store(args)
-    except (ConfigError, learnstore.LearnStoreError) as exc:
+    except (ConfigError, learnstore.LearnStoreError, OSError) as exc:
+        # OSError: Path.cwd() raises on a deleted working directory
         print(f"error: {exc}", file=sys.stderr)
         return EXIT_ERROR
     path = None
@@ -332,9 +352,9 @@ def _cmd_sprint(args: argparse.Namespace) -> int:
             path = Path(args.path).resolve()
         if args.sprint_cmd == "import":
             doc = sprint_mod.SprintDoc.read(path)
-            stale = sprint_mod.orphaned_keys(store, args.sprint_project, doc)
+            stale = sprint_mod.orphaned_keys(store, sprint_project, doc)
             count = sprint_mod.import_doc(
-                store, args.sprint_project, doc, prune=args.prune
+                store, sprint_project, doc, prune=args.prune
             )
             print(f"imported {count} row(s) from {path}")
             for entry in sprint_mod.unknown_statuses(doc):
@@ -354,18 +374,18 @@ def _cmd_sprint(args: argparse.Namespace) -> int:
                         "clear them with --prune if the removal was deliberate"
                     )
         elif args.sprint_cmd == "export":
-            changed = sprint_mod.export(store, args.sprint_project, path)
+            changed = sprint_mod.export(store, sprint_project, path)
             print(f"{path}: {'rewritten' if changed else 'already in sync'}")
         elif args.sprint_cmd == "set":
             changed = sprint_mod.set_status(
-                store, args.sprint_project, args.key, args.status, path
+                store, sprint_project, args.key, args.status, path
             )
             print(
                 f"{args.key} -> {args.status} "
                 f"({'file rewritten' if changed else 'file already in sync'})"
             )
         elif args.sprint_cmd == "status":
-            rows = sprint_mod.stories(store, args.sprint_project, epic=args.epic)
+            rows = sprint_mod.stories(store, sprint_project, epic=args.epic)
             if args.json:
                 print(json.dumps(rows, indent=2, sort_keys=True))
             else:
@@ -375,7 +395,7 @@ def _cmd_sprint(args: argparse.Namespace) -> int:
         elif args.sprint_cmd == "add-epic":
             new_keys = sprint_mod.add_epic(
                 store,
-                args.sprint_project,
+                sprint_project,
                 path,
                 args.epic,
                 stories=tuple(args.story or ()),
@@ -693,8 +713,10 @@ def build_parser() -> argparse.ArgumentParser:
         sp.add_argument("--project", default=None, help=argparse.SUPPRESS)
         sp.add_argument(
             "--sprint-project",
-            default="ui3",
-            help="project name the story rows are keyed by",
+            default=None,
+            help="project name the story rows are keyed by "
+            "(default: the 'project' key of .omater.yaml in the current "
+            "directory, or in --project's root when given)",
         )
         sp.set_defaults(fn=_cmd_sprint)
         return sp

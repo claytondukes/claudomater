@@ -1012,6 +1012,76 @@ class TestSprintCli:
         assert {"key", "epic", "status", "updated_at"} == set(rows[0])
 
 
+class TestSprintProjectResolution:
+    """--sprint-project must never guess. The shipped default used to be
+    a hardcoded consumer project name, so a fresh install that omitted
+    the flag silently keyed every sprint row under someone else's
+    project. An omitted flag now resolves from `.omater.yaml`'s
+    `project` key in the cwd, and with neither the command refuses."""
+
+    def _args(self, tmp_path, *rest):
+        # like TestSprintCli._args, but WITHOUT --sprint-project: the
+        # resolution path under test only runs when the flag is absent
+        return [
+            "sprint", *rest,
+            "--user-config", str(tmp_path / "missing.yaml"),
+            "--db", str(tmp_path / "cli.db"),
+            "--export-dir", str(tmp_path / "cli-lessons"),
+        ]
+
+    def test_an_omitted_flag_reads_the_cwds_omater_yaml(
+        self, tmp_path, workfile, monkeypatch, capsys
+    ):
+        (tmp_path / ".omater.yaml").write_text(
+            "project: fromconfig\n", encoding="utf-8"
+        )
+        monkeypatch.chdir(tmp_path)
+        assert main(self._args(tmp_path, "import", str(workfile))) == EXIT_OK
+        capsys.readouterr()
+        # the rows really landed under the config's key, not a constant
+        assert main(
+            self._args(
+                tmp_path, "status", "--sprint-project", "fromconfig", "--json"
+            )
+        ) == EXIT_OK
+        rows = json.loads(capsys.readouterr().out)
+        assert "4-3-being-worked" in {r["key"] for r in rows}
+
+    def test_an_explicit_flag_beats_the_config(
+        self, tmp_path, workfile, monkeypatch, capsys
+    ):
+        (tmp_path / ".omater.yaml").write_text(
+            "project: fromconfig\n", encoding="utf-8"
+        )
+        monkeypatch.chdir(tmp_path)
+        assert main(
+            self._args(
+                tmp_path, "import", str(workfile), "--sprint-project", "explicit"
+            )
+        ) == EXIT_OK
+        capsys.readouterr()
+        # nothing under the config's name...
+        assert main(self._args(tmp_path, "status")) == EXIT_OK
+        assert "0 tracked row(s)" in capsys.readouterr().out
+        # ...everything under the explicit one
+        assert main(
+            self._args(tmp_path, "status", "--sprint-project", "explicit")
+        ) == EXIT_OK
+        assert "4-3-being-worked" in capsys.readouterr().out
+
+    def test_neither_flag_nor_config_refuses_loudly(
+        self, tmp_path, workfile, monkeypatch, capsys
+    ):
+        monkeypatch.chdir(tmp_path)  # no .omater.yaml here
+        rc = main(self._args(tmp_path, "import", str(workfile)))
+        assert rc == EXIT_ERROR
+        err = capsys.readouterr().err
+        # the message names both remedies: the flag and the config key
+        assert "--sprint-project" in err and ".omater.yaml" in err
+        # resolution runs BEFORE the store opens: the refusal must not
+        # leave a freshly created DB behind
+        assert not (tmp_path / "cli.db").exists()
+
 
 def _line_for(doc: SprintDoc, key: str) -> str:
     """The rendered line carrying `key`, with its line ending."""
