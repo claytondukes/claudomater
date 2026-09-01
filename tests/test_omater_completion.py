@@ -367,7 +367,8 @@ class TestExemptGrammar:
         )
 
     @pytest.mark.parametrize(
-        "bad", ["", "   ", "/abs", "~home", "a/../b", "a\\b", "./", "."]
+        "bad",
+        ["", "   ", "/abs", "~home", "a/../b", "a\\b", "./", ".", "a//b", "a/./b"],
     )
     def test_dangerous_shapes_are_refused(self, bad):
         with pytest.raises(CompletionError):
@@ -376,6 +377,12 @@ class TestExemptGrammar:
     def test_non_list_is_refused(self):
         with pytest.raises(CompletionError, match="must be a list"):
             normalize_exempt("_bmad-output")
+
+    def test_exempt_is_keyword_only_on_the_private_seam(self):
+        """A positional third argument would bypass the exempt= grep pin."""
+        with pytest.raises(TypeError):
+            _completion_report(STORY, MERGED, ["_bmad-output"])
+
 
 
 class TestNoCallSitePassesExempt:

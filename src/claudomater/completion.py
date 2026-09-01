@@ -91,9 +91,18 @@ def normalize_exempt(entries: object) -> tuple[str, ...]:
             raise CompletionError(
                 f"completion.exempt entries are repo-relative, got {raw!r}"
             )
-        if ".." in entry.split("/"):
+        segments = entry.split("/")
+        if ".." in segments:
             raise CompletionError(
                 f"completion.exempt entries must not traverse with '..': {raw!r}"
+            )
+        if "" in segments or "." in segments:
+            # `a//b` and `a/./b` startswith-match no real git path: an
+            # entry that can never match is an exemption that silently
+            # does nothing - the exact shape this grammar exists to refuse
+            raise CompletionError(
+                f"completion.exempt entry {raw!r} carries an empty or '.' "
+                "path segment and would never match a real path"
             )
         out.append(entry)
     return tuple(out)
@@ -240,6 +249,7 @@ def run_completion_gate(
 def _completion_report(
     story_text: str,
     merged_files: Sequence[str],
+    *,
     exempt: Sequence[str] = (),
     require_file_list: bool = True,
 ) -> CompletionReport:
