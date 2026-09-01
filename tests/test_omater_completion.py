@@ -387,8 +387,11 @@ class TestNoCallSitePassesExempt:
         import re
 
         # \b so the config field kwarg `completion_exempt=` (a different
-        # name entirely) does not read as the gate parameter
-        pattern = re.compile(r"\bexempt=")
+        # name entirely) does not read as the gate parameter; \s* because
+        # `exempt = x` is valid Python for a kwarg too (and a production
+        # module ASSIGNING a local named `exempt` is the same ad-hoc
+        # exemption-handling this test exists to forbid)
+        pattern = re.compile(r"\bexempt\s*=")
         src = Path(__file__).resolve().parents[1] / "src" / "claudomater"
         offenders = []
         for py in sorted(src.glob("*.py")):
