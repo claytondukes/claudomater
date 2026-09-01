@@ -398,3 +398,15 @@ class TestNoCallSitePassesExempt:
                 if pattern.search(line):
                     offenders.append(f"{py.name}:{i}: {line.strip()}")
         assert offenders == []
+
+
+class TestGateCfgShapeIsTyped:
+    def test_a_cfg_without_the_field_is_a_typed_error(self, tmp_path):
+        class Wrong: ...
+        with pytest.raises(CompletionError, match="no completion_exempt"):
+            run_completion_gate(tmp_path, Wrong(), "s.md", "sha", _FakeRunLog())
+
+    def test_a_non_sequence_exempt_is_a_typed_error(self, tmp_path):
+        bad_cfg = type("C", (), {"completion_exempt": "x"})()
+        with pytest.raises(CompletionError, match="sequence of strings"):
+            run_completion_gate(tmp_path, bad_cfg, "s.md", "sha", _FakeRunLog())

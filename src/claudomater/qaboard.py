@@ -350,9 +350,15 @@ _AUDITED_RE = re.compile(r"Story files audited:\s*(\d+)")
 
 
 def _git_out(repo: Path, *args: str) -> str:
-    proc = subprocess.run(
-        ["git", "-C", str(repo), *args], capture_output=True, text=True, timeout=120
-    )
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(repo), *args],
+            capture_output=True, text=True, timeout=120,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        # same single user-facing error type as run_gate: a hung or absent
+        # git must not crash the close as a raw traceback
+        raise QaBoardError(f"git {' '.join(args)} failed to run in {repo}: {exc}") from exc
     if proc.returncode != 0:
         raise QaBoardError(
             f"git {' '.join(args)} failed in {repo}: {proc.stderr.strip()[:300]}"

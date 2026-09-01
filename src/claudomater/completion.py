@@ -193,7 +193,22 @@ def run_completion_gate(
     and there is no argument through which a driver can widen the
     exemptions for one call."""
     root = Path(project_root)
-    exempt = tuple(getattr(cfg, "completion_exempt"))
+    try:
+        raw_exempt = cfg.completion_exempt
+    except AttributeError as exc:
+        # typed, not defaulted: a cfg without the field is a wrong OBJECT
+        # (not a project that declared no exemptions), and silently running
+        # the strict gate against it would hide the caller's bug
+        raise CompletionError(
+            "cfg has no completion_exempt - pass a loaded ProjectConfig"
+        ) from exc
+    if not isinstance(raw_exempt, (list, tuple)) or not all(
+        isinstance(e, str) for e in raw_exempt
+    ):
+        raise CompletionError(
+            f"cfg.completion_exempt must be a sequence of strings, got {raw_exempt!r}"
+        )
+    exempt = tuple(raw_exempt)
     story_path = Path(story_file)
     if not story_path.is_absolute():
         story_path = root / story_path
