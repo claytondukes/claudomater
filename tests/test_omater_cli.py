@@ -299,3 +299,56 @@ class TestNotifyCommand:
     def test_notify_without_webhook_errors(self, tmp_path, capsys, no_user_config):
         assert main(["notify", "RUN-COMPLETE", "hi", "--user-config", no_user_config]) == EXIT_ERROR
         assert "no slack webhook" in capsys.readouterr().err
+
+
+class TestSweepCommand:
+    """CLI wiring for `omater sweep` (the diff parsing itself is covered in
+    test_omater_conventions.py): flag parsing, exit codes, output routing."""
+
+    @staticmethod
+    def _repo_with_history(tmp_path):
+        import subprocess
+
+        repo = tmp_path / "swept"
+        repo.mkdir()
+        subprocess.run(["git", "-C", str(repo), "init", "-q"], check=True)
+        subprocess.run(["git", "-C", str(repo), "config", "user.email", "t@t"], check=True)
+        subprocess.run(["git", "-C", str(repo), "config", "user.name", "t"], check=True)
+        (repo / "doc.md").write_text("clean base line\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True)
+        subprocess.run(["git", "-C", str(repo), "commit", "-q", "-m", "base"], check=True)
+        return repo
+
+    @staticmethod
+    def _commit(repo, text, msg):
+        import subprocess
+
+        (repo / "doc.md").write_text(text, encoding="utf-8")
+        subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True)
+        subprocess.run(["git", "-C", str(repo), "commit", "-q", "-m", msg], check=True)
+
+    def test_a_violating_range_exits_nonzero_and_names_the_line(self, tmp_path, capsys):
+        repo = self._repo_with_history(tmp_path)
+        self._commit(repo, "clean base line\nauthored prose — em-dash\n", "dirty")
+        rc = main(["sweep", "--repo", str(repo), "--range", "HEAD~1..HEAD"])
+        captured = capsys.readouterr()
+        assert rc == EXIT_ERROR
+        assert "doc.md" in captured.out and "em-dash" in captured.out
+        assert "conventions violation" in captured.err
+
+    def test_a_clean_range_exits_ok(self, tmp_path, capsys):
+        repo = self._repo_with_history(tmp_path)
+        self._commit(repo, "clean base line\na plain second line\n", "clean")
+        rc = main(["sweep", "--repo", str(repo), "--range", "HEAD~1..HEAD"])
+        assert rc == EXIT_OK
+        assert "no conventions violations" in capsys.readouterr().out
+
+    def test_a_bad_range_is_a_loud_error(self, tmp_path, capsys):
+        repo = self._repo_with_history(tmp_path)
+        rc = main(["sweep", "--repo", str(repo), "--range", "nope..HEAD"])
+        assert rc == EXIT_ERROR
+        assert "error:" in capsys.readouterr().err
+
+    def test_range_is_required(self):
+        with pytest.raises(SystemExit):
+            main(["sweep", "--repo", "."])

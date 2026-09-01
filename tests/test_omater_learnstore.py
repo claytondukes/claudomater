@@ -1219,3 +1219,39 @@ class TestSyncMessageCountsItsOwnDiff:
             assert "0 new" not in subject
         finally:
             s.close()
+
+    def test_an_unparseable_numstat_line_fails_loudly(self, tmp_path, monkeypatch):
+        """A numstat line that is not <digits>\\t<digits>\\t<path> must
+        raise, not be skipped - a silent skip yields the same lying
+        '+0/-0' subject this fix removes."""
+        import claudomater.learnstore as ls
+
+        origin = tmp_path / "origin.git"
+        subprocess.run(["git", "init", "-q", "--bare", str(origin)], check=True)
+        repo = tmp_path / "dotfiles"
+        subprocess.run(["git", "clone", "-q", str(origin), str(repo)], check=True)
+        git(repo, "config", "user.email", "t@t")
+        git(repo, "config", "user.name", "t")
+        (repo / "seed.txt").write_text("x", encoding="utf-8")
+        git(repo, "add", "-A")
+        git(repo, "commit", "-q", "-m", "seed")
+        git(repo, "push", "-q")
+        s = LearnStore.open(
+            tmp_path / "l.db", export_dir=repo / "omater" / "lessons",
+            now=ticking_now(),
+        )
+        try:
+            s.add("global", "tooling", "one-rule", "the rule", "the why")
+            real_git = ls._git
+
+            def numstat_goes_binary(cwd, *args):
+                proc = real_git(cwd, *args)
+                if "--numstat" in args:
+                    proc.stdout = "-\t-\tomater/lessons/global.jsonl\n"
+                return proc
+
+            monkeypatch.setattr(ls, "_git", numstat_goes_binary)
+            with pytest.raises(LearnStoreError, match="unparseable numstat"):
+                sync(s)
+        finally:
+            s.close()
