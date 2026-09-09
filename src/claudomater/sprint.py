@@ -39,7 +39,7 @@ import stat
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Mapping
+from typing import Mapping, NamedTuple
 
 from claudomater.learnstore import LearnStore, utc_now
 
@@ -449,18 +449,6 @@ def _write_atomically(path: Path, text: str) -> None:
         raise
 
 
-def is_tracked(store: LearnStore, project: str, key: str) -> bool:
-    """A targeted single-key read - the presentation seam `sprint set`
-    uses to report whether a flip seeded tracking, without materializing
-    the whole project's status map just to test membership."""
-    return (
-        store.conn.execute(
-            "SELECT 1 FROM story WHERE project = ? AND key = ?", (project, key)
-        ).fetchone()
-        is not None
-    )
-
-
 def statuses(store: LearnStore, project: str) -> dict[str, str]:
     cur = store.conn.execute(
         "SELECT key, status FROM story WHERE project = ? ORDER BY key", (project,)
@@ -485,9 +473,21 @@ def stories(
     ]
 
 
+class SetResult(NamedTuple):
+    """`set_status`'s answer, both facts decided INSIDE its transaction:
+    `changed` is the write-through's (the file's bytes were rewritten),
+    `seeded` is whether the flip had to seed tracking from the file
+    first. In-transaction on purpose - a caller deciding `seeded` by its
+    own pre-read races any concurrent import and reports a seed that
+    never happened (PR #26 review)."""
+
+    changed: bool
+    seeded: bool
+
+
 def set_status(
     store: LearnStore, project: str, key: str, status: str, path: Path
-) -> bool:
+) -> SetResult:
     """Write a status to the DB, then write through to the export.
 
     Write-through is not a convenience here: the yaml is what the
@@ -524,7 +524,8 @@ def set_status(
         row = store.conn.execute(
             "SELECT status FROM story WHERE project = ? AND key = ?", (project, key)
         ).fetchone()
-        if row is None:
+        seeded = row is None
+        if seeded:
             # Self-heal: seed EVERY entry from the file (the same act as
             # `omater sprint import`), not just the named key - the drift
             # that produced one untracked key produced its siblings too,
@@ -553,7 +554,7 @@ def set_status(
             )
         # exported unconditionally: an unchanged DB does not mean the FILE
         # agrees with it, and write-through is what reconciles a hand edit
-        return export(store, project, path)
+        return SetResult(changed=export(store, project, path), seeded=seeded)
 
 
 def export(store: LearnStore, project: str, path: Path) -> bool:

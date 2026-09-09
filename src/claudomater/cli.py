@@ -377,20 +377,20 @@ def _cmd_sprint(args: argparse.Namespace) -> int:
             changed = sprint_mod.export(store, sprint_project, path)
             print(f"{path}: {'rewritten' if changed else 'already in sync'}")
         elif args.sprint_cmd == "set":
-            # presentation only - set_status itself owns the seeding, this
-            # targeted pre-read just lets the CLI say that it happened
-            was_tracked = sprint_mod.is_tracked(store, sprint_project, args.key)
-            changed = sprint_mod.set_status(
+            result = sprint_mod.set_status(
                 store, sprint_project, args.key, args.status, path
             )
-            if not was_tracked:
+            if result.seeded:
+                # the fact comes from inside set_status's transaction - a
+                # CLI-side pre-read would race a concurrent import and
+                # report a seed that never happened
                 print(
                     f"seeded tracking from {path.name}: {args.key} was "
                     "untracked, so every entry was imported before the flip"
                 )
             print(
                 f"{args.key} -> {args.status} "
-                f"({'file rewritten' if changed else 'file already in sync'})"
+                f"({'file rewritten' if result.changed else 'file already in sync'})"
             )
         elif args.sprint_cmd == "status":
             rows = sprint_mod.stories(store, sprint_project, epic=args.epic)

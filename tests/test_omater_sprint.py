@@ -25,7 +25,6 @@ from claudomater.sprint import (
     set_story_file_status,
     import_doc,
     import_path,
-    is_tracked,
     orphaned_keys,
     round_trip_ok,
     set_status,
@@ -290,7 +289,9 @@ class TestDatabaseRoundTrip:
 
     def test_a_db_flip_writes_through_to_the_file(self, store, workfile):
         import_path(store, "sample", workfile)
-        assert set_status(store, "sample", "4-3-being-worked", "review", workfile) is True
+        result = set_status(store, "sample", "4-3-being-worked", "review", workfile)
+        assert result.changed is True
+        assert result.seeded is False  # the import above tracked it already
         assert SprintDoc.read(workfile).entry("4-3-being-worked").status == "review"
         assert statuses(store, "sample")["4-3-being-worked"] == "review"
 
@@ -598,9 +599,8 @@ class TestUpdatedAtMeansWhenTheStatusChanged:
             "4-3-being-worked: in-progress", "4-3-being-worked: backlog"
         )
         workfile.write_text(hand_edited, encoding="utf-8")
-        assert set_status(
-            store, "sample", "4-3-being-worked", "in-progress", workfile
-        ) is True
+        result = set_status(store, "sample", "4-3-being-worked", "in-progress", workfile)
+        assert result.changed is True
         assert SprintDoc.read(workfile).entry("4-3-being-worked").status == "in-progress"
 
     def test_a_membership_only_move_does_not_bump_updated_at(self, store, tmp_path):
@@ -670,10 +670,9 @@ class TestUpdatedAtMeansWhenTheStatusChanged:
             store.conn.execute(
                 "DELETE FROM story WHERE project='sample' AND key='4-3-being-worked'"
             )
-        assert (
-            set_status(store, "sample", "4-3-being-worked", "review", workfile)
-            is True
-        )
+        result = set_status(store, "sample", "4-3-being-worked", "review", workfile)
+        assert result.changed is True
+        assert result.seeded is True  # the in-transaction fact, not a pre-read
         assert statuses(store, "sample")["4-3-being-worked"] == "review"
         assert SprintDoc.read(workfile).entry("4-3-being-worked").status == "review"
 
@@ -683,10 +682,8 @@ class TestUpdatedAtMeansWhenTheStatusChanged:
         named key - the drift that produced one untracked key produced its
         siblings, and lazy per-flip seeding would repeat the recovery once
         per story."""
-        assert (
-            set_status(store, "sample", "4-3-being-worked", "review", workfile)
-            is True
-        )
+        result = set_status(store, "sample", "4-3-being-worked", "review", workfile)
+        assert result.changed is True and result.seeded is True
         tracked = statuses(store, "sample")
         assert tracked["4-3-being-worked"] == "review"
         doc = SprintDoc.read(workfile)
@@ -695,15 +692,6 @@ class TestUpdatedAtMeansWhenTheStatusChanged:
         assert (
             tracked["4-2-awaiting-review"] == doc.entry("4-2-awaiting-review").status
         )
-
-    def test_is_tracked_is_a_targeted_read(self, store, workfile):
-        """PR #26 review: the CLI's seeded-tracking message decides via a
-        single-key read, never by materializing the whole status map."""
-        assert is_tracked(store, "sample", "4-3-being-worked") is False
-        import_path(store, "sample", workfile)
-        assert is_tracked(store, "sample", "4-3-being-worked") is True
-        assert is_tracked(store, "sample", "9-9-invented") is False
-        assert is_tracked(store, "other", "4-3-being-worked") is False  # per-project
 
     def test_seeding_never_reaches_a_key_the_file_lacks(self, store, workfile):
         """Self-heal covers DRIFT, never planning: on a fresh DB a key
