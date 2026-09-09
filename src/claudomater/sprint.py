@@ -338,6 +338,31 @@ def orphaned_keys(store: LearnStore, project: str, doc: SprintDoc) -> list[str]:
     return sorted(k for k in statuses(store, project) if k not in known)
 
 
+def _upsert_entries(store: LearnStore, project: str, doc: SprintDoc, now: str) -> int:
+    """Seed/refresh every entry's row from the document. The TRANSACTION
+    belongs to the caller: `import_doc` wraps it with prune, `set_status`
+    runs it inside the same transaction as the flip it precedes, so a
+    failed write-through rolls the seed back too.
+
+    `updated_at` moves ONLY on a status change, matching `set_status` and
+    the meaning documented on `import_doc`. An epic-only edit (a story
+    relisted under a different epic) is a membership move, not a status
+    event, so the column keeps pointing at when the status actually last
+    changed. The WHERE still skips rows where nothing changed at all."""
+    rows = [(project, e.key, e.epic, e.status, now) for e in doc.entries]
+    store.conn.executemany(
+        "INSERT INTO story(project, key, epic, status, updated_at) "
+        "VALUES(?,?,?,?,?) ON CONFLICT(project, key) DO UPDATE SET "
+        "epic=excluded.epic, status=excluded.status, "
+        "updated_at=CASE WHEN story.status != excluded.status "
+        "THEN excluded.updated_at ELSE story.updated_at END "
+        "WHERE story.status != excluded.status "
+        "OR story.epic != excluded.epic",
+        rows,
+    )
+    return len(rows)
+
+
 def import_doc(
     store: LearnStore, project: str, doc: SprintDoc, prune: bool = False
 ) -> int:
@@ -373,32 +398,15 @@ def import_doc(
             f"under `{DATA_BLOCK_KEY}:`; refusing to import (and to prune "
             "against) a document that has none"
         )
-    now = utc_now()
-    rows = [(project, e.key, e.epic, e.status, now) for e in doc.entries]
     with store.conn:
-        store.conn.executemany(
-            # `updated_at` moves ONLY on a status change, matching
-            # `set_status` and the meaning documented above. An
-            # epic-only edit (a story relisted under a different epic) is
-            # a membership move, not a status event, so the column keeps
-            # pointing at when the status actually last changed. The
-            # WHERE still skips rows where nothing changed at all.
-            "INSERT INTO story(project, key, epic, status, updated_at) "
-            "VALUES(?,?,?,?,?) ON CONFLICT(project, key) DO UPDATE SET "
-            "epic=excluded.epic, status=excluded.status, "
-            "updated_at=CASE WHEN story.status != excluded.status "
-            "THEN excluded.updated_at ELSE story.updated_at END "
-            "WHERE story.status != excluded.status "
-            "OR story.epic != excluded.epic",
-            rows,
-        )
+        count = _upsert_entries(store, project, doc, utc_now())
         if prune:
             stale = orphaned_keys(store, project, doc)
             store.conn.executemany(
                 "DELETE FROM story WHERE project = ? AND key = ?",
                 [(project, key) for key in stale],
             )
-    return len(rows)
+    return count
 
 
 def _write_atomically(path: Path, text: str) -> None:
@@ -479,8 +487,23 @@ def set_status(
     The export runs INSIDE the transaction: if the file cannot be
     written, the DB write rolls back rather than leaving the writer and
     its export disagreeing about what the sprint says.
+
+    An untracked key that the FILE carries is SEEDED, not refused. The
+    write-through invariant makes the file the DB's own export, so a row
+    the DB lacks while the file carries it has exactly one meaning -
+    out-of-band state the DB never saw (a hand-added slate block, a fresh
+    machine, a new checkout) - and exactly one deterministic remedy: the
+    same `sprint import` the old error message told a human to run. That
+    error fired twice as a first-flip crash landing AFTER a run's create
+    phase had already spent its budget (the
+    write-through-state-imports-before-first-write lesson: guidance in a
+    corpus never reaches the layer that violates it), so the tool now
+    applies the remedy itself, inside this same transaction. A key absent
+    from the FILE stays a loud refusal - placing a new line is a planning
+    decision, not drift.
     """
-    entry = SprintDoc.read(path).entry(key)  # raises if the file lacks the key
+    doc = SprintDoc.read(path)
+    entry = doc.entry(key)  # raises if the file lacks the key
     _validate_status(entry.kind, status, key)
     with store.conn:
         # Existence is checked by READING the row, not by inspecting an
@@ -490,10 +513,22 @@ def set_status(
             "SELECT status FROM story WHERE project = ? AND key = ?", (project, key)
         ).fetchone()
         if row is None:
-            raise SprintError(
-                f"{key!r} is not tracked for project {project!r} — "
-                "run `omater sprint import` first"
-            )
+            # Self-heal: seed EVERY entry from the file (the same act as
+            # `omater sprint import`), not just the named key - the drift
+            # that produced one untracked key produced its siblings too,
+            # and lazily seeding them one flip at a time would repeat this
+            # recovery once per story.
+            _upsert_entries(store, project, doc, utc_now())
+            row = store.conn.execute(
+                "SELECT status FROM story WHERE project = ? AND key = ?",
+                (project, key),
+            ).fetchone()
+            if row is None:
+                raise SprintError(
+                    f"{key!r} is still untracked after seeding from "
+                    f"{path.name} - internal inconsistency, nothing was "
+                    "written"
+                )
         if row["status"] != status:
             # `updated_at` means "when this status last changed" — the
             # same meaning `import_doc` keeps. Bumping it for a write that

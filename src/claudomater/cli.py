@@ -377,9 +377,17 @@ def _cmd_sprint(args: argparse.Namespace) -> int:
             changed = sprint_mod.export(store, sprint_project, path)
             print(f"{path}: {'rewritten' if changed else 'already in sync'}")
         elif args.sprint_cmd == "set":
+            # presentation only - set_status itself owns the seeding, this
+            # pre-read just lets the CLI say that it happened
+            was_tracked = args.key in sprint_mod.statuses(store, sprint_project)
             changed = sprint_mod.set_status(
                 store, sprint_project, args.key, args.status, path
             )
+            if not was_tracked:
+                print(
+                    f"seeded tracking from {path.name}: {args.key} was "
+                    "untracked, so every entry was imported before the flip"
+                )
             print(
                 f"{args.key} -> {args.status} "
                 f"({'file rewritten' if changed else 'file already in sync'})"
