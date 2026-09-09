@@ -449,6 +449,18 @@ def _write_atomically(path: Path, text: str) -> None:
         raise
 
 
+def is_tracked(store: LearnStore, project: str, key: str) -> bool:
+    """A targeted single-key read - the presentation seam `sprint set`
+    uses to report whether a flip seeded tracking, without materializing
+    the whole project's status map just to test membership."""
+    return (
+        store.conn.execute(
+            "SELECT 1 FROM story WHERE project = ? AND key = ?", (project, key)
+        ).fetchone()
+        is not None
+    )
+
+
 def statuses(store: LearnStore, project: str) -> dict[str, str]:
     cur = store.conn.execute(
         "SELECT key, status FROM story WHERE project = ? ORDER BY key", (project,)

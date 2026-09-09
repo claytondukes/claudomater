@@ -378,8 +378,8 @@ def _cmd_sprint(args: argparse.Namespace) -> int:
             print(f"{path}: {'rewritten' if changed else 'already in sync'}")
         elif args.sprint_cmd == "set":
             # presentation only - set_status itself owns the seeding, this
-            # pre-read just lets the CLI say that it happened
-            was_tracked = args.key in sprint_mod.statuses(store, sprint_project)
+            # targeted pre-read just lets the CLI say that it happened
+            was_tracked = sprint_mod.is_tracked(store, sprint_project, args.key)
             changed = sprint_mod.set_status(
                 store, sprint_project, args.key, args.status, path
             )

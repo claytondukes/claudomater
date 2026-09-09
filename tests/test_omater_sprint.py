@@ -25,6 +25,7 @@ from claudomater.sprint import (
     set_story_file_status,
     import_doc,
     import_path,
+    is_tracked,
     orphaned_keys,
     round_trip_ok,
     set_status,
@@ -694,6 +695,15 @@ class TestUpdatedAtMeansWhenTheStatusChanged:
         assert (
             tracked["4-2-awaiting-review"] == doc.entry("4-2-awaiting-review").status
         )
+
+    def test_is_tracked_is_a_targeted_read(self, store, workfile):
+        """PR #26 review: the CLI's seeded-tracking message decides via a
+        single-key read, never by materializing the whole status map."""
+        assert is_tracked(store, "sample", "4-3-being-worked") is False
+        import_path(store, "sample", workfile)
+        assert is_tracked(store, "sample", "4-3-being-worked") is True
+        assert is_tracked(store, "sample", "9-9-invented") is False
+        assert is_tracked(store, "other", "4-3-being-worked") is False  # per-project
 
     def test_seeding_never_reaches_a_key_the_file_lacks(self, store, workfile):
         """Self-heal covers DRIFT, never planning: on a fresh DB a key
