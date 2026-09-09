@@ -289,7 +289,9 @@ class TestDatabaseRoundTrip:
 
     def test_a_db_flip_writes_through_to_the_file(self, store, workfile):
         import_path(store, "sample", workfile)
-        assert set_status(store, "sample", "4-3-being-worked", "review", workfile) is True
+        result = set_status(store, "sample", "4-3-being-worked", "review", workfile)
+        assert result.changed is True
+        assert result.seeded is False  # the import above tracked it already
         assert SprintDoc.read(workfile).entry("4-3-being-worked").status == "review"
         assert statuses(store, "sample")["4-3-being-worked"] == "review"
 
@@ -597,9 +599,8 @@ class TestUpdatedAtMeansWhenTheStatusChanged:
             "4-3-being-worked: in-progress", "4-3-being-worked: backlog"
         )
         workfile.write_text(hand_edited, encoding="utf-8")
-        assert set_status(
-            store, "sample", "4-3-being-worked", "in-progress", workfile
-        ) is True
+        result = set_status(store, "sample", "4-3-being-worked", "in-progress", workfile)
+        assert result.changed is True
         assert SprintDoc.read(workfile).entry("4-3-being-worked").status == "in-progress"
 
     def test_a_membership_only_move_does_not_bump_updated_at(self, store, tmp_path):
@@ -654,18 +655,52 @@ class TestUpdatedAtMeansWhenTheStatusChanged:
         ).fetchone()[0]
         assert after > before
 
-    def test_a_key_in_the_file_but_not_the_db_is_refused_as_untracked(
+    def test_a_key_in_the_file_but_not_the_db_is_seeded_then_flipped(
         self, store, workfile
     ):
-        """The 'not tracked' branch: the file carries the key, the DB does
-        not. Distinct from 'no such key', which is the file's answer."""
+        """PR #26: the untracked branch self-heals instead of refusing.
+        The file carries the key, the DB does not - one drift, one
+        deterministic remedy (the same import the old error told a human
+        to run), so the tool applies it. Twice a consumer's first flip of
+        a hand-scoped epic crashed on the old refusal AFTER the run's
+        create phase had already spent its budget - the
+        write-through-state-imports-before-first-write lesson."""
         import_path(store, "sample", workfile)
         with store.conn:
             store.conn.execute(
                 "DELETE FROM story WHERE project='sample' AND key='4-3-being-worked'"
             )
-        with pytest.raises(SprintError, match="not tracked"):
-            set_status(store, "sample", "4-3-being-worked", "review", workfile)
+        result = set_status(store, "sample", "4-3-being-worked", "review", workfile)
+        assert result.changed is True
+        assert result.seeded is True  # the in-transaction fact, not a pre-read
+        assert statuses(store, "sample")["4-3-being-worked"] == "review"
+        assert SprintDoc.read(workfile).entry("4-3-being-worked").status == "review"
+
+    def test_seeding_on_a_fresh_db_tracks_the_siblings_too(self, store, workfile):
+        """The exact crash shape: NO import ever ran (fresh machine,
+        hand-added slate block). The flip seeds EVERY entry, not just the
+        named key - the drift that produced one untracked key produced its
+        siblings, and lazy per-flip seeding would repeat the recovery once
+        per story."""
+        result = set_status(store, "sample", "4-3-being-worked", "review", workfile)
+        assert result.changed is True and result.seeded is True
+        tracked = statuses(store, "sample")
+        assert tracked["4-3-being-worked"] == "review"
+        doc = SprintDoc.read(workfile)
+        assert set(tracked) == set(doc.statuses())  # every entry seeded
+        # sibling values are the file's own, not inventions
+        assert (
+            tracked["4-2-awaiting-review"] == doc.entry("4-2-awaiting-review").status
+        )
+
+    def test_seeding_never_reaches_a_key_the_file_lacks(self, store, workfile):
+        """Self-heal covers DRIFT, never planning: on a fresh DB a key
+        with no line in the file is refused by the file's own answer
+        before any seeding - placing a new line is a decision the tool
+        refuses to guess (export's 'never adds lines' contract)."""
+        with pytest.raises(SprintError, match="no such key"):
+            set_status(store, "sample", "9-9-invented", "done", workfile)
+        assert statuses(store, "sample") == {}  # the refusal seeded nothing
 
 
 class TestImportRefreshesMembershipLoudly:
