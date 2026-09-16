@@ -330,6 +330,26 @@ def inject_conventions(spec: PhaseSpec, cfg: Any) -> PhaseSpec:
     return replace(spec, prompt=f"{spec.prompt}\n\n{block}")
 
 
+def inject_design_gate(spec: PhaseSpec) -> PhaseSpec:
+    """Compose the design gate into a phase spec - the ONE seam, mirroring
+    lessons and conventions. Create/preflight phases get it so an
+    architecture-shaped ask escalates as a design brief BEFORE any
+    implementation run; dev phases get it so mid-run concept invention
+    stops the run instead of growing it one review round at a time.
+    `design_gate_triggered` is appended to required_fields, so a gated
+    phase cannot end without answering the gate."""
+    from claudomater.designgate import design_gate_block
+
+    required = spec.required_fields
+    if "design_gate_triggered" not in required:
+        required = required + ("design_gate_triggered",)
+    return replace(
+        spec,
+        prompt=f"{spec.prompt}\n\n{design_gate_block()}",
+        required_fields=required,
+    )
+
+
 RETRY_FEEDBACK_HEADER = "## Previous attempt failures (address these first)"
 
 # The fixed instruction frame the quoted evidence sits under (parity finding
@@ -401,17 +421,18 @@ def _pid_command(pid: int) -> str | None:
 
 def orphaned_agent_pids(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """`phase-agent-pid` events whose (phase, story, attempt) never got a
-    phase-verified/phase-failed verdict — the write-ahead orphan shape a dead
-    orchestrator leaves. Verdicts answer the most recent open spawn with the
-    same key, so an escalated re-drive of the same story/attempt is tracked
-    separately from the original."""
+    terminal verdict (phase-verified / phase-failed / design-gate-triggered)
+    - the write-ahead orphan shape a dead orchestrator leaves. Verdicts
+    answer the most recent open spawn with the same key, so an escalated
+    re-drive of the same story/attempt is tracked separately from the
+    original."""
     open_spawns: dict[tuple, list[dict[str, Any]]] = {}
     for ev in events:
         detail = ev.get("detail") or {}
         key = (ev.get("phase"), ev.get("story_key"), detail.get("attempt"))
         if ev.get("event") == "phase-agent-pid" and isinstance(detail.get("pid"), int):
             open_spawns.setdefault(key, []).append(ev)
-        elif ev.get("event") in ("phase-verified", "phase-failed"):
+        elif ev.get("event") in ("phase-verified", "phase-failed", "design-gate-triggered"):
             if open_spawns.get(key):
                 open_spawns[key].pop()
     return [ev for spawns in open_spawns.values() for ev in spawns]
@@ -698,13 +719,14 @@ def _accounting(exec_result: ExecutionResult | None) -> dict[str, Any]:
 @dataclass
 class PhaseOutcome:
     phase: str
-    status: str  # verified | escalated | paused | skipped
+    status: str  # verified | gated | escalated | paused | skipped
     result: dict[str, Any] | None = None
     model: str | None = None
     attempts: int = 0
     verdicts: list[dict[str, Any]] = field(default_factory=list)
     # Non-empty for EVERY non-verified, non-skipped outcome, each entry
-    # naming the gate that stopped the phase — a paused outcome carries its
+    # naming the gate that stopped the phase (a gated outcome carries the
+    # stable design-gate-triggered entry) - a paused outcome carries its
     # pause reason here too, so a consumer that wrongly routes a pause into
     # a failure path still reports the cause (the Epic 9 severity run died
     # as `run-failed` with reasons `[]` because pause populated nothing).
@@ -1057,8 +1079,84 @@ class PhaseRunner:
                     failure = "no-structured-result: agent ended without its JSON result"
                 else:
                     missing = [f for f in spec.required_fields if f not in result]
-                    if missing:
+                    if "design_gate_triggered" in spec.required_fields:
+                        # Gate-aware validation (PR #27 review): the boolean
+                        # must be a real boolean (null, 0, or any string is a
+                        # refusal, not an answer), and a TRIGGERED gate's validated
+                        # payload REPLACES the phase's normal deliverables -
+                        # the agent stopped to escalate, so requiring
+                        # story_file etc. would fail the exact response the
+                        # gate instructs.
+                        from claudomater.designgate import gate_result_failure
+
+                        gate_failure = gate_result_failure(result)
+                        if gate_failure is not None:
+                            failure = f"design-gate result invalid: {gate_failure}"
+                        elif result["design_gate_triggered"] is True:
+                            missing = []
+                    if failure is None and missing:
                         failure = f"result missing required fields: {missing}"
+
+            if (
+                failure is None
+                and result is not None
+                and "design_gate_triggered" in spec.required_fields
+                and result["design_gate_triggered"] is True
+            ):
+                # Deliverable verifiers check what an IMPLEMENTED phase left
+                # behind; a triggered gate deliberately implemented nothing.
+                # The outcome is a DISTINCT status - "gated", never
+                # "verified" - because the gate payload is an agent claim,
+                # not a verifier verdict: progression logic that requires
+                # "verified" cannot advance on it, and the driver makes the
+                # explicit escalate-to-human transition (PR #27 review).
+                triggers_scrubbed = [
+                    # agent-controlled strings go through the same scrub as
+                    # transcripts before touching the retained run log
+                    self._scrub(str(t))
+                    for t in result.get("design_gate_triggers", [])
+                ]
+                self.runlog.event(
+                    spec.name,
+                    "design-gate-triggered",
+                    {
+                        "attempt": attempt,
+                        "triggers": triggers_scrubbed,
+                        **_accounting(exec_result),
+                    },
+                    story_key=spec.story_key,
+                )
+                # NO lesson credit here: record_applied accounting is
+                # reserved for VERIFIED phases, and a gated outcome is an
+                # agent claim - an escalation must not mint usage counters
+                # (PR #27 r3).
+                # A MID-RUN gate (trigger 4) may leave exploratory edits in
+                # the worktree; salvage commits them on the branch so the
+                # design session sees what was attempted and a later
+                # re-drive starts clean (PR #27 r3).
+                self._salvage(spec)
+                # An earlier attempt's failed verdicts and reasons described
+                # the abandoned attempt - they must not ride along on the
+                # gated outcome as if they judged it. The stable gate entry
+                # keeps the invariant that every non-verified, non-skipped
+                # outcome names why it stopped (PR #27 r3).
+                outcome.verdicts = []
+                outcome.failure_reasons = [
+                    "design-gate-triggered: escalate the design brief to a human"
+                ]
+                outcome.status = "gated"
+                # The driver forwards the brief to a human (and may render
+                # the triggers): scrub the gate fields like every other
+                # retained or outbound agent output (PR #27 r4), and return
+                # ONLY the gate payload - copying the raw result would let a
+                # triggered response smuggle a secret out in any extra
+                # agent-authored field the scrub never touched (PR #27 r5).
+                outcome.result = {
+                    "design_gate_triggered": True,
+                    "design_gate_triggers": triggers_scrubbed,
+                    "design_gate_brief": self._scrub(result["design_gate_brief"]),
+                }
+                return outcome
 
             if failure is None and result is not None:
                 ok, verdicts = run_verifiers(

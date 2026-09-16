@@ -34,6 +34,7 @@ and how claudomater runs alongside an existing BMAD project.
 | `.omater.yaml` and `~/.omater/config.yaml`, every knob | [docs/configuration.md](docs/configuration.md) |
 | Run lifecycle, write fence, commit guard, usage guardrails, park/resume, notifications | [docs/runs-and-guardrails.md](docs/runs-and-guardrails.md) |
 | Phase contracts, verifiers, prompt injection, writing a driver | [docs/phases.md](docs/phases.md) |
+| Design gate: detect asks that need a design session before any run | [docs/design-gate.md](docs/design-gate.md) |
 | Lesson store, sync, injection credit, human-gated promotion | [docs/learning.md](docs/learning.md) |
 | Sprint tracking, completion + epic-close gates, QA-board finish flow, conventions sweep, run metrics | [docs/story-pipeline.md](docs/story-pipeline.md) |
 | BMAD: fresh repos and running alongside | [docs/bmad-interop.md](docs/bmad-interop.md) |

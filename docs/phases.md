@@ -35,8 +35,8 @@ No terminal scraping, no pane watching: progress is the tail-able run log.
 
 ## Prompt injection seams
 
-Two composable seams the DRIVER applies to a `PhaseSpec` before running it
-(core never builds prompts on its own):
+Three composable seams the DRIVER applies to a `PhaseSpec` before running
+it (core never builds prompts on its own):
 
 - **`inject_lessons(spec, store, scopes, domains)`** - the scopes' promoted
   (always-loaded) lessons plus a domain-seeded FTS retrieval, rendered as
@@ -48,6 +48,12 @@ Two composable seams the DRIVER applies to a `PhaseSpec` before running it
   from `.omater.yaml`, verbatim, under a fixed frame. Standing style/policy
   rules live in committed config, not in a GO prompt's restated
   standing-rules paragraph.
+- **`inject_design_gate(spec)`** - the design-gate trigger block: the agent
+  must detect an architecture-shaped ask (lifetime extension, shared
+  mutable resources, oversize projection, mid-run concept invention) and
+  escalate a design brief instead of implementing.
+  `design_gate_triggered` is appended to `required_fields`, so a gated
+  phase always answers the gate. See [design-gate.md](design-gate.md).
 
 ## Writing a driver
 
@@ -60,7 +66,10 @@ for each phase:
     spec = PhaseSpec(name, model, prompt, required_fields, verifiers, ...)
     spec = inject_lessons(spec, ...)
     spec = inject_conventions(spec, cfg)
+    spec = inject_design_gate(spec)   # create/preflight AND dev phases
     outcome = runner.run_phase(spec)  # park-recover on paused
+    if outcome.status == "gated":     # result is non-None on this status
+        escalate_design_brief(outcome.result["design_gate_brief"]); break
 # merge phase (PR + review convergence) is driver/session-owned
 omater gate completion --story-file ... --merge-sha ...   # before any done-flip
 qaboard.finish_story(..., metrics_facts=..., metrics_path=...)
