@@ -1077,8 +1077,50 @@ class PhaseRunner:
                     failure = "no-structured-result: agent ended without its JSON result"
                 else:
                     missing = [f for f in spec.required_fields if f not in result]
-                    if missing:
+                    if "design_gate_triggered" in spec.required_fields:
+                        # Gate-aware validation (PR #27 review): the boolean
+                        # must be a real boolean (null, 0, or any string is a
+                        # refusal, not an answer), and a TRIGGERED gate's validated
+                        # payload REPLACES the phase's normal deliverables -
+                        # the agent stopped to escalate, so requiring
+                        # story_file etc. would fail the exact response the
+                        # gate instructs.
+                        from claudomater.designgate import gate_result_failure
+
+                        gate_failure = gate_result_failure(result)
+                        if gate_failure is not None:
+                            failure = f"design-gate result invalid: {gate_failure}"
+                        elif result["design_gate_triggered"] is True:
+                            missing = []
+                    if failure is None and missing:
                         failure = f"result missing required fields: {missing}"
+
+            if (
+                failure is None
+                and result is not None
+                and "design_gate_triggered" in spec.required_fields
+                and result["design_gate_triggered"] is True
+            ):
+                # Deliverable verifiers check what an IMPLEMENTED phase left
+                # behind; a triggered gate deliberately implemented nothing.
+                # Verified on the validated gate payload alone - the driver
+                # reads outcome.result and escalates the brief to the human
+                # (progression stays driver/human-owned; the gate is
+                # detection, not authority).
+                self.runlog.event(
+                    spec.name,
+                    "design-gate-triggered",
+                    {
+                        "attempt": attempt,
+                        "triggers": result.get("design_gate_triggers"),
+                        **_accounting(exec_result),
+                    },
+                    story_key=spec.story_key,
+                )
+                self._record_lessons_applied(spec, result)
+                outcome.status = "verified"
+                outcome.result = result
+                return outcome
 
             if failure is None and result is not None:
                 ok, verdicts = run_verifiers(

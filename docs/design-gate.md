@@ -23,8 +23,10 @@ conversation instead of a long machine argument.
 
 ## The triggers
 
-The canonical list lives in `claudomater.designgate.DESIGN_GATE_TRIGGERS`
-(the prompt block renders it verbatim, so code and docs cannot drift):
+The canonical list lives in `claudomater.designgate.DESIGN_GATE_TRIGGERS`.
+The prompt block renders it verbatim, so the prompt and the code cannot
+drift; the numbered list below is a readable summary of the same four
+triggers - the tuple is authoritative if they ever disagree:
 
 1. **Lifetime extension** - the ask makes X survive the death of Y
    ("survives", "persists across", "resumes after", "keeps running
@@ -81,12 +83,30 @@ if result.get("design_gate_triggered"):
 ```
 
 The seam appends `design_gate_triggered` to the spec's `required_fields`,
-so a gated phase cannot end without answering the gate.
+so a gated phase cannot end without answering the gate. `PhaseRunner`
+validates the gate's slice of the result fail-closed
+(`designgate.gate_result_failure`): the boolean must be a real JSON
+boolean, and a triggered gate must carry a non-empty trigger list and
+brief. A validated TRIGGERED result then **replaces** the phase's normal
+contract - the runner skips the remaining `required_fields` and the
+deliverable verifiers (the agent implemented nothing, by design), logs a
+`design-gate-triggered` event, and returns the result to the driver.
 
 Inject it into **create/preflight** phases (catch the ask before any code)
 and into **dev** phases (trigger 4 fires mid-implementation - the moment
 the agent starts inventing coordination concepts, stopping is cheaper than
 another review round).
+
+## Limits - detection, not authority
+
+The gate's `false` answer is an agent claim, like every structured-result
+field: prompt text cannot force a confused agent to stop, and no verifier
+can mechanically prove "this ask needed a design session". What the runner
+enforces is that the question is always ANSWERED and that a triggered
+answer carries a complete brief. Phase progression stays driver- and
+human-owned: the driver decides what a triggered gate halts, and the
+backstops for a false negative are the review-round alarm
+(`gates.review_round_alarm`) and the human-side verbs below.
 
 ## The human-side verbs
 

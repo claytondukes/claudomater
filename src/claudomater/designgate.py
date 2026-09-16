@@ -53,6 +53,33 @@ DESIGN_GATE_RESULT_FIELDS: tuple[str, ...] = (
 )
 
 
+def gate_result_failure(result: dict) -> str | None:
+    """Validate the gate's slice of a structured result, fail-closed.
+
+    `design_gate_triggered` must be a real JSON boolean - `null`, `0`, or a
+    string is a refusal to answer, not an answer - and a TRIGGERED gate must
+    carry its full payload: the fired trigger list and a non-empty brief.
+    An escalation without the one-page agenda is exactly the empty ritual
+    the gate exists to prevent (PR #27 review)."""
+    value = result.get("design_gate_triggered")
+    if not isinstance(value, bool):
+        return f"design_gate_triggered must be a JSON boolean, got {value!r}"
+    if value:
+        triggers = result.get("design_gate_triggers")
+        if not isinstance(triggers, list) or not triggers:
+            return (
+                "a triggered gate must name the fired trigger(s) in"
+                " design_gate_triggers (non-empty list)"
+            )
+        brief = result.get("design_gate_brief")
+        if not isinstance(brief, str) or not brief.strip():
+            return (
+                "a triggered gate must carry a non-empty design_gate_brief"
+                " (the design-session agenda)"
+            )
+    return None
+
+
 def design_gate_block() -> str:
     """The framed prompt section. Triggers render verbatim from
     DESIGN_GATE_TRIGGERS, so what the agent receives is exactly what the

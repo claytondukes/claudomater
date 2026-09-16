@@ -35,8 +35,8 @@ No terminal scraping, no pane watching: progress is the tail-able run log.
 
 ## Prompt injection seams
 
-Two composable seams the DRIVER applies to a `PhaseSpec` before running it
-(core never builds prompts on its own):
+Three composable seams the DRIVER applies to a `PhaseSpec` before running
+it (core never builds prompts on its own):
 
 - **`inject_lessons(spec, store, scopes, domains)`** - the scopes' promoted
   (always-loaded) lessons plus a domain-seeded FTS retrieval, rendered as
@@ -66,7 +66,10 @@ for each phase:
     spec = PhaseSpec(name, model, prompt, required_fields, verifiers, ...)
     spec = inject_lessons(spec, ...)
     spec = inject_conventions(spec, cfg)
+    spec = inject_design_gate(spec)   # create/preflight AND dev phases
     outcome = runner.run_phase(spec)  # park-recover on paused
+    if outcome.result and outcome.result.get("design_gate_triggered"):
+        escalate_design_brief(outcome.result["design_gate_brief"]); break
 # merge phase (PR + review convergence) is driver/session-owned
 omater gate completion --story-file ... --merge-sha ...   # before any done-flip
 qaboard.finish_story(..., metrics_facts=..., metrics_path=...)
