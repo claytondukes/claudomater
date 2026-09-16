@@ -421,17 +421,18 @@ def _pid_command(pid: int) -> str | None:
 
 def orphaned_agent_pids(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """`phase-agent-pid` events whose (phase, story, attempt) never got a
-    phase-verified/phase-failed verdict — the write-ahead orphan shape a dead
-    orchestrator leaves. Verdicts answer the most recent open spawn with the
-    same key, so an escalated re-drive of the same story/attempt is tracked
-    separately from the original."""
+    terminal verdict (phase-verified / phase-failed / design-gate-triggered)
+    — the write-ahead orphan shape a dead orchestrator leaves. Verdicts
+    answer the most recent open spawn with the same key, so an escalated
+    re-drive of the same story/attempt is tracked separately from the
+    original."""
     open_spawns: dict[tuple, list[dict[str, Any]]] = {}
     for ev in events:
         detail = ev.get("detail") or {}
         key = (ev.get("phase"), ev.get("story_key"), detail.get("attempt"))
         if ev.get("event") == "phase-agent-pid" and isinstance(detail.get("pid"), int):
             open_spawns.setdefault(key, []).append(ev)
-        elif ev.get("event") in ("phase-verified", "phase-failed"):
+        elif ev.get("event") in ("phase-verified", "phase-failed", "design-gate-triggered"):
             if open_spawns.get(key):
                 open_spawns[key].pop()
     return [ev for spawns in open_spawns.values() for ev in spawns]
@@ -718,7 +719,7 @@ def _accounting(exec_result: ExecutionResult | None) -> dict[str, Any]:
 @dataclass
 class PhaseOutcome:
     phase: str
-    status: str  # verified | escalated | paused | skipped
+    status: str  # verified | gated | escalated | paused | skipped
     result: dict[str, Any] | None = None
     model: str | None = None
     attempts: int = 0
@@ -1103,22 +1104,33 @@ class PhaseRunner:
             ):
                 # Deliverable verifiers check what an IMPLEMENTED phase left
                 # behind; a triggered gate deliberately implemented nothing.
-                # Verified on the validated gate payload alone - the driver
-                # reads outcome.result and escalates the brief to the human
-                # (progression stays driver/human-owned; the gate is
-                # detection, not authority).
+                # The outcome is a DISTINCT status - "gated", never
+                # "verified" - because the gate payload is an agent claim,
+                # not a verifier verdict: progression logic that requires
+                # "verified" cannot advance on it, and the driver makes the
+                # explicit escalate-to-human transition (PR #27 review).
+                triggers_scrubbed = [
+                    # agent-controlled strings go through the same scrub as
+                    # transcripts before touching the retained run log
+                    self._scrub(str(t))
+                    for t in result.get("design_gate_triggers", [])
+                ]
                 self.runlog.event(
                     spec.name,
                     "design-gate-triggered",
                     {
                         "attempt": attempt,
-                        "triggers": result.get("design_gate_triggers"),
+                        "triggers": triggers_scrubbed,
                         **_accounting(exec_result),
                     },
                     story_key=spec.story_key,
                 )
                 self._record_lessons_applied(spec, result)
-                outcome.status = "verified"
+                # An earlier attempt's failed verdicts described the
+                # abandoned attempt - they must not ride along on the gated
+                # outcome as if they judged it
+                outcome.verdicts = []
+                outcome.status = "gated"
                 outcome.result = result
                 return outcome
 

@@ -145,14 +145,17 @@ class TestRunPhaseGatePath:
     def test_triggered_gate_replaces_deliverables_and_skips_verifiers(self, tmp_path):
         """The exact review scenario: a create spec requiring story_file,
         plus a verifier only an implemented phase could satisfy. The
-        instructed triggered response must VERIFY so the driver receives
-        the brief - not die on the deliverable contract."""
+        instructed triggered response must reach the driver as a GATED
+        outcome - not die on the deliverable contract."""
         outcome = run_gated_phase(
             tmp_path,
             [dict(TRIGGERED)],
             verifiers=[result_field("status", "complete")],
         )
-        assert outcome.status == "verified"
+        # DISTINCT status: gated, never verified - the gate payload is an
+        # agent claim, so progression logic requiring "verified" cannot
+        # advance on it (PR #27 review)
+        assert outcome.status == "gated"
         assert outcome.result is not None
         assert outcome.result["design_gate_brief"] == TRIGGERED["design_gate_brief"]
 
@@ -177,3 +180,48 @@ class TestRunPhaseGatePath:
         )
         assert outcome.status != "verified"
         assert any("design_gate_brief" in r for r in outcome.failure_reasons)
+
+    def test_malformed_trigger_entries_fail_the_phase(self, tmp_path):
+        # [None], [{}], [""] must not bypass the phase contract (PR #27 r2)
+        outcome = run_gated_phase(
+            tmp_path, [{**TRIGGERED, "design_gate_triggers": [""]}] * 2, retries=1
+        )
+        assert outcome.status not in ("gated", "verified")
+        assert any("design_gate_triggers" in r for r in outcome.failure_reasons)
+
+    def test_gated_outcome_clears_earlier_attempts_verdicts(self, tmp_path):
+        # A retry chain: attempt 1 fails its verifier, attempt 2 returns a
+        # valid triggered gate. The abandoned attempt(s) failed verdicts
+        # must not ride along on the gated outcome (PR #27 r2).
+        outcome = run_gated_phase(
+            tmp_path,
+            [
+                {"design_gate_triggered": False, "story_file": "s.md"},
+                dict(TRIGGERED),
+            ],
+            verifiers=[result_field("status", "complete")],
+            retries=1,
+        )
+        assert outcome.status == "gated"
+        assert outcome.verdicts == []
+
+    def test_gate_event_is_terminal_for_orphan_detection(self):
+        # A PID-reporting executor gated attempt must not read as an orphan
+        # for recovery to reap (PR #27 r2)
+        from claudomater.phases import orphaned_agent_pids
+
+        events = [
+            {
+                "event": "phase-agent-pid",
+                "phase": "create",
+                "story_key": "1-1",
+                "detail": {"pid": 4242, "attempt": 1},
+            },
+            {
+                "event": "design-gate-triggered",
+                "phase": "create",
+                "story_key": "1-1",
+                "detail": {"attempt": 1, "triggers": ["lifetime extension"]},
+            },
+        ]
+        assert orphaned_agent_pids(events) == []

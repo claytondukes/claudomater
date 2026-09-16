@@ -68,7 +68,7 @@ for each phase:
     spec = inject_conventions(spec, cfg)
     spec = inject_design_gate(spec)   # create/preflight AND dev phases
     outcome = runner.run_phase(spec)  # park-recover on paused
-    if outcome.result and outcome.result.get("design_gate_triggered"):
+    if outcome.status == "gated":     # result is non-None on this status
         escalate_design_brief(outcome.result["design_gate_brief"]); break
 # merge phase (PR + review convergence) is driver/session-owned
 omater gate completion --story-file ... --merge-sha ...   # before any done-flip

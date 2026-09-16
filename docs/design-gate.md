@@ -76,21 +76,27 @@ spec = inject_lessons(spec, store, scopes, domains)
 spec = inject_conventions(spec, cfg)
 spec = inject_design_gate(spec)   # create/preflight AND dev phases
 outcome = runner.run_phase(spec)
-result = outcome.result
-if result.get("design_gate_triggered"):
-    # do not run the dev phase - escalate the brief to the human
-    notify_human(result.get("design_gate_brief", ""))
+if outcome.status == "gated":
+    # do not run the next phase - escalate the brief to the human
+    # (outcome.result is guaranteed non-None for a gated outcome)
+    notify_human(outcome.result["design_gate_brief"])
+elif outcome.status != "verified":
+    ...  # escalated/paused handling, as in docs/phases.md
 ```
 
 The seam appends `design_gate_triggered` to the spec's `required_fields`,
 so a gated phase cannot end without answering the gate. `PhaseRunner`
 validates the gate's slice of the result fail-closed
 (`designgate.gate_result_failure`): the boolean must be a real JSON
-boolean, and a triggered gate must carry a non-empty trigger list and
-brief. A validated TRIGGERED result then **replaces** the phase's normal
-contract - the runner skips the remaining `required_fields` and the
-deliverable verifiers (the agent implemented nothing, by design), logs a
-`design-gate-triggered` event, and returns the result to the driver.
+boolean, and a triggered gate must carry a non-empty list of non-empty
+trigger strings and a non-empty brief. A validated TRIGGERED result then
+**replaces** the phase's normal contract - the runner skips the remaining
+`required_fields` and the deliverable verifiers (the agent implemented
+nothing, by design), logs a `design-gate-triggered` event (trigger strings
+scrubbed like any other retained agent output), and returns the result
+under the DISTINCT outcome status **`gated`** - never `verified`, so
+progression logic that requires a verified phase cannot advance on what is
+ultimately an agent claim.
 
 Inject it into **create/preflight** phases (catch the ask before any code)
 and into **dev** phases (trigger 4 fires mid-implementation - the moment

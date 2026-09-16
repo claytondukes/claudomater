@@ -66,10 +66,14 @@ def gate_result_failure(result: dict) -> str | None:
         return f"design_gate_triggered must be a JSON boolean, got {value!r}"
     if value:
         triggers = result.get("design_gate_triggers")
-        if not isinstance(triggers, list) or not triggers:
+        if (
+            not isinstance(triggers, list)
+            or not triggers
+            or not all(isinstance(t, str) and t.strip() for t in triggers)
+        ):
             return (
                 "a triggered gate must name the fired trigger(s) in"
-                " design_gate_triggers (non-empty list)"
+                " design_gate_triggers (non-empty list of non-empty strings)"
             )
         brief = result.get("design_gate_brief")
         if not isinstance(brief, str) or not brief.strip():
