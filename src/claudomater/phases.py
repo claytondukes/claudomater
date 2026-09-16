@@ -726,7 +726,7 @@ class PhaseOutcome:
     verdicts: list[dict[str, Any]] = field(default_factory=list)
     # Non-empty for EVERY non-verified, non-skipped outcome, each entry
     # naming the gate that stopped the phase (a gated outcome carries the
-    # stable design-gate-triggered entry) — a paused outcome carries its
+    # stable design-gate-triggered entry) - a paused outcome carries its
     # pause reason here too, so a consumer that wrongly routes a pause into
     # a failure path still reports the cause (the Epic 9 severity run died
     # as `run-failed` with reasons `[]` because pause populated nothing).
@@ -1145,7 +1145,14 @@ class PhaseRunner:
                     "design-gate-triggered: escalate the design brief to a human"
                 ]
                 outcome.status = "gated"
-                outcome.result = result
+                # The driver forwards the brief to a human (and may render
+                # the triggers): scrub the gate fields like every other
+                # retained or outbound agent output (PR #27 r4)
+                outcome.result = {
+                    **result,
+                    "design_gate_triggers": triggers_scrubbed,
+                    "design_gate_brief": self._scrub(result["design_gate_brief"]),
+                }
                 return outcome
 
             if failure is None and result is not None:

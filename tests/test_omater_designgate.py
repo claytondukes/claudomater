@@ -270,6 +270,51 @@ class TestRunPhaseGatePath:
         ).stdout
         assert status.strip() == ""
 
+    def test_gate_result_brief_is_scrubbed_before_reaching_the_driver(self, tmp_path):
+        # The driver forwards the brief to a human - a credential shape in
+        # it must be redacted like every other outbound agent output
+        # (PR #27 r4)
+        leaked = {
+            **TRIGGERED,
+            "design_gate_brief": "State machine. Note: found sk-ant-abcdef12345678 in config.",
+        }
+        outputs = ["work\n```json\n" + json.dumps(leaked) + "\n```\n"]
+        log = RunLog.create(tmp_path)
+        runner = PhaseRunner(tmp_path, log, FakeExecutor(outputs), project="demo")
+        outcome = runner.run_phase(
+            inject_design_gate(PhaseSpec(name="create", model="m", prompt="p"))
+        )
+        assert outcome.status == "gated"
+        assert outcome.result is not None
+        assert "sk-ant-abcdef12345678" not in outcome.result["design_gate_brief"]
+        assert "State machine." in outcome.result["design_gate_brief"]
+
+    def test_gated_outcome_mints_no_lesson_credit(self, tmp_path):
+        # record_applied accounting is reserved for VERIFIED phases - a
+        # gated escalation must not increment lesson usage even when the
+        # agent claims lessons_applied (PR #27 r4)
+        from claudomater.learnstore import LearnStore
+
+        store = LearnStore.open(tmp_path / "learning.db")
+        try:
+            lid = store.add("global", "review", "k", "rule", "why")
+            payload = {**TRIGGERED, "lessons_applied": [lid]}
+            outputs = ["work\n```json\n" + json.dumps(payload) + "\n```\n"]
+            log = RunLog.create(tmp_path)
+            runner = PhaseRunner(
+                tmp_path, log, FakeExecutor(outputs), project="demo", learn_store=store
+            )
+            outcome = runner.run_phase(
+                inject_design_gate(
+                    PhaseSpec(name="dev", model="m", prompt="p", injected_lessons=(lid,))
+                )
+            )
+            assert outcome.status == "gated"
+            assert not [e for e in log.events() if e["event"] == "lessons-applied"]
+            assert store.conn.execute("SELECT refs FROM lesson").fetchone()["refs"] == 0
+        finally:
+            store.close()
+
     def test_gate_event_is_terminal_for_orphan_detection(self):
         # A PID-reporting executor gated attempt must not read as an orphan
         # for recovery to reap (PR #27 r2)
