@@ -330,6 +330,26 @@ def inject_conventions(spec: PhaseSpec, cfg: Any) -> PhaseSpec:
     return replace(spec, prompt=f"{spec.prompt}\n\n{block}")
 
 
+def inject_design_gate(spec: PhaseSpec) -> PhaseSpec:
+    """Compose the design gate into a phase spec - the ONE seam, mirroring
+    lessons and conventions. Create/preflight phases get it so an
+    architecture-shaped ask escalates as a design brief BEFORE any
+    implementation run; dev phases get it so mid-run concept invention
+    stops the run instead of growing it one review round at a time.
+    `design_gate_triggered` is appended to required_fields, so a gated
+    phase cannot end without answering the gate."""
+    from claudomater.designgate import design_gate_block
+
+    required = spec.required_fields
+    if "design_gate_triggered" not in required:
+        required = required + ("design_gate_triggered",)
+    return replace(
+        spec,
+        prompt=f"{spec.prompt}\n\n{design_gate_block()}",
+        required_fields=required,
+    )
+
+
 RETRY_FEEDBACK_HEADER = "## Previous attempt failures (address these first)"
 
 # The fixed instruction frame the quoted evidence sits under (parity finding

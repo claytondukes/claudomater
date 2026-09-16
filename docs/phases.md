@@ -48,6 +48,12 @@ Two composable seams the DRIVER applies to a `PhaseSpec` before running it
   from `.omater.yaml`, verbatim, under a fixed frame. Standing style/policy
   rules live in committed config, not in a GO prompt's restated
   standing-rules paragraph.
+- **`inject_design_gate(spec)`** - the design-gate trigger block: the agent
+  must detect an architecture-shaped ask (lifetime extension, shared
+  mutable resources, oversize projection, mid-run concept invention) and
+  escalate a design brief instead of implementing.
+  `design_gate_triggered` is appended to `required_fields`, so a gated
+  phase always answers the gate. See [design-gate.md](design-gate.md).
 
 ## Writing a driver
 
