@@ -422,7 +422,7 @@ def _pid_command(pid: int) -> str | None:
 def orphaned_agent_pids(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """`phase-agent-pid` events whose (phase, story, attempt) never got a
     terminal verdict (phase-verified / phase-failed / design-gate-triggered)
-    — the write-ahead orphan shape a dead orchestrator leaves. Verdicts
+    - the write-ahead orphan shape a dead orchestrator leaves. Verdicts
     answer the most recent open spawn with the same key, so an escalated
     re-drive of the same story/attempt is tracked separately from the
     original."""
@@ -725,7 +725,8 @@ class PhaseOutcome:
     attempts: int = 0
     verdicts: list[dict[str, Any]] = field(default_factory=list)
     # Non-empty for EVERY non-verified, non-skipped outcome, each entry
-    # naming the gate that stopped the phase — a paused outcome carries its
+    # naming the gate that stopped the phase (a gated outcome carries the
+    # stable design-gate-triggered entry) — a paused outcome carries its
     # pause reason here too, so a consumer that wrongly routes a pause into
     # a failure path still reports the cause (the Epic 9 severity run died
     # as `run-failed` with reasons `[]` because pause populated nothing).
@@ -1125,11 +1126,24 @@ class PhaseRunner:
                     },
                     story_key=spec.story_key,
                 )
-                self._record_lessons_applied(spec, result)
-                # An earlier attempt's failed verdicts described the
-                # abandoned attempt - they must not ride along on the gated
-                # outcome as if they judged it
+                # NO lesson credit here: record_applied accounting is
+                # reserved for VERIFIED phases, and a gated outcome is an
+                # agent claim - an escalation must not mint usage counters
+                # (PR #27 r3).
+                # A MID-RUN gate (trigger 4) may leave exploratory edits in
+                # the worktree; salvage commits them on the branch so the
+                # design session sees what was attempted and a later
+                # re-drive starts clean (PR #27 r3).
+                self._salvage(spec)
+                # An earlier attempt's failed verdicts and reasons described
+                # the abandoned attempt - they must not ride along on the
+                # gated outcome as if they judged it. The stable gate entry
+                # keeps the invariant that every non-verified, non-skipped
+                # outcome names why it stopped (PR #27 r3).
                 outcome.verdicts = []
+                outcome.failure_reasons = [
+                    "design-gate-triggered: escalate the design brief to a human"
+                ]
                 outcome.status = "gated"
                 outcome.result = result
                 return outcome

@@ -158,6 +158,11 @@ class TestRunPhaseGatePath:
         assert outcome.status == "gated"
         assert outcome.result is not None
         assert outcome.result["design_gate_brief"] == TRIGGERED["design_gate_brief"]
+        # The outcome invariant: every non-verified, non-skipped outcome
+        # names why it stopped (PR #27 r3)
+        assert outcome.failure_reasons == [
+            "design-gate-triggered: escalate the design brief to a human"
+        ]
 
     def test_untriggered_gate_still_enforces_deliverables(self, tmp_path):
         outcome = run_gated_phase(
@@ -204,6 +209,66 @@ class TestRunPhaseGatePath:
         )
         assert outcome.status == "gated"
         assert outcome.verdicts == []
+        # The abandoned attempt's failure reasons are replaced by the
+        # stable gate entry, not carried as misleading diagnostics
+        assert outcome.failure_reasons == [
+            "design-gate-triggered: escalate the design brief to a human"
+        ]
+
+    def test_gate_event_scrubs_agent_controlled_trigger_strings(self, tmp_path):
+        # A trigger echoing a credential shape must reach the retained run
+        # log redacted - RunLog.event persists details without its own
+        # scrub, so the gate branch owns it (PR #27 r3)
+        leaked = {**TRIGGERED, "design_gate_triggers": ["found sk-ant-abcdef12345678 in config"]}
+        outputs = ["work\n```json\n" + json.dumps(leaked) + "\n```\n"]
+        log = RunLog.create(tmp_path)
+        runner = PhaseRunner(tmp_path, log, FakeExecutor(outputs), project="demo")
+        spec = inject_design_gate(
+            PhaseSpec(name="create", model="m", prompt="p", required_fields=("story_file",))
+        )
+        outcome = runner.run_phase(spec)
+        assert outcome.status == "gated"
+        raw = (log.run_dir / "events.jsonl").read_text(encoding="utf-8")
+        assert "design-gate-triggered" in raw
+        assert "sk-ant-abcdef12345678" not in raw
+
+    def test_mid_run_gate_salvages_dirty_worktree(self, tmp_path):
+        # Trigger 4 fires MID-RUN: an agent that edited files before gating
+        # must leave a clean worktree behind (exploratory edits committed as
+        # salvage), so a re-drive does not collide with them (PR #27 r3)
+        import subprocess
+
+        def git(*args):
+            subprocess.run(
+                ["git", "-C", str(tmp_path), *args], check=True, capture_output=True
+            )
+
+        git("init", "-q")
+        git("config", "user.email", "t@t")
+        git("config", "user.name", "t")
+        (tmp_path / ".gitignore").write_text(".omater/\n", encoding="utf-8")
+        (tmp_path / "a.txt").write_text("a", encoding="utf-8")
+        git("add", "-A")
+        git("commit", "-q", "-m", "init")
+
+        class DirtyThenGate:
+            def run(self, spec, model):
+                (tmp_path / "explore.txt").write_text("exploratory edit", encoding="utf-8")
+                return ExecutionResult(
+                    text="work\n```json\n" + json.dumps(TRIGGERED) + "\n```\n"
+                )
+
+        log = RunLog.create(tmp_path)
+        runner = PhaseRunner(tmp_path, log, DirtyThenGate(), project="demo")
+        outcome = runner.run_phase(
+            inject_design_gate(PhaseSpec(name="dev", model="m", prompt="p"))
+        )
+        assert outcome.status == "gated"
+        status = subprocess.run(
+            ["git", "-C", str(tmp_path), "status", "--porcelain"],
+            check=True, capture_output=True, text=True,
+        ).stdout
+        assert status.strip() == ""
 
     def test_gate_event_is_terminal_for_orphan_detection(self):
         # A PID-reporting executor gated attempt must not read as an orphan
