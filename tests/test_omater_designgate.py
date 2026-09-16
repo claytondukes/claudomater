@@ -164,6 +164,30 @@ class TestRunPhaseGatePath:
             "design-gate-triggered: escalate the design brief to a human"
         ]
 
+    def test_untriggered_gate_with_deliverables_verifies_normally(self, tmp_path):
+        # The happy false path: a complete non-gated result must reach the
+        # normal verifiers and return verified (PR #27 r5)
+        outcome = run_gated_phase(
+            tmp_path,
+            [{"design_gate_triggered": False, "story_file": "s.md"}],
+            verifiers=[result_field("story_file", "s.md")],
+        )
+        assert outcome.status == "verified"
+        assert outcome.result is not None
+        assert outcome.result["story_file"] == "s.md"
+
+    def test_gated_result_is_a_whitelist_of_the_gate_payload(self, tmp_path):
+        # A triggered response must not smuggle arbitrary agent-authored
+        # fields into the driver-visible outcome (PR #27 r5)
+        outcome = run_gated_phase(
+            tmp_path, [{**TRIGGERED, "exfil": "sk-ant-abcdef12345678"}]
+        )
+        assert outcome.status == "gated"
+        assert outcome.result is not None
+        assert set(outcome.result.keys()) == {
+            "design_gate_triggered", "design_gate_triggers", "design_gate_brief",
+        }
+
     def test_untriggered_gate_still_enforces_deliverables(self, tmp_path):
         outcome = run_gated_phase(
             tmp_path, [{"design_gate_triggered": False}] * 2, retries=1

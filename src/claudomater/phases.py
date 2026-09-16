@@ -1147,9 +1147,12 @@ class PhaseRunner:
                 outcome.status = "gated"
                 # The driver forwards the brief to a human (and may render
                 # the triggers): scrub the gate fields like every other
-                # retained or outbound agent output (PR #27 r4)
+                # retained or outbound agent output (PR #27 r4), and return
+                # ONLY the gate payload - copying the raw result would let a
+                # triggered response smuggle a secret out in any extra
+                # agent-authored field the scrub never touched (PR #27 r5).
                 outcome.result = {
-                    **result,
+                    "design_gate_triggered": True,
                     "design_gate_triggers": triggers_scrubbed,
                     "design_gate_brief": self._scrub(result["design_gate_brief"]),
                 }
