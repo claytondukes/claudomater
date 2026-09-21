@@ -51,7 +51,11 @@ from typing import Any
 from claudomater.sprint import _write_atomically
 from claudomater.surface import SurfaceRules, classify_changed_files
 
-_STORY_ID_RE = re.compile(r"^\d+(?:-\d+)+$")
+# Story ids are dotted-dash numerics whose LAST segment may carry one
+# lowercase letter: a story split mid-epic into siblings ("56-4a", "56-4b")
+# keeps its number so the epic file, the sprint keys and the board steps
+# stay traceable to the original slot. Anything else is malformed.
+_STORY_ID_RE = re.compile(r"^\d+(?:-\d+)*-\d+[a-z]?$")
 
 
 class QaBoardError(Exception):
@@ -119,7 +123,8 @@ class QaBoardConfig:
 
 
 def epic_of(story_id: str) -> str:
-    """'43-2' -> '43'; compound epic ids ('4-5-1' -> '4-5') supported."""
+    """'43-2' -> '43'; compound epic ids ('4-5-1' -> '4-5') and split-story
+    suffixes ('56-4a' -> '56') supported."""
     if not _STORY_ID_RE.match(story_id):
         raise QaBoardError(f"malformed story id: {story_id!r}")
     return story_id.rsplit("-", 1)[0]
@@ -182,7 +187,7 @@ def author_step(
     without one, so authoring such a step here would strand it."""
     if not label.strip():
         raise QaBoardError("a walkthrough step needs a non-empty label")
-    if not re.match(rf"{re.escape(story_id)}(?!\d|-\d)", label.strip()):
+    if not re.match(rf"{re.escape(story_id)}(?![0-9a-z]|-\d)", label.strip()):
         # the digit boundary is load-bearing (the coverage regex's own
         # lesson): a bare startswith('34-3') matches a '34-36 ...' label,
         # crediting a step to its sibling story
