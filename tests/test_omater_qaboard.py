@@ -161,6 +161,17 @@ class TestSpecAuthoring:
         with pytest.raises(QaBoardError, match="malformed"):
             epic_of("epic-43")
 
+    def test_epic_of_accepts_a_split_story_letter_suffix(self):
+        # A story split mid-epic into siblings keeps its number with one
+        # lowercase letter appended (a consumer's 56-4 -> 56-4a / 56-4b, 2026-09-20);
+        # the finish flow must author their board steps like any other story.
+        assert epic_of("56-4a") == "56"
+        assert epic_of("56-4b") == "56"
+        assert epic_of("4-5-1c") == "4-5"
+        for bad in ("56-4ab", "56-a", "56-4A", "56a-4", "56-4-", "56-4a-"):
+            with pytest.raises(QaBoardError, match="malformed"):
+                epic_of(bad)
+
     def test_absent_spec_starts_a_skeleton_and_malformed_raises(self, cfg):
         path = spec_path(cfg, "34")
         assert load_spec(path, "34")["steps"] == []
@@ -177,6 +188,7 @@ class TestSpecAuthoring:
         ]}
         assert next_step_key(spec, "34-36") == "34-36-03"
         assert next_step_key(spec, "34-9") == "34-9-01"
+        assert next_step_key(spec, "56-4a") == "56-4a-01"
 
     def test_author_step_appends_and_never_rewrites(self, cfg):
         first = author_step(cfg, "34", "34-36", "34-36 click the chart", "ui/x.ts:1")
@@ -396,6 +408,12 @@ class TestRoundTwoHardening:
         # legit punctuation after the id stays legal
         step = author_step(cfg, "34", "34-3", "34-3: walkthrough", "x.ts:1")
         assert step["step_key"] == "34-3-01"
+        # the split-story letter is a boundary too: a "56-4a ..." label must
+        # not credit story 56-4, and 56-4a's own label authors under its key
+        with pytest.raises(QaBoardError, match="must start with its story id"):
+            author_step(cfg, "56", "56-4", "56-4a One deployer walkthrough", "x.ts:1")
+        step = author_step(cfg, "56", "56-4a", "56-4a One deployer walkthrough", "x.ts:1")
+        assert step["step_key"] == "56-4a-01"
 
     def test_malformed_section_objects_are_a_typed_stop(self, cfg):
         _StubBoard.sections = [{"epic_id": "34"}]  # no id field
