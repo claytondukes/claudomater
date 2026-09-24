@@ -18,6 +18,7 @@ from pathlib import Path
 import pytest
 
 from claudomater.qaboard import (
+    ProofCheck,
     QaBoardConfig,
     QaBoardError,
     author_step,
@@ -29,6 +30,7 @@ from claudomater.qaboard import (
     run_gate,
     section_id_for_epic,
     spec_path,
+    verify_step_proofs,
 )
 from claudomater.surface import SurfaceRules
 
@@ -47,6 +49,7 @@ requires_parity = pytest.mark.skipif(
 
 class _StubBoard(BaseHTTPRequestHandler):
     sections: list[dict] = []
+    steps: dict[int, list[dict]] = {}  # section id -> current steps (GET)
     posted: list[tuple[str, dict]] = []
     fail_next_post = False
     post_body_override: str | None = None
@@ -57,6 +60,13 @@ class _StubBoard(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == "/api/sections":
             body = json.dumps(self.sections).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(body)
+        elif self.path.startswith("/api/sections/") and self.path.endswith("/steps"):
+            section_id = int(self.path.split("/")[3])
+            body = json.dumps(self.steps.get(section_id, [])).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.end_headers()
@@ -91,7 +101,9 @@ def board():
     _StubBoard.sections = [
         {"id": 7, "epic_id": "34"},
         {"id": 9, "epic_id": "4-5"},
+        {"id": 11, "epic_id": "9"},
     ]
+    _StubBoard.steps = {}
     _StubBoard.posted = []
     _StubBoard.fail_next_post = False
     server = HTTPServer(("127.0.0.1", 0), _StubBoard)
@@ -296,13 +308,15 @@ class TestFinishFlow:
         # write-ahead contract): a crash between any pair shows exactly
         # what was in flight
         assert [e[1] for e in log.events] == [
+            "qa-board-proof-check-skipped",
             "qa-board-step",
             "qa-board-post",
             "qa-board-posted",
             "qa-board-gate",
             "qa-board-gate-pass",
         ]
-        assert log.events[0][2]["step_label"].startswith("34-36 ")
+        # events[0] is the logged proof-check skip (no project_root here)
+        assert log.events[1][2]["step_label"].startswith("34-36 ")
 
     def test_a_surface_story_without_step_content_is_a_loud_stop(self, cfg):
         with pytest.raises(QaBoardError, match="no walkthrough step content"):
@@ -550,7 +564,8 @@ class TestCloseEpic:
         "  epic-9-retrospective: fable-review-required\n"
     )
 
-    def _arrange(self, tmp_path, audited=2, dirty=False, unpushed=False):
+    def _arrange(self, tmp_path, audited=2, dirty=False, unpushed=False,
+                 board_url="http://board.invalid/api"):
         import subprocess as sp
 
         env = {**os.environ, "GIT_CONFIG_GLOBAL": os.devnull,
@@ -597,19 +612,21 @@ class TestCloseEpic:
         gate.chmod(0o755)
         cfg = QaBoardConfig(
             authoring_dir=artifacts / "qa-viewer" / "authoring",
-            board_url="http://board.invalid/api",
+            board_url=board_url,
             gate_dir=tmp_path,
             gate=("./gate.sh", "{epic}"),
         )
         return cfg, sprint
 
-    def test_happy_path_logs_the_matching_count(self, tmp_path):
-        cfg, sprint = self._arrange(tmp_path, audited=2)
+    def test_happy_path_logs_the_matching_count(self, tmp_path, board):
+        cfg, sprint = self._arrange(tmp_path, audited=2, board_url=board)
         log = _Log()
         result = close_epic(tmp_path, cfg, "9", sprint, log)
         assert result == {"epic": "9", "gate": "PASS", "audited": 2, "expected": 2}
         kinds = [e[1] for e in log.events]
-        assert kinds == ["close-gate-precheck", "close-gate", "close-gate-count"]
+        assert kinds == [
+            "close-gate-precheck", "close-proof-check", "close-gate", "close-gate-count",
+        ]
         count_detail = log.events[-1][2]
         assert (count_detail["audited"], count_detail["expected"]) == (2, 2)
         pre = log.events[0][2]
@@ -629,21 +646,37 @@ class TestCloseEpic:
         with pytest.raises(QaBoardError, match="uncommitted"):
             close_epic(tmp_path, cfg, "9", sprint, _Log())
 
-    def test_a_count_mismatch_fails_loudly_not_a_warning(self, tmp_path):
-        cfg, sprint = self._arrange(tmp_path, audited=1)
+    def test_a_count_mismatch_fails_loudly_not_a_warning(self, tmp_path, board):
+        cfg, sprint = self._arrange(tmp_path, audited=1, board_url=board)
         log = _Log()
         with pytest.raises(QaBoardError, match="audited 1 story file"):
             close_epic(tmp_path, cfg, "9", sprint, log)
         count_detail = log.events[-1][2]
         assert count_detail["ok"] is False
 
-    def test_superseded_stories_do_not_count(self, tmp_path):
+    def test_superseded_stories_do_not_count(self, tmp_path, board):
         """9-3 is superseded: expected is 2, so a matrix auditing 2 passes
         and one auditing 3 would fail - superseded stories own no
         artifacts and no audit row."""
-        cfg, sprint = self._arrange(tmp_path, audited=3)
+        cfg, sprint = self._arrange(tmp_path, audited=3, board_url=board)
         with pytest.raises(QaBoardError, match="audited 3"):
             close_epic(tmp_path, cfg, "9", sprint, _Log())
+
+    def test_a_drifted_board_stops_the_close_before_the_gate(self, tmp_path, board):
+        """Epic-61 retro A2: the range-only gate passed three drifted boards;
+        the close now re-greps every current step first and stops loudly."""
+        cfg, sprint = self._arrange(tmp_path, audited=2, board_url=board)
+        (tmp_path / "app").mkdir()
+        (tmp_path / "app" / "main.py").write_text("x = 1\ny = 2\n", encoding="utf-8")
+        _StubBoard.steps[11] = [
+            {"step_key": "9-1-01", "retired": False,
+             "surface_proof": 'grep -nF "y = 2" app/main.py (moved by a sibling, app/main.py:1)'},
+        ]
+        log = _Log()
+        with pytest.raises(QaBoardError, match="board proof drift on section 11"):
+            close_epic(tmp_path, cfg, "9", sprint, log)
+        names = [e[1] for e in log.events]
+        assert "close-proof-check" in names and "close-gate" not in names
 
     def test_the_regex_reads_the_real_gen_coverage_header(self):
         """The epic-48 live run: gen_coverage.py writes markdown bold, and
@@ -663,8 +696,8 @@ class TestCloseEpic:
         plain = _AUDITED_RE.search("Story files audited: 4")
         assert plain and plain.group(1) == "4"
 
-    def test_a_matrix_without_the_count_line_fails(self, tmp_path):
-        cfg, sprint = self._arrange(tmp_path, audited=2)
+    def test_a_matrix_without_the_count_line_fails(self, tmp_path, board):
+        cfg, sprint = self._arrange(tmp_path, audited=2, board_url=board)
         gate = tmp_path / "gate.sh"
         gate.write_text(
             "#!/bin/sh\nset -e\n"
@@ -757,3 +790,134 @@ class TestFinishStoryPersistsMetrics:
         assert intents, "write-ahead intent event missing after failed append"
         assert intents[0][2]["row"]["story_id"] == "9-1"
         assert "written" not in intents[0][2]
+
+
+class TestProofContentCheck:
+    """Epic-61 retro A2: the range-only gate read PASS over drifted boards in
+    three consecutive consumer epics; the finish and the close now re-run
+    every current step's proof greps against the project tree."""
+
+    @staticmethod
+    def _tree(tmp_path):
+        root = tmp_path / "project"
+        (root / "app" / "src").mkdir(parents=True)
+        (root / "app" / "src" / "Widget.tsx").write_text(
+            "line one\nexport function Widget() {\n  return null;\n}\n",
+            encoding="utf-8",
+        )
+        return root
+
+    @staticmethod
+    def _proof(*entries):
+        return "; ".join(
+            f'grep -nF "{needle}" {path} ({note}, {path}:{line})'
+            for needle, path, note, line in entries
+        )
+
+    def test_every_anchor_lands_on_its_cited_line(self, cfg, tmp_path):
+        root = self._tree(tmp_path)
+        _StubBoard.steps[7] = [
+            {"step_key": "34-1-01", "retired": False, "surface_proof": self._proof(
+                ("export function Widget() {", "app/src/Widget.tsx", "the component", 2),
+                ("return null;", "app/src/Widget.tsx", "the render", 3),
+            )},
+        ]
+        check = verify_step_proofs(cfg, 7, root)
+        assert check == ProofCheck(section_id=7, steps=1, anchors=2, unparsed=0, drift=())
+
+    def test_a_drifted_anchor_names_the_step_the_line_and_the_hits(self, cfg, tmp_path):
+        root = self._tree(tmp_path)
+        _StubBoard.steps[7] = [
+            {"step_key": "34-1-01", "retired": False, "surface_proof": self._proof(
+                ("return null;", "app/src/Widget.tsx", "cited one line too early", 2),
+            )},
+        ]
+        check = verify_step_proofs(cfg, 7, root)
+        assert check.anchors == 1 and len(check.drift) == 1
+        assert check.drift[0].startswith("34-1-01: app/src/Widget.tsx:2 -> hits [3]")
+
+    def test_a_needle_that_hits_nothing_is_drift(self, cfg, tmp_path):
+        root = self._tree(tmp_path)
+        _StubBoard.steps[7] = [
+            {"step_key": "34-1-01", "retired": False, "surface_proof": self._proof(
+                ("text a sibling merge rewrote", "app/src/Widget.tsx", "gone", 2),
+            )},
+        ]
+        assert verify_step_proofs(cfg, 7, root).drift[0].endswith(
+            "-> hits [] needle='text a sibling merge rewrote'"
+        )
+
+    def test_retired_and_waived_steps_are_skipped_and_range_only_proofs_are_counted(
+        self, cfg, tmp_path
+    ):
+        root = self._tree(tmp_path)
+        _StubBoard.steps[7] = [
+            {"step_key": "34-1-01", "retired": True, "surface_proof": self._proof(
+                ("nowhere", "app/src/Widget.tsx", "retired, never judged", 9),
+            )},
+            {"step_key": "34-PRE-01", "retired": False, "surface_proof": ""},
+            {"step_key": "34-2-01", "retired": False,
+             "surface_proof": "app/src/Widget.tsx:2 the component (range-only proof)"},
+        ]
+        check = verify_step_proofs(cfg, 7, root)
+        assert (check.steps, check.anchors, check.unparsed, check.drift) == (1, 0, 1, ())
+
+    def test_a_regex_proof_keeps_its_flag(self, cfg, tmp_path):
+        root = self._tree(tmp_path)
+        _StubBoard.steps[7] = [
+            {"step_key": "34-1-01", "retired": False,
+             "surface_proof": 'grep -n "export function W.*t()" app/src/Widget.tsx (regex needle, app/src/Widget.tsx:2)'},
+        ]
+        assert verify_step_proofs(cfg, 7, root).drift == ()
+
+    def test_a_non_list_steps_body_is_a_loud_stop(self, cfg, tmp_path):
+        _StubBoard.steps[7] = {"steps": []}  # type: ignore[assignment]
+        with pytest.raises(QaBoardError, match="expected a JSON list"):
+            verify_step_proofs(cfg, 7, self._tree(tmp_path))
+
+    def test_the_finish_stops_on_a_siblings_drift_before_authoring(self, cfg, tmp_path):
+        root = self._tree(tmp_path)
+        _StubBoard.steps[7] = [
+            {"step_key": "34-1-01", "retired": False, "surface_proof": self._proof(
+                ("return null;", "app/src/Widget.tsx", "drifted by a sibling", 2),
+            )},
+        ]
+        log = _Log()
+        with pytest.raises(QaBoardError, match="board proof drift on section 7"):
+            finish_story(
+                "34-36", ["app/src/Widget.tsx"], RULES, cfg, log,
+                step_label="34-36 walkthrough", surface_proof="app/src/Widget.tsx:3",
+                project_root=root,
+            )
+        assert _StubBoard.posted == []  # nothing authored, nothing posted
+        assert not (cfg.authoring_dir / "epic-34-steps.json").exists()
+        checks = [e for e in log.events if e[1] == "qa-board-proof-check"]
+        assert len(checks) == 1 and checks[0][2]["drift"]
+
+    def test_the_finish_records_a_clean_check_and_proceeds(self, cfg, tmp_path):
+        root = self._tree(tmp_path)
+        _StubBoard.steps[7] = [
+            {"step_key": "34-1-01", "retired": False, "surface_proof": self._proof(
+                ("return null;", "app/src/Widget.tsx", "the render", 3),
+            )},
+        ]
+        log = _Log()
+        result = finish_story(
+            "34-36", ["app/src/Widget.tsx"], RULES, cfg, log,
+            step_label="34-36 walkthrough", surface_proof="app/src/Widget.tsx:3",
+            project_root=root,
+        )
+        assert result["ok"] and result["step_key"] == "34-36-01"
+        names = [e[1] for e in log.events]
+        assert names.index("qa-board-proof-check") < names.index("qa-board-step")
+        check = next(e[2] for e in log.events if e[1] == "qa-board-proof-check")
+        assert (check["anchors"], check["drift"]) == (1, [])
+
+    def test_no_project_root_logs_the_skip_never_silently(self, cfg):
+        log = _Log()
+        finish_story(
+            "34-36", ["app/src/Widget.tsx"], RULES, cfg, log,
+            step_label="34-36 walkthrough", surface_proof="app/src/Widget.tsx:3",
+        )
+        skipped = [e for e in log.events if e[1] == "qa-board-proof-check-skipped"]
+        assert len(skipped) == 1 and "not re-verified" in skipped[0][2]["reason"]

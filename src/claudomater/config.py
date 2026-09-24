@@ -493,6 +493,15 @@ class UsageConfig:
     )
     degrade_scoped_at: int = 80
     degrade_path: list[str] = field(default_factory=lambda: [MODEL_OPUS, "pause"])
+    # epic-61 retro A10: the run's FIRST spawn needs every window below these
+    # (percent); 100 disables a window's start gate. Judged in addition to
+    # pause_at / degrade_scoped_at, which keep gating every later spawn.
+    start_below: dict[str, int] = field(
+        default_factory=lambda: {"five_hour": 80, "seven_day": 95, "scoped": 80}
+    )
+    # epic-61 retro A10: account e-mail globs (case-insensitive) that pause
+    # every spawn - operator identities stay out of automation phases.
+    deny_accounts: list[str] = field(default_factory=list)
     # One default, defined in usage.py (> the longest phase timeout — see the
     # comment there); staleness beyond it applies the near-limit rule, not an
     # automatic pause.
@@ -593,6 +602,22 @@ def load_user_config(path: Path | str | None = None) -> UserConfig:
             f"usage.max_stale_seconds must be >= 1, got {usage.max_stale_seconds}"
         )
 
+    if "start_below" in usage_raw:
+        usage.start_below.update(
+            _require_mapping("usage.start_below", usage_raw["start_below"])
+        )
+    for window, pct in usage.start_below.items():
+        if window not in ("five_hour", "seven_day", "scoped"):
+            raise ConfigError(f"usage.start_below: unknown window {window!r}")
+        if isinstance(pct, bool) or not isinstance(pct, int) or not 0 <= pct <= 100:
+            raise ConfigError(f"usage.start_below.{window}: must be an int 0-100")
+    if "deny_accounts" in usage_raw:
+        raw_deny = usage_raw["deny_accounts"]
+        if not isinstance(raw_deny, list) or not all(
+            isinstance(x, str) and x.strip() for x in raw_deny
+        ):
+            raise ConfigError("usage.deny_accounts must be a list of non-blank strings")
+        usage.deny_accounts = [x.strip() for x in raw_deny]
     for window, pct in usage.pause_at.items():
         if window not in ("five_hour", "seven_day"):
             raise ConfigError(f"usage.pause_at: unknown window {window!r}")

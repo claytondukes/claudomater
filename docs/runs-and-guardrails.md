@@ -74,6 +74,14 @@ evaluates the operator's thresholds. Exit codes: 0 ok, 3 pause, 4 degrade.
   at degraded confidence. Degrades never act on stale data.
 - Per-window `pause | degrade` behavior, the scoped-quota degrade path, and
   account-switch re-baselining come from `~/.omater/config.yaml`.
+- **Start headroom**: the run's FIRST spawn (no `phase-spawn` event in the
+  run log yet) must sit below `usage.start_below` on every window, so a run
+  starts on an account with room for the whole run, not for one more phase.
+  A resumed run is never re-gated as a fresh start. Without a run log the
+  gate cannot be known and is not applied.
+- **Account deny list**: `usage.deny_accounts` globs pause every spawn under
+  a matching e-mail - an operator's personal identity never carries an
+  automation phase, whatever its headroom.
 - `OMATER_FAKE_USAGE` injects a fake reading so every guardrail branch is
   testable in CI.
 

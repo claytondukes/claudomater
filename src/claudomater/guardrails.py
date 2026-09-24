@@ -23,6 +23,8 @@ Rules (from the design, §5):
 
 from __future__ import annotations
 
+import fnmatch
+
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -245,11 +247,17 @@ def evaluate(
     snapshot: UsageSnapshot | UsageUnavailable | None,
     cfg: UserConfig,
     baseline_account: dict[str, str] | None = None,
+    first_spawn: bool = False,
 ) -> Decision:
     """Evaluate one guardrail read. Pass the UsageUnavailable exception (or
     None) as the snapshot to get the fail-closed pause — unless the exception
     carries a stale-but-readable last reading, which gets the
-    staleness-AND-near-limit rule instead."""
+    staleness-AND-near-limit rule instead.
+
+    `first_spawn=True` is the run's FIRST phase spawn: on top of the per-spawn
+    thresholds it requires every window to sit below `usage.start_below`, so
+    a run starts on an account with headroom for the whole run rather than
+    for one more phase. `usage.deny_accounts` applies to every spawn."""
     if snapshot is None or isinstance(snapshot, UsageUnavailable):
         if isinstance(snapshot, UsageUnavailable) and snapshot.snapshot is not None:
             return _stale_decision(snapshot, cfg, baseline_account=baseline_account)
@@ -322,6 +330,42 @@ def evaluate(
             f"{snapshot.scoped:.0f}% >= {cfg.usage.degrade_scoped_at}% -> degrade"
         )
 
+    # Account deny list (epic-61 retro A10): an operator's own identity must
+    # never carry an automation phase - judged on EVERY spawn, and a pause
+    # rather than a degrade because no model choice makes it acceptable.
+    email = str(snapshot.account.get("email", "")) if isinstance(snapshot.account, dict) else ""
+    if email:
+        for pattern in cfg.usage.deny_accounts:
+            if fnmatch.fnmatchcase(email.lower(), pattern.lower()):
+                decision.action, decision.window, decision.resets_at = PAUSE, None, None
+                decision.reasons.append(
+                    f"account {email} matches usage.deny_accounts {pattern!r} - "
+                    "automation never runs under it"
+                )
+                return decision
+
+    # Start headroom (epic-61 retro A10): the FIRST spawn of a run needs room
+    # for the whole run. Both epic-61 quota parks fired on the account the
+    # create phase had just exhausted - a per-spawn threshold cannot see that.
+    if first_spawn and decision.action != PAUSE:
+        windows = (
+            ("five_hour", snapshot.five_hour, snapshot.five_hour_resets_at),
+            ("seven_day", snapshot.seven_day, snapshot.seven_day_resets_at),
+            ("scoped", snapshot.scoped, snapshot.scoped_resets_at),
+        )
+        for window, pct, resets in windows:
+            limit = cfg.usage.start_below.get(window)
+            if limit is None or pct is None:
+                continue
+            if pct >= limit:
+                decision.action, decision.window, decision.resets_at = PAUSE, window, resets
+                decision.reasons.append(
+                    f"first spawn of the run: {WINDOW_LABELS[window]} at {pct:.0f}% "
+                    f">= usage.start_below {limit}% - start on an account with "
+                    "headroom for the whole run"
+                )
+                break
+
     return decision
 
 
@@ -366,7 +410,9 @@ def make_guardrail_check(
       baseline forgot everything.
 
     `read` defaults to `read_usage` at the user config's staleness TTL;
-    inject a fake for tests."""
+    inject a fake for tests. With a run log, the first check of a run (no
+    `phase-spawn` event yet) applies `usage.start_below` (epic-61 retro A10);
+    without one the start gate cannot be known and is not applied."""
     if read is None:
 
         def read() -> UsageSnapshot:
@@ -382,7 +428,15 @@ def make_guardrail_check(
             snapshot: UsageSnapshot | UsageUnavailable = read()
         except UsageUnavailable as exc:
             snapshot = exc
-        decision = evaluate(snapshot, cfg, baseline_account=baseline)
+        # The run's first spawn is the one no phase-spawn event precedes;
+        # read from the log, not from process memory, so a resumed run is
+        # never re-gated as a fresh start (and a fresh run always is).
+        first_spawn = runlog is not None and not any(
+            e.get("event") == "phase-spawn" for e in runlog.events()
+        )
+        decision = evaluate(
+            snapshot, cfg, baseline_account=baseline, first_spawn=first_spawn
+        )
         snap = decision.snapshot
         if snap is not None and positive_identity(snap.account):
             baseline = snap.account

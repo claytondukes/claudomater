@@ -374,6 +374,133 @@ def _git_out(repo: Path, *args: str) -> str:
     return proc.stdout
 
 
+# ---- proof content check (epic-61 retro A2) ---------------------------------
+# Every CURRENT step's surface_proof must still land on its cited line on the
+# tree being finished or closed. The board gate's own proof-ref check compares
+# existence and line range only, and three consumer epics in a row shipped
+# boards whose anchors had drifted under sibling merges while that gate read
+# PASS. Content closes it: each `grep -nF "<needle>" <path> (... <path>:<line>)`
+# entry is re-run against the checkout and the cited line must be among the
+# hits. A proof with no grep entry (a range-only proof) is COUNTED as
+# unparsed, never treated as verified.
+_PROOF_ENTRY_RE = re.compile(
+    r'grep (-nF|-n) "(.*?)" (\S+) \((.*?)\)(?=; grep -n|$)', re.S
+)
+_PROOF_CITED_RE = re.compile(r"(\S+):(\d+)")
+_WAIVED_STEP_RE = re.compile(r"-(PRE|OBS)-\d+$")
+
+
+@dataclass(frozen=True)
+class ProofCheck:
+    section_id: int
+    steps: int  # current, non-waived steps inspected
+    anchors: int  # grep entries that parsed and were re-run
+    unparsed: int  # inspected steps whose proof carried no grep entry
+    drift: tuple[str, ...]  # one line per anchor that no longer lands
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "section_id": self.section_id,
+            "steps": self.steps,
+            "anchors": self.anchors,
+            "unparsed": self.unparsed,
+            "drift": list(self.drift),
+        }
+
+
+def verify_step_proofs(
+    cfg: QaBoardConfig, section_id: int, project_root: Path | str
+) -> ProofCheck:
+    """Re-run every current step's proof greps of one board section against
+    `project_root`. Retired steps and waived (-PRE-NN / -OBS-NN) steps are
+    skipped; everything else is judged. Returns the counts; the CALLER
+    decides that drift is fatal (both wired callers do)."""
+    root = Path(project_root)
+    rows = _http_json(f"{cfg.board_url}/sections/{section_id}/steps")
+    if not isinstance(rows, list):
+        raise QaBoardError(
+            f"board section {section_id} steps: expected a JSON list, got "
+            f"{type(rows).__name__} - a proof set that cannot be read must not "
+            "read as verified"
+        )
+    steps = anchors = unparsed = 0
+    drift: list[str] = []
+    for step in rows:
+        if not isinstance(step, dict) or step.get("retired"):
+            continue
+        key = str(step.get("step_key", "?"))
+        if _WAIVED_STEP_RE.search(key):
+            continue
+        steps += 1
+        entries = list(_PROOF_ENTRY_RE.finditer(str(step.get("surface_proof") or "")))
+        if not entries:
+            unparsed += 1
+            continue
+        for m in entries:
+            flag, needle, path, note = m.group(1), m.group(2), m.group(3), m.group(4)
+            cites = _PROOF_CITED_RE.findall(note)
+            if not cites:
+                drift.append(f"{key}: {path} entry cites no file:line")
+                continue
+            cited = int(cites[-1][1])
+            anchors += 1
+            try:
+                proc = subprocess.run(
+                    ["grep", flag, "--", needle, path],
+                    cwd=root, capture_output=True, text=True, timeout=30,
+                )
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                drift.append(f"{key}: {path}:{cited} grep failed to run: {exc}")
+                continue
+            if proc.returncode not in (0, 1):
+                drift.append(
+                    f"{key}: {path}:{cited} grep error: {proc.stderr.strip()[:120]}"
+                )
+                continue
+            hits = [int(line.split(":", 1)[0]) for line in proc.stdout.splitlines()]
+            if cited not in hits:
+                drift.append(
+                    f"{key}: {path}:{cited} -> hits {hits} needle={needle[:60]!r}"
+                )
+    return ProofCheck(
+        section_id=section_id, steps=steps, anchors=anchors,
+        unparsed=unparsed, drift=tuple(drift),
+    )
+
+
+def _proof_gate(
+    cfg: QaBoardConfig,
+    section_id: int,
+    project_root: Path | str | None,
+    runlog: Any,
+    phase: str,
+    event_prefix: str,
+    story_key: str | None,
+    detail: dict[str, Any],
+) -> None:
+    """Run the content check as a gate: a logged skip when no project root is
+    known (never a silent one), a logged result otherwise, and a loud stop on
+    drift naming every anchor that no longer lands."""
+    if project_root is None:
+        runlog.event(
+            phase, f"{event_prefix}-skipped",
+            {**detail, "section_id": section_id,
+             "reason": "no project_root supplied - proof content not re-verified"},
+            story_key=story_key,
+        )
+        return
+    check = verify_step_proofs(cfg, section_id, project_root)
+    runlog.event(phase, event_prefix, {**detail, **check.as_dict()}, story_key=story_key)
+    if check.drift:
+        shown = "\n  ".join(check.drift[:20])
+        more = f"\n  (+{len(check.drift) - 20} more)" if len(check.drift) > 20 else ""
+        raise QaBoardError(
+            f"board proof drift on section {section_id} ({len(check.drift)} of "
+            f"{check.anchors} anchors no longer land on their cited line) - "
+            f"re-anchor through PATCH /steps/{{id}} before finishing:\n  {shown}{more}"
+        )
+
+
 def close_epic(
     project_root: Path | str,
     cfg: QaBoardConfig,
@@ -388,7 +515,9 @@ def close_epic(
     1. PRECHECK - the artifact repo holding the authoring/coverage tree is
        fully committed AND fully pushed. The 47-4 shape (story artifacts
        still local when the lab gate regenerated the matrix) becomes
-       impossible instead of invisible.
+       impossible instead of invisible. Then the PROOF CONTENT check
+       (epic-61 retro A2): every current step's greps re-run against the
+       project tree, drift fails the close.
     2. THE GATE - `run_gate` (exit code only), which commits the
        regenerated matrix lab-side.
     3. COUNT - pull the artifact repo and validate the regenerated
@@ -436,6 +565,13 @@ def close_epic(
             "expected_stories": expected,
             "story_keys": [e.key for e in stories],
         },
+    )
+    # Proof content (epic-61 retro A2): every current step of the section
+    # must land on its cited line on the tree being closed, BEFORE the range
+    # gate runs - the range gate cannot see this class.
+    _proof_gate(
+        cfg, section_id_for_epic(cfg, epic_id), root, runlog, "close",
+        "close-proof-check", None, {"epic": epic_id},
     )
     # Write-ahead: intent BEFORE the action, and no outcome claim - the
     # count stage completing is what implies the gate passed.
@@ -528,6 +664,7 @@ def finish_story(
     surface_proof: str | None = None,
     metrics_facts: Any = None,
     metrics_path: Any = None,
+    project_root: Path | str | None = None,
 ) -> dict:
     """The full flow. Returns a JSON-able result; raises rather than
     guessing. Events are written BEFORE each action (run-log discipline).
@@ -535,7 +672,11 @@ def finish_story(
     For a surface verdict the caller must supply `step_label` and
     `surface_proof`: the walkthrough instruction is authored content the
     flow cannot invent, and arriving here without them means the merge
-    phase never wrote them - a loud stop, not a waiver."""
+    phase never wrote them - a loud stop, not a waiver.
+
+    With `project_root` the section's CURRENT steps have their proof greps
+    re-run against that tree before the new step is authored (epic-61 retro
+    A2); without it the skip is logged, never silent."""
     epic_id = epic_of(story_id)
     verdict = classify_changed_files(merged_files, rules)
     if not verdict.surface_touching:
@@ -567,6 +708,14 @@ def finish_story(
             "merge phase must author step_label + surface_proof for a "
             "surface story"
         )
+    # The section is resolved FIRST so the proof content gate (epic-61 retro
+    # A2) runs before any intent event: a drifted board stops the finish
+    # before it records that a step was about to be authored.
+    section_id = section_id_for_epic(cfg, epic_id)
+    _proof_gate(
+        cfg, section_id, project_root, runlog, "merge", "qa-board-proof-check",
+        story_id, {"story": story_id, "epic": epic_id},
+    )
     # run-log discipline: an INTENT event lands before each action (the
     # log's own contract) and a completion event after it, so a crash
     # between the two shows exactly what was being attempted - content
@@ -584,7 +733,6 @@ def finish_story(
         story_key=story_id,
     )
     step = author_step(cfg, epic_id, story_id, step_label, surface_proof)
-    section_id = section_id_for_epic(cfg, epic_id)
     runlog.event(
         "merge",
         "qa-board-post",

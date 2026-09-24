@@ -22,6 +22,7 @@ from claudomater.credentials import (
 from claudomater.guardrails import (
     Decision,
     evaluate,
+    make_guardrail_check,
     model_for_phase,
     next_model,
     scope_applies,
@@ -1332,3 +1333,81 @@ class TestWaitForUnpark:
         with pytest.raises(RunError, match="parked"):
             log.finish("run-complete")
         assert log.is_live()
+
+
+class _EventLog:
+    """The slice of RunLog the spawn gate reads: events() only."""
+
+    def __init__(self, events):
+        self._events = list(events)
+
+    def events(self):
+        return list(self._events)
+
+
+class TestStartHeadroom:
+    """Epic-61 retro A10: both quota parks of that epic fired on the account
+    the create phase had just exhausted - a per-spawn threshold cannot see
+    that. The run's FIRST spawn must clear usage.start_below on every window."""
+
+    def test_first_spawn_pauses_below_the_pause_threshold(self):
+        d = evaluate(snapshot(five=85), UserConfig(), first_spawn=True)
+        assert d.action == "pause" and d.window == "five_hour"
+        assert "first spawn of the run: 5h at 85% >= usage.start_below 80%" in d.reasons[0]
+        assert d.resets_at == "2026-08-28T22:49:59Z"
+
+    def test_a_later_spawn_keeps_the_per_spawn_rule(self):
+        assert evaluate(snapshot(five=85), UserConfig()).action == "ok"
+
+    def test_the_scoped_start_gate_beats_the_degrade(self):
+        d = evaluate(snapshot(scoped=80), UserConfig(), first_spawn=True)
+        assert d.action == "pause" and d.window == "scoped"
+        assert any("first spawn" in r for r in d.reasons)
+
+    def test_a_hundred_disables_a_windows_start_gate(self):
+        cfg = UserConfig()
+        cfg.usage.start_below["five_hour"] = 100
+        assert evaluate(snapshot(five=94), cfg, first_spawn=True).action == "ok"
+
+    def test_a_missing_window_is_not_a_start_gate_trip(self):
+        # the per-spawn rule already fails closed on a missing 5h/7d window;
+        # a missing scoped reading simply has no start gate to judge
+        assert evaluate(snapshot(scoped=None), UserConfig(), first_spawn=True).action == "ok"
+
+    def test_the_check_reads_first_spawn_from_the_run_log(self):
+        cfg = UserConfig()
+        fresh = make_guardrail_check(cfg, runlog=_EventLog([]), read=lambda: snapshot(five=85))
+        assert fresh().action == "pause"
+        resumed = make_guardrail_check(
+            cfg,
+            runlog=_EventLog([{"event": "phase-spawn", "phase": "create"}]),
+            read=lambda: snapshot(five=85),
+        )
+        assert resumed().action == "ok"
+
+    def test_without_a_run_log_the_start_gate_is_not_applied(self):
+        check = make_guardrail_check(UserConfig(), runlog=None, read=lambda: snapshot(five=85))
+        assert check().action == "ok"
+
+
+class TestDenyAccounts:
+    """Epic-61 retro A10, second half: an operator identity never carries an
+    automation phase - judged on every spawn, and a pause, not a degrade."""
+
+    def _cfg(self):
+        cfg = UserConfig()
+        cfg.usage.deny_accounts = ["cdukes@*", "*@personal.example"]
+        return cfg
+
+    def test_a_matching_email_pauses_every_spawn(self):
+        d = evaluate(snapshot(account={"email": "CDukes@example.com"}), self._cfg())
+        assert d.action == "pause" and d.window is None
+        assert "matches usage.deny_accounts 'cdukes@*'" in d.reasons[0]
+
+    def test_a_pool_account_is_untouched(self):
+        d = evaluate(snapshot(account={"email": "dev6@example.com"}), self._cfg())
+        assert d.action == "ok"
+
+    def test_an_identity_without_an_email_cannot_match(self):
+        d = evaluate(snapshot(account={"uuid": "acct-1"}), self._cfg())
+        assert d.action == "ok"
