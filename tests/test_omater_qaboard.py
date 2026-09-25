@@ -891,6 +891,15 @@ class TestProofContentCheck:
             'every entry must be `grep -nF "<needle>" <path> (... <path>:<line>)`',
         )
 
+    @pytest.mark.parametrize("value", ["false", 0, 1, None, "yes"])
+    def test_a_non_boolean_retired_flag_is_a_loud_stop(self, cfg, tmp_path, value):
+        _StubBoard.steps[7] = [
+            {"step_key": "34-1-01", "retired": value,
+             "surface_proof": self._proof(("return null;", "app/src/Widget.tsx", "the render", 3))},
+        ]
+        with pytest.raises(QaBoardError, match="non-boolean retired flag"):
+            verify_step_proofs(cfg, 7, self._tree(tmp_path))
+
     def test_a_non_object_row_is_a_loud_stop(self, cfg, tmp_path):
         _StubBoard.steps[7] = [["not", "a", "step"]]
         with pytest.raises(QaBoardError, match="a row is not a JSON object"):

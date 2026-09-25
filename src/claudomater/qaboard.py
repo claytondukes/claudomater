@@ -455,7 +455,16 @@ def verify_step_proofs(
                 f"board section {section_id} steps: a row is not a JSON object "
                 f"({type(step).__name__}) - refusing to judge a malformed proof set"
             )
-        if step.get("retired"):
+        retired = step.get("retired", False)
+        if not isinstance(retired, bool):
+            # "false" (a string) is truthy: a malformed flag must not read
+            # as "retired, skip" and hide a live step's proof
+            raise QaBoardError(
+                f"board section {section_id} steps: step "
+                f"{step.get('step_key', '?')!r} carries a non-boolean retired "
+                f"flag ({retired!r}) - refusing to judge a malformed proof set"
+            )
+        if retired:
             continue
         key = str(step.get("step_key", "?"))
         if _WAIVED_STEP_RE.search(key):
