@@ -390,6 +390,7 @@ _PROOF_ENTRY_RE = re.compile(
     r'grep (-nF|-n) "(.*?)" (\S+) \((.*?)\)(?=; grep -n|$)', re.S
 )
 _PROOF_CITED_RE = re.compile(r"(\S+):(\d+)")
+_PROOF_FRAGMENT_RE = re.compile(r"(?:^|; )grep -n")
 _WAIVED_STEP_RE = re.compile(r"-(PRE|OBS)-\d+$")
 
 
@@ -460,10 +461,21 @@ def verify_step_proofs(
         if _WAIVED_STEP_RE.search(key):
             continue
         steps += 1
-        entries = list(_PROOF_ENTRY_RE.finditer(str(step.get("surface_proof") or "")))
+        proof = str(step.get("surface_proof") or "")
+        entries = list(_PROOF_ENTRY_RE.finditer(proof))
         if not entries:
             unparsed_steps.append(key)
             continue
+        # Every grep fragment must be a parsed entry: a malformed fragment
+        # after a valid one would otherwise pass unseen on the strength of
+        # its sibling, and "inspected every proof command" would be false.
+        fragments = len(_PROOF_FRAGMENT_RE.findall(proof))
+        if fragments != len(entries):
+            drift.append(
+                f"{key}: {fragments - len(entries)} grep fragment(s) could not be "
+                f"parsed ({fragments} present, {len(entries)} parsed) - every entry "
+                'must be `grep -nF "<needle>" <path> (... <path>:<line>)`'
+            )
         for m in entries:
             flag, needle, path, note = m.group(1), m.group(2), m.group(3), m.group(4)
             cites = _PROOF_CITED_RE.findall(note)

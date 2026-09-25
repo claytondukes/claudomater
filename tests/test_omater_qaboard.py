@@ -877,6 +877,20 @@ class TestProofContentCheck:
             )
         assert _StubBoard.posted == []
 
+    def test_a_malformed_trailing_fragment_is_drift_not_ignored(self, cfg, tmp_path):
+        root = self._tree(tmp_path)
+        _StubBoard.steps[7] = [
+            {"step_key": "34-1-01", "retired": False, "surface_proof": self._proof(
+                ("return null;", "app/src/Widget.tsx", "the render", 3),
+            ) + '; grep -nF "unparseable" app/src/Widget.tsx'},
+        ]
+        check = verify_step_proofs(cfg, 7, root)
+        assert check.anchors == 1
+        assert check.drift == (
+            "34-1-01: 1 grep fragment(s) could not be parsed (2 present, 1 parsed) - "
+            'every entry must be `grep -nF "<needle>" <path> (... <path>:<line>)`',
+        )
+
     def test_a_non_object_row_is_a_loud_stop(self, cfg, tmp_path):
         _StubBoard.steps[7] = [["not", "a", "step"]]
         with pytest.raises(QaBoardError, match="a row is not a JSON object"):

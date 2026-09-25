@@ -372,7 +372,9 @@ def _policy_gates(
         )
         for window, pct, resets in windows:
             limit = cfg.usage.start_below.get(window)
-            if limit is None or pct is None:
+            # 100 is the documented "no start gate for this window": a
+            # reading at exactly 100% must not trip a gate that is off
+            if limit is None or limit >= 100 or pct is None:
                 continue
             if pct >= limit:
                 decision.action, decision.window, decision.resets_at = PAUSE, window, resets

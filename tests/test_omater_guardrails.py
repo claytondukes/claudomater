@@ -1369,6 +1369,17 @@ class TestStartHeadroom:
         cfg.usage.start_below["five_hour"] = 100
         assert evaluate(snapshot(five=94), cfg, first_spawn=True).action == "ok"
 
+    def test_a_disabled_window_does_not_trip_at_exactly_one_hundred(self):
+        # 100 means off: a reading AT 100% keeps whatever the per-spawn rule
+        # decided (here pause_at 100 + degrade on threshold -> degrade)
+        cfg = UserConfig()
+        cfg.usage.start_below["five_hour"] = 100
+        cfg.usage.pause_at["five_hour"] = 100
+        cfg.usage.on_threshold["five_hour"] = "degrade"
+        d = evaluate(snapshot(five=100), cfg, first_spawn=True)
+        assert d.action == "degrade"
+        assert not any("first spawn" in r for r in d.reasons)
+
     def test_a_missing_window_is_not_a_start_gate_trip(self):
         # the per-spawn rule already fails closed on a missing 5h/7d window;
         # a missing scoped reading simply has no start gate to judge
