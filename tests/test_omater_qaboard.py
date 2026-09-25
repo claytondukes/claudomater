@@ -931,6 +931,26 @@ class TestProofContentCheck:
         with pytest.raises(QaBoardError, match="carries no step_key"):
             verify_step_proofs(cfg, 7, self._tree(tmp_path))
 
+    @pytest.mark.parametrize("needle", ["", "   "])
+    def test_an_empty_needle_is_drift_not_a_match_all(self, cfg, tmp_path, needle):
+        root = self._tree(tmp_path)
+        _StubBoard.steps[7] = [
+            {"step_key": "34-1-01", "retired": False,
+             "surface_proof": f'grep -nF "{needle}" app/src/Widget.tsx (would match every line, app/src/Widget.tsx:2)'},
+        ]
+        check = verify_step_proofs(cfg, 7, root)
+        assert check.drift == ("34-1-01: app/src/Widget.tsx:2 has an empty needle - not an anchor",)
+
+    @pytest.mark.parametrize("path", ["-", "app/src", "app/src/Missing.tsx"])
+    def test_stdin_directories_and_missing_files_are_not_anchors(self, cfg, tmp_path, path):
+        root = self._tree(tmp_path)
+        _StubBoard.steps[7] = [
+            {"step_key": "34-1-01", "retired": False,
+             "surface_proof": f'grep -nF "line one" {path} (not a project file, {path}:1)'},
+        ]
+        check = verify_step_proofs(cfg, 7, root)
+        assert check.drift == (f"34-1-01: {path}:1 is not a file inside the project root",)
+
     def test_a_non_object_row_is_a_loud_stop(self, cfg, tmp_path):
         _StubBoard.steps[7] = [["not", "a", "step"]]
         with pytest.raises(QaBoardError, match="a row is not a JSON object"):

@@ -511,16 +511,30 @@ def verify_step_proofs(
                     "the cited anchor must be the grepped file"
                 )
                 continue
-            if _confined(root, path) is None:
+            if not needle.strip():
+                # an empty fixed string matches every line: any cited line
+                # would pass whatever the file now says
+                drift.append(f"{key}: {path}:{cited} has an empty needle - not an anchor")
+                continue
+            target = _confined(root, path)
+            if target is None:
                 drift.append(
                     f"{key}: {path}:{cited} is outside the project root - "
                     "a proof must anchor inside the tree being judged"
                 )
                 continue
+            if not target.is_file():
+                # `-` (grep's stdin), a directory, or a missing file: none
+                # is the project tree the proof claims to anchor in
+                drift.append(f"{key}: {path}:{cited} is not a file inside the project root")
+                continue
             try:
+                # the VALIDATED path is the one grep reads, never the raw
+                # board string; stdin is closed so no operand can read it
                 proc = subprocess.run(
-                    ["grep", flag, "--", needle, path],
+                    ["grep", flag, "--", needle, str(target)],
                     cwd=root, capture_output=True, text=True, timeout=30,
+                    stdin=subprocess.DEVNULL,
                 )
             except (OSError, subprocess.TimeoutExpired) as exc:
                 drift.append(f"{key}: {path}:{cited} grep failed to run: {exc}")
