@@ -613,12 +613,12 @@ def _proof_gate(
             'the `grep -nF "<needle>" <path> (... <path>:<line>)` form'
         )
     if check.drift:
-        shown = "\n  ".join(check.drift[:20])
-        more = f"\n  (+{len(check.drift) - 20} more)" if len(check.drift) > 20 else ""
+        # every anchor, not a sample: the operator re-anchors from this text
+        # (the run-log event carries the same list as data)
         raise QaBoardError(
             f"board proof drift on section {section_id} ({len(check.drift)} of "
             f"{check.anchors} anchors no longer land on their cited line) - "
-            f"re-anchor through PATCH /steps/{{id}} before finishing:\n  {shown}{more}"
+            "re-anchor through PATCH /steps/{id} before finishing:\n  " + "\n  ".join(check.drift)
         )
 
 

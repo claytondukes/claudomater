@@ -1026,6 +1026,20 @@ class TestProofContentCheck:
             )
         assert _StubBoard.posted == []
 
+    def test_the_error_names_every_drifted_anchor_not_a_sample(self, cfg, tmp_path):
+        root = self._tree(tmp_path)
+        entries = [("return null;", "app/src/Widget.tsx", f"anchor {i}", 1) for i in range(25)]
+        _StubBoard.steps[7] = [{"step_key": "34-1-01", "retired": False, "surface_proof": self._proof(*entries)}]
+        with pytest.raises(QaBoardError) as exc:
+            finish_story(
+                "34-36", ["app/src/Widget.tsx"], RULES, cfg, _Log(),
+                step_label="34-36 walkthrough",
+                surface_proof=self._proof(("return null;", "app/src/Widget.tsx", "the render", 3)),
+                project_root=root,
+            )
+        assert str(exc.value).count("34-1-01: app/src/Widget.tsx:1 -> hits [3]") == 25
+        assert "more)" not in str(exc.value)
+
     def test_a_non_object_row_is_a_loud_stop(self, cfg, tmp_path):
         _StubBoard.steps[7] = [["not", "a", "step"]]
         with pytest.raises(QaBoardError, match="a row is not a JSON object"):
