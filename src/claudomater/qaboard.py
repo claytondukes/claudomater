@@ -386,11 +386,15 @@ def _git_out(repo: Path, *args: str) -> str:
 # must never read as verified. Every path is confined to the project root
 # and the cited path must be the grepped path; drift lines never carry the
 # needle text (the run log has no scrubber), only step, path, line and hits.
+# Entry and fragment boundaries share ONE delimiter shape (`;` with any
+# whitespace before `grep -n`): a boundary the counter sees but the parser
+# does not, or the reverse, is exactly how a hidden fragment slips through.
+_PROOF_DELIM = r";\s*grep -n"
 _PROOF_ENTRY_RE = re.compile(
-    r'grep (-nF|-n) "(.*?)" (\S+) \((.*?)\)(?=; grep -n|$)', re.S
+    r'grep (-nF|-n) "(.*?)" (\S+) \((.*?)\)(?=' + _PROOF_DELIM + r"|$)", re.S
 )
 _PROOF_CITED_RE = re.compile(r"(\S+):(\d+)")
-_PROOF_FRAGMENT_RE = re.compile(r"(?:^|; )grep -n")
+_PROOF_FRAGMENT_RE = re.compile(r"(?:^|" + _PROOF_DELIM[:-7] + r")grep -n")
 _WAIVED_STEP_RE = re.compile(r"-(PRE|OBS)-\d+$")
 
 
@@ -466,7 +470,15 @@ def verify_step_proofs(
             )
         if retired:
             continue
-        key = str(step.get("step_key", "?"))
+        raw_key = step.get("step_key")
+        if not isinstance(raw_key, str) or not raw_key.strip():
+            # a row with no identity cannot be tied to a real step; a proof
+            # that happens to land on it must not count as a verified step
+            raise QaBoardError(
+                f"board section {section_id} steps: a current step row carries no "
+                f"step_key ({raw_key!r}) - refusing to judge a malformed proof set"
+            )
+        key = raw_key.strip()
         if _WAIVED_STEP_RE.search(key):
             continue
         steps += 1

@@ -900,6 +900,37 @@ class TestProofContentCheck:
         with pytest.raises(QaBoardError, match="non-boolean retired flag"):
             verify_step_proofs(cfg, 7, self._tree(tmp_path))
 
+    @pytest.mark.parametrize("sep", [";grep", ";  grep", "; grep"])
+    def test_every_delimiter_spelling_is_seen_by_parser_and_counter_alike(self, cfg, tmp_path, sep):
+        root = self._tree(tmp_path)
+        _StubBoard.steps[7] = [
+            {"step_key": "34-1-01", "retired": False, "surface_proof": self._proof(
+                ("return null;", "app/src/Widget.tsx", "the render", 3),
+            ) + f'{sep} -nF "unparseable" app/src/Widget.tsx'},
+        ]
+        check = verify_step_proofs(cfg, 7, root)
+        assert check.anchors == 1 and len(check.drift) == 1
+        assert check.drift[0].startswith("34-1-01: 1 grep fragment(s) could not be parsed (2 present, 1 parsed)")
+
+    def test_two_valid_entries_joined_without_a_space_both_run(self, cfg, tmp_path):
+        root = self._tree(tmp_path)
+        _StubBoard.steps[7] = [
+            {"step_key": "34-1-01", "retired": False, "surface_proof":
+             'grep -nF "line one" app/src/Widget.tsx (first, app/src/Widget.tsx:1);grep -nF "return null;" app/src/Widget.tsx (second, app/src/Widget.tsx:2)'},
+        ]
+        check = verify_step_proofs(cfg, 7, root)
+        assert check.anchors == 2
+        assert check.drift == ("34-1-01: app/src/Widget.tsx:2 -> hits [3]",)
+
+    @pytest.mark.parametrize("key", [None, "", "   ", 7])
+    def test_a_row_without_a_step_key_is_a_loud_stop(self, cfg, tmp_path, key):
+        row = {"retired": False, "surface_proof": self._proof(("return null;", "app/src/Widget.tsx", "the render", 3))}
+        if key is not None:
+            row["step_key"] = key
+        _StubBoard.steps[7] = [row]
+        with pytest.raises(QaBoardError, match="carries no step_key"):
+            verify_step_proofs(cfg, 7, self._tree(tmp_path))
+
     def test_a_non_object_row_is_a_loud_stop(self, cfg, tmp_path):
         _StubBoard.steps[7] = [["not", "a", "step"]]
         with pytest.raises(QaBoardError, match="a row is not a JSON object"):
