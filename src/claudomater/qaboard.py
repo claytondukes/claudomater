@@ -390,9 +390,23 @@ def _git_out(repo: Path, *args: str) -> str:
 # whitespace before `grep -n`): a boundary the counter sees but the parser
 # does not, or the reverse, is exactly how a hidden fragment slips through.
 _PROOF_DELIM = r";\s*grep\b"
+# The needle is a double-quoted shell word: a literal `"` inside it is
+# written `\"` and a literal backslash `\\` (exactly what a shell paste of
+# the proof needs), and `_unescape_needle` turns the written form back into
+# the bytes grep receives.
 _PROOF_ENTRY_RE = re.compile(
-    r'grep (-nF|-n) "(.*?)" (\S+) \((.*?)\)(?=' + _PROOF_DELIM + r"|$)", re.S
+    r'grep (-nF|-n) "((?:[^"\\]|\\.)*)" (\S+) \((.*?)\)(?=' + _PROOF_DELIM + r"|$)", re.S
 )
+_NEEDLE_ESCAPE_RE = re.compile(r"\\(.)", re.S)
+
+
+def _unescape_needle(written: str) -> str:
+    r"""Backslash-quote becomes a quote and a doubled backslash one
+    backslash; any other backslash sequence stays as written (grep -F takes
+    it literally, and the proof's author meant those characters)."""
+    return _NEEDLE_ESCAPE_RE.sub(
+        lambda m: m.group(1) if m.group(1) in ('"', "\\") else m.group(0), written
+    )
 _PROOF_CITED_RE = re.compile(r"(\S+):(\d+)")
 # the only text allowed BETWEEN parsed entries (and after the last one)
 _PROOF_GAP_RE = re.compile(r"^\s*(?:;\s*)?$")
@@ -468,7 +482,8 @@ def _judge_proof(key: str, proof: str, root: Path) -> tuple[int, bool, list[str]
             '`grep -nF "<needle>" <path> (... <path>:<line>)`'
         )
     for m in entries:
-        flag, needle, path, note = m.group(1), m.group(2), m.group(3), m.group(4)
+        flag, path, note = m.group(1), m.group(3), m.group(4)
+        needle = _unescape_needle(m.group(2))
         cites = _PROOF_CITED_RE.findall(note)
         if not cites:
             drift.append(f"{key}: {path} entry cites no file:line")

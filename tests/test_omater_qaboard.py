@@ -1135,6 +1135,38 @@ class TestProofContentCheck:
             "34-1-01: app/src/Widget.tsx:3 grep produced 1 unnumbered output line(s) - not a source anchor",
         )
 
+    def test_a_needle_with_an_escaped_double_quote_lands(self, cfg, tmp_path):
+        root = self._tree(tmp_path)
+        (root / "app" / "src" / "Widget.tsx").write_text(
+            'const label = "Save";\n<div role="group" aria-label="Hours">\n', encoding="utf-8"
+        )
+        _StubBoard.steps[7] = [
+            {"step_key": "34-1-01", "retired": False, "surface_proof":
+             'grep -nF "const label = \\"Save\\";" app/src/Widget.tsx (the label, app/src/Widget.tsx:1); '
+             'grep -nF "role=\\"group\\" aria-label=\\"Hours\\"" app/src/Widget.tsx (the group, app/src/Widget.tsx:2)'},
+        ]
+        check = verify_step_proofs(cfg, 7, root)
+        assert (check.anchors, check.unparsed, check.drift) == (2, 0, ())
+
+    def test_an_escaped_backslash_in_a_needle_is_one_backslash(self, cfg, tmp_path):
+        root = self._tree(tmp_path)
+        (root / "app" / "src" / "Widget.tsx").write_text("const re = /a\\\\b/;\n", encoding="utf-8")
+        _StubBoard.steps[7] = [
+            {"step_key": "34-1-01", "retired": False,
+             "surface_proof": 'grep -nF "/a\\\\\\\\b/" app/src/Widget.tsx (two backslashes in the source, app/src/Widget.tsx:1)'},
+        ]
+        check = verify_step_proofs(cfg, 7, root)
+        assert (check.anchors, check.drift) == (1, ())
+
+    def test_an_unterminated_needle_is_unparsed(self, cfg, tmp_path):
+        root = self._tree(tmp_path)
+        _StubBoard.steps[7] = [
+            {"step_key": "34-1-01", "retired": False,
+             "surface_proof": 'grep -nF "return null; app/src/Widget.tsx (no closing quote, app/src/Widget.tsx:3)'},
+        ]
+        check = verify_step_proofs(cfg, 7, root)
+        assert check.unparsed_steps == ("34-1-01",)
+
     def test_a_non_object_row_is_a_loud_stop(self, cfg, tmp_path):
         _StubBoard.steps[7] = [["not", "a", "step"]]
         with pytest.raises(QaBoardError, match="a row is not a JSON object"):

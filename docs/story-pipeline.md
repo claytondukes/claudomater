@@ -89,8 +89,10 @@ After a story's PR merges and BEFORE its done-flip:
   parsing output. Drift is a loud stop naming every anchor (step, path,
   line and hits - never the needle text) before anything is authored; a
   proof with no grep entry fails the same way, every path is confined to the
-  project root, and the cited path must be the grepped file. A call without
-  `project_root` logs the skip, never silently.
+  project root, and the cited path must be the grepped file. The needle is a
+  double-quoted shell word: a literal `"` inside it is written `\"` and a
+  literal backslash `\\`, so the proof pastes into a shell unchanged. A call
+  without `project_root` logs the skip, never silently.
 - **No-surface story**: write the waiver EVALUATION (verdict buckets and
   all) to the run log - "no step needed" is a recorded decision, not a
   silence.
