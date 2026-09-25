@@ -1103,6 +1103,38 @@ class TestProofContentCheck:
             )
         assert "no longer land" not in str(exc.value)
 
+    def test_a_binary_file_match_is_drift_never_a_value_error(self, cfg, tmp_path):
+        root = self._tree(tmp_path)
+        (root / "app" / "src" / "blob.bin").write_bytes(b"\x00\x01return null;\x00\xff\n")
+        _StubBoard.steps[7] = [
+            {"step_key": "34-1-01", "retired": False,
+             "surface_proof": 'grep -nF "return null;" app/src/blob.bin (a binary file, app/src/blob.bin:1)'},
+        ]
+        check = verify_step_proofs(cfg, 7, root)
+        assert check.anchors == 1 and len(check.drift) == 1
+        assert check.drift[0] == "34-1-01: app/src/blob.bin:1 -> hits []"
+
+    def test_unnumbered_grep_output_is_drift(self, cfg, tmp_path, monkeypatch):
+        import subprocess as sp
+
+        from claudomater import qaboard as qb
+
+        root = self._tree(tmp_path)
+        _StubBoard.steps[7] = [
+            {"step_key": "34-1-01", "retired": False, "surface_proof": self._proof(
+                ("return null;", "app/src/Widget.tsx", "the render", 3),
+            )},
+        ]
+
+        def odd(argv, **kwargs):
+            return sp.CompletedProcess(argv, 0, stdout="Binary file app/src/Widget.tsx matches\n", stderr="")
+
+        monkeypatch.setattr(qb.subprocess, "run", odd)
+        check = verify_step_proofs(cfg, 7, root)
+        assert check.drift == (
+            "34-1-01: app/src/Widget.tsx:3 grep produced 1 unnumbered output line(s) - not a source anchor",
+        )
+
     def test_a_non_object_row_is_a_loud_stop(self, cfg, tmp_path):
         _StubBoard.steps[7] = [["not", "a", "step"]]
         with pytest.raises(QaBoardError, match="a row is not a JSON object"):

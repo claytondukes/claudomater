@@ -501,8 +501,10 @@ def _judge_proof(key: str, proof: str, root: Path) -> tuple[int, bool, list[str]
         try:
             # the VALIDATED path is the one grep reads, never the raw
             # board string; stdin is closed so no operand can read it
+            # -I: a binary file is never a source anchor (and grep would
+            # print "Binary file ... matches" instead of numbered lines)
             proc = subprocess.run(
-                ["grep", flag, "--", needle, str(target)],
+                ["grep", flag, "-I", "--", needle, str(target)],
                 cwd=root, capture_output=True, text=True, timeout=30,
                 stdin=subprocess.DEVNULL,
             )
@@ -523,7 +525,22 @@ def _judge_proof(key: str, proof: str, root: Path) -> tuple[int, bool, list[str]
                 f"{key}: {path}:{cited} grep error: {proc.stderr.strip()[:120]}"
             )
             continue
-        hits = [int(line.split(":", 1)[0]) for line in proc.stdout.splitlines()]
+        hits: list[int] = []
+        malformed = 0
+        for line in proc.stdout.splitlines():
+            prefix = line.split(":", 1)[0]
+            if prefix.isdigit():
+                hits.append(int(prefix))
+            else:
+                # any output that is not "<line>:<text>" (a binary notice,
+                # a locale message) is judged, never crashed on
+                malformed += 1
+        if malformed:
+            drift.append(
+                f"{key}: {path}:{cited} grep produced {malformed} unnumbered output "
+                "line(s) - not a source anchor"
+            )
+            continue
         if cited not in hits:
             drift.append(f"{key}: {path}:{cited} -> hits {hits}")
     return anchors, False, drift
