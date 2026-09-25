@@ -374,6 +374,306 @@ def _git_out(repo: Path, *args: str) -> str:
     return proc.stdout
 
 
+# ---- proof content check (epic-61 retro A2) ---------------------------------
+# Every CURRENT step's surface_proof must still land on its cited line on the
+# tree being finished or closed. The board gate's own proof-ref check compares
+# existence and line range only, and three consumer epics in a row shipped
+# boards whose anchors had drifted under sibling merges while that gate read
+# PASS. Content closes it: each `grep -nF "<needle>" <path> (... <path>:<line>)`
+# entry is re-run against the checkout and the cited line must be among the
+# hits. A proof with no grep entry (a range-only proof) is counted as
+# unparsed by the checker and FAILS the gate: a proof the check cannot read
+# must never read as verified. Every path is confined to the project root
+# and the cited path must be the grepped path; drift lines never carry the
+# needle text (the run log has no scrubber), only step, path, line and hits.
+# Entry and fragment boundaries share ONE delimiter shape (`;` with any
+# whitespace before `grep -n`): a boundary the counter sees but the parser
+# does not, or the reverse, is exactly how a hidden fragment slips through.
+_PROOF_DELIM = r";\s*grep\b"
+# The needle is a double-quoted shell word: a literal `"` inside it is
+# written `\"` and a literal backslash `\\` (exactly what a shell paste of
+# the proof needs), and `_unescape_needle` turns the written form back into
+# the bytes grep receives.
+_PROOF_ENTRY_RE = re.compile(
+    r'grep (-nF|-n) "((?:[^"\\]|\\.)*)" (\S+) \((.*?)\)(?=' + _PROOF_DELIM + r"|$)", re.S
+)
+_NEEDLE_ESCAPE_RE = re.compile(r"\\(.)", re.S)
+
+
+def _unescape_needle(written: str) -> str:
+    r"""Backslash-quote becomes a quote and a doubled backslash one
+    backslash; any other backslash sequence stays as written (grep -F takes
+    it literally, and the proof's author meant those characters)."""
+    return _NEEDLE_ESCAPE_RE.sub(
+        lambda m: m.group(1) if m.group(1) in ('"', "\\") else m.group(0), written
+    )
+_PROOF_CITED_RE = re.compile(r"(\S+):(\d+)")
+# the only text allowed BETWEEN parsed entries (and after the last one)
+_PROOF_GAP_RE = re.compile(r"^\s*(?:;\s*)?$")
+_WAIVED_STEP_RE = re.compile(r"-(PRE|OBS)-\d+$")
+
+
+@dataclass(frozen=True)
+class ProofCheck:
+    section_id: int
+    steps: int  # current, non-waived steps inspected
+    anchors: int  # grep entries that parsed and were re-run
+    unparsed: int  # inspected steps whose proof carried no grep entry
+    drift: tuple[str, ...]  # one line per anchor that no longer lands
+    unparsed_steps: tuple[str, ...] = ()  # the step keys behind `unparsed`
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "section_id": self.section_id,
+            "steps": self.steps,
+            "anchors": self.anchors,
+            "unparsed": self.unparsed,
+            "unparsed_steps": list(self.unparsed_steps),
+            "drift": list(self.drift),
+        }
+
+
+def _confined(root: Path, rel: str) -> Path | None:
+    """The proof's path resolved inside `root`, or None when it is absolute,
+    escapes the root (`..`, a symlink out), or is empty. The board authors
+    the path; the check must judge the project tree and nothing else."""
+    try:
+        if not rel or rel.startswith("/") or Path(rel).is_absolute():
+            return None
+        root_r = root.resolve()
+        target = (root_r / rel).resolve()
+        target.relative_to(root_r)
+    except (ValueError, OSError, RuntimeError):
+        # an embedded NUL, an over-long name, a resolution the OS refuses,
+        # a symlink loop (RuntimeError on older Pythons, ELOOP on newer):
+        # none of them is a path inside the tree
+        return None
+    return target
+
+
+def _judge_proof(key: str, proof: str, root: Path) -> tuple[int, bool, list[str]]:
+    """Judge ONE proof text against `root`: (anchors re-run, unparsed, drift
+    lines). `unparsed` is True when the text carries no parseable grep entry
+    at all. Drift lines carry the step key, path, cited line and hits -
+    never the needle text (the run log has no scrubber)."""
+    entries = list(_PROOF_ENTRY_RE.finditer(proof))
+    if not entries:
+        return 0, True, []
+    drift: list[str] = []
+    anchors = 0
+    # The parsed entries must COVER the proof: anything between two entries
+    # (or after the last) that is not a bare delimiter is a fragment the
+    # parser did not accept - an unsupported spelling, a malformed entry -
+    # and it must not pass unseen on the strength of its siblings. Judging
+    # the gaps (not counting `grep` in the raw text) keeps a `; grep` inside
+    # a quoted needle or a note from reading as a second command.
+    pos = 0
+    leftovers = 0
+    for m in entries:
+        if not _PROOF_GAP_RE.match(proof[pos:m.start()]):
+            leftovers += 1
+        pos = m.end()
+    if not _PROOF_GAP_RE.match(proof[pos:]):
+        leftovers += 1
+    if leftovers:
+        drift.append(
+            f"{key}: {leftovers} unparsed fragment(s) between or after the "
+            f"{len(entries)} grep entries - every entry must be "
+            '`grep -nF "<needle>" <path> (... <path>:<line>)`'
+        )
+    for m in entries:
+        flag, path, note = m.group(1), m.group(3), m.group(4)
+        needle = _unescape_needle(m.group(2))
+        cites = _PROOF_CITED_RE.findall(note)
+        if not cites:
+            drift.append(f"{key}: {path} entry cites no file:line")
+            continue
+        cited_path, cited = cites[-1][0], int(cites[-1][1])
+        anchors += 1
+        if cited_path.removeprefix("./") != path.removeprefix("./"):
+            drift.append(
+                f"{key}: entry greps {path} but cites {cited_path}:{cited} - "
+                "the cited anchor must be the grepped file"
+            )
+            continue
+        if not needle.strip():
+            # an empty fixed string matches every line: any cited line
+            # would pass whatever the file now says
+            drift.append(f"{key}: {path}:{cited} has an empty needle - not an anchor")
+            continue
+        target = _confined(root, path)
+        if target is None:
+            drift.append(
+                f"{key}: {path}:{cited} is outside the project root or cannot be "
+                "resolved - a proof must anchor inside the tree being judged"
+            )
+            continue
+        if not target.is_file():
+            # `-` (grep's stdin), a directory, or a missing file: none
+            # is the project tree the proof claims to anchor in
+            drift.append(f"{key}: {path}:{cited} is not a file inside the project root")
+            continue
+        try:
+            # the VALIDATED path is the one grep reads, never the raw
+            # board string; stdin is closed so no operand can read it
+            # -I: a binary file is never a source anchor (and grep would
+            # print "Binary file ... matches" instead of numbered lines)
+            proc = subprocess.run(
+                ["grep", flag, "-I", "--", needle, str(target)],
+                cwd=root, capture_output=True, text=True, timeout=30,
+                stdin=subprocess.DEVNULL,
+            )
+        except subprocess.TimeoutExpired:
+            # fixed metadata only: the exception text carries the whole
+            # command, needle included, and the run log has no scrubber
+            drift.append(f"{key}: {path}:{cited} grep timed out after 30 s")
+            continue
+        except (OSError, ValueError) as exc:
+            # OSError: grep missing / not executable; ValueError: an
+            # embedded NUL in an argument. The class name is enough.
+            drift.append(
+                f"{key}: {path}:{cited} grep could not run ({type(exc).__name__})"
+            )
+            continue
+        if proc.returncode not in (0, 1):
+            drift.append(
+                f"{key}: {path}:{cited} grep error: {proc.stderr.strip()[:120]}"
+            )
+            continue
+        hits: list[int] = []
+        malformed = 0
+        for line in proc.stdout.splitlines():
+            prefix = line.split(":", 1)[0]
+            if prefix.isdigit():
+                hits.append(int(prefix))
+            else:
+                # any output that is not "<line>:<text>" (a binary notice,
+                # a locale message) is judged, never crashed on
+                malformed += 1
+        if malformed:
+            drift.append(
+                f"{key}: {path}:{cited} grep produced {malformed} unnumbered output "
+                "line(s) - not a source anchor"
+            )
+            continue
+        if cited not in hits:
+            drift.append(f"{key}: {path}:{cited} -> hits {hits}")
+    return anchors, False, drift
+
+
+def verify_step_proofs(
+    cfg: QaBoardConfig, section_id: int, project_root: Path | str
+) -> ProofCheck:
+    """Re-run every current step's proof greps of one board section against
+    `project_root`. Retired steps and waived (-PRE-NN / -OBS-NN) steps are
+    skipped; everything else is judged. Returns the counts; the CALLER
+    decides that drift is fatal (both wired callers do)."""
+    root = Path(project_root)
+    rows = _http_json(f"{cfg.board_url}/sections/{section_id}/steps")
+    if not isinstance(rows, list):
+        raise QaBoardError(
+            f"board section {section_id} steps: expected a JSON list, got "
+            f"{type(rows).__name__} - a proof set that cannot be read must not "
+            "read as verified"
+        )
+    steps = anchors = 0
+    drift: list[str] = []
+    unparsed_steps: list[str] = []
+    for step in rows:
+        if not isinstance(step, dict):
+            # the section listing path fails closed on a malformed entry;
+            # a proof set with an unreadable row must not read as clean
+            raise QaBoardError(
+                f"board section {section_id} steps: a row is not a JSON object "
+                f"({type(step).__name__}) - refusing to judge a malformed proof set"
+            )
+        retired = step.get("retired", False)
+        if not isinstance(retired, bool):
+            # "false" (a string) is truthy: a malformed flag must not read
+            # as "retired, skip" and hide a live step's proof
+            raise QaBoardError(
+                f"board section {section_id} steps: step "
+                f"{step.get('step_key', '?')!r} carries a non-boolean retired "
+                f"flag ({retired!r}) - refusing to judge a malformed proof set"
+            )
+        if retired:
+            continue
+        raw_key = step.get("step_key")
+        if not isinstance(raw_key, str) or not raw_key.strip():
+            # a row with no identity cannot be tied to a real step; a proof
+            # that happens to land on it must not count as a verified step
+            raise QaBoardError(
+                f"board section {section_id} steps: a current step row carries no "
+                f"step_key ({raw_key!r}) - refusing to judge a malformed proof set"
+            )
+        key = raw_key.strip()
+        if _WAIVED_STEP_RE.search(key):
+            continue
+        steps += 1
+        proof = step.get("surface_proof")
+        if proof is None:
+            proof = ""
+        if not isinstance(proof, str):
+            # a list or object coerced to text could even parse: a corrupted
+            # row must fail closed, never read as a verified proof
+            raise QaBoardError(
+                f"board section {section_id} steps: step {key!r} carries a "
+                f"non-string surface_proof ({type(proof).__name__}) - refusing to "
+                "judge a malformed proof set"
+            )
+        row_anchors, unparsed, row_drift = _judge_proof(key, proof, root)
+        if unparsed:
+            unparsed_steps.append(key)
+        anchors += row_anchors
+        drift.extend(row_drift)
+    return ProofCheck(
+        section_id=section_id, steps=steps, anchors=anchors,
+        unparsed=len(unparsed_steps), drift=tuple(drift),
+        unparsed_steps=tuple(unparsed_steps),
+    )
+
+
+def _proof_gate(
+    cfg: QaBoardConfig,
+    section_id: int,
+    project_root: Path | str | None,
+    runlog: Any,
+    phase: str,
+    event_prefix: str,
+    story_key: str | None,
+    detail: dict[str, Any],
+) -> None:
+    """Run the content check as a gate: a logged skip when no project root is
+    known (never a silent one), a logged result otherwise, and a loud stop on
+    drift naming every anchor that no longer lands."""
+    if project_root is None:
+        runlog.event(
+            phase, f"{event_prefix}-skipped",
+            {**detail, "section_id": section_id,
+             "reason": "no project_root supplied - proof content not re-verified"},
+            story_key=story_key,
+        )
+        return
+    check = verify_step_proofs(cfg, section_id, project_root)
+    runlog.event(phase, event_prefix, {**detail, **check.as_dict()}, story_key=story_key)
+    if check.unparsed:
+        raise QaBoardError(
+            f"board section {section_id}: {check.unparsed} current step(s) carry a "
+            f"proof with no grep entry ({', '.join(check.unparsed_steps)}) - a "
+            "proof the check cannot re-run must never read as verified; author "
+            'the `grep -nF "<needle>" <path> (... <path>:<line>)` form'
+        )
+    if check.drift:
+        # every anchor, not a sample: the operator re-anchors from this text
+        # (the run-log event carries the same list as data)
+        raise QaBoardError(
+            f"board proof drift on section {section_id} ({len(check.drift)} "
+            f"finding(s) over {check.anchors} re-run anchor(s): a drifted line, an "
+            "unparsed fragment, an unresolvable path or an empty needle) - fix "
+            "through PATCH /steps/{id} before finishing:\n  " + "\n  ".join(check.drift)
+        )
+
+
 def close_epic(
     project_root: Path | str,
     cfg: QaBoardConfig,
@@ -388,7 +688,9 @@ def close_epic(
     1. PRECHECK - the artifact repo holding the authoring/coverage tree is
        fully committed AND fully pushed. The 47-4 shape (story artifacts
        still local when the lab gate regenerated the matrix) becomes
-       impossible instead of invisible.
+       impossible instead of invisible. Then the PROOF CONTENT check
+       (epic-61 retro A2): every current step's greps re-run against the
+       project tree, drift fails the close.
     2. THE GATE - `run_gate` (exit code only), which commits the
        regenerated matrix lab-side.
     3. COUNT - pull the artifact repo and validate the regenerated
@@ -436,6 +738,13 @@ def close_epic(
             "expected_stories": expected,
             "story_keys": [e.key for e in stories],
         },
+    )
+    # Proof content (epic-61 retro A2): every current step of the section
+    # must land on its cited line on the tree being closed, BEFORE the range
+    # gate runs - the range gate cannot see this class.
+    _proof_gate(
+        cfg, section_id_for_epic(cfg, epic_id), root, runlog, "close",
+        "close-proof-check", None, {"epic": epic_id},
     )
     # Write-ahead: intent BEFORE the action, and no outcome claim - the
     # count stage completing is what implies the gate passed.
@@ -528,6 +837,7 @@ def finish_story(
     surface_proof: str | None = None,
     metrics_facts: Any = None,
     metrics_path: Any = None,
+    project_root: Path | str | None = None,
 ) -> dict:
     """The full flow. Returns a JSON-able result; raises rather than
     guessing. Events are written BEFORE each action (run-log discipline).
@@ -535,7 +845,11 @@ def finish_story(
     For a surface verdict the caller must supply `step_label` and
     `surface_proof`: the walkthrough instruction is authored content the
     flow cannot invent, and arriving here without them means the merge
-    phase never wrote them - a loud stop, not a waiver."""
+    phase never wrote them - a loud stop, not a waiver.
+
+    With `project_root` the section's CURRENT steps have their proof greps
+    re-run against that tree before the new step is authored (epic-61 retro
+    A2); without it the skip is logged, never silent."""
     epic_id = epic_of(story_id)
     verdict = classify_changed_files(merged_files, rules)
     if not verdict.surface_touching:
@@ -567,6 +881,32 @@ def finish_story(
             "merge phase must author step_label + surface_proof for a "
             "surface story"
         )
+    # The section is resolved FIRST so the proof content gate (epic-61 retro
+    # A2) runs before any intent event: a drifted board stops the finish
+    # before it records that a step was about to be authored.
+    section_id = section_id_for_epic(cfg, epic_id)
+    _proof_gate(
+        cfg, section_id, project_root, runlog, "merge", "qa-board-proof-check",
+        story_id, {"story": story_id, "epic": epic_id},
+    )
+    if project_root is not None:
+        # The NEW step is held to the same rule before it is authored: a
+        # range-only or drifted proof posted now would make the next finish
+        # or close refuse the section - the flow must not invalidate itself.
+        _, unparsed, drift = _judge_proof(
+            f"{story_id} (new step)", surface_proof, Path(project_root)
+        )
+        if unparsed:
+            raise QaBoardError(
+                f"story {story_id}: the new step's surface_proof carries no "
+                'parseable grep entry - author the `grep -nF "<needle>" <path> '
+                "(... <path>:<line>)` form so the content check can re-run it"
+            )
+        if drift:
+            raise QaBoardError(
+                f"story {story_id}: the new step's surface_proof does not land on "
+                "the merged tree - fix it before it is authored:\n  " + "\n  ".join(drift)
+            )
     # run-log discipline: an INTENT event lands before each action (the
     # log's own contract) and a completion event after it, so a crash
     # between the two shows exactly what was being attempted - content
@@ -584,7 +924,6 @@ def finish_story(
         story_key=story_id,
     )
     step = author_step(cfg, epic_id, story_id, step_label, surface_proof)
-    section_id = section_id_for_epic(cfg, epic_id)
     runlog.event(
         "merge",
         "qa-board-post",

@@ -79,10 +79,20 @@ are refused (a broken lookup must not read as "no surface").
 
 After a story's PR merges and BEFORE its done-flip:
 
-- **Surface story**: author the walkthrough step (insert-only append to the
-  epic's authoring spec AND an idempotent POST to the live board, section
-  resolved by epic), then regenerate the coverage matrix and run the epic
-  gate in one shot - judged by EXIT CODE, never by parsing output.
+- **Surface story**: re-run every CURRENT step's proof greps of the epic's
+  section against the project tree (`project_root`; content, not line range -
+  the board gate checks existence and range only, and three consumer epics
+  shipped drifted boards under it), then author the walkthrough step
+  (insert-only append to the epic's authoring spec AND an idempotent POST to
+  the live board, section resolved by epic), then regenerate the coverage
+  matrix and run the epic gate in one shot - judged by EXIT CODE, never by
+  parsing output. Drift is a loud stop naming every anchor (step, path,
+  line and hits - never the needle text) before anything is authored; a
+  proof with no grep entry fails the same way, every path is confined to the
+  project root, and the cited path must be the grepped file. The needle is a
+  double-quoted shell word: a literal `"` inside it is written `\"` and a
+  literal backslash `\\`, so the proof pastes into a shell unchanged. A call
+  without `project_root` logs the skip, never silently.
 - **No-surface story**: write the waiver EVALUATION (verdict buckets and
   all) to the run log - "no step needed" is a recorded decision, not a
   silence.
@@ -104,7 +114,9 @@ Ordered and counted:
 
 1. Precheck: the artifact repo is clean AND pushed
    (`git rev-list @{u}..HEAD` empty) - story artifacts land before the
-   close.
+   close. Then the proof content check: every current step of the epic's
+   section re-grepped against the project tree; drift fails the close
+   (`close-proof-check` run event carries the counts).
 2. Write-ahead `close-gate` run event (no outcome claim), then the board
    gate runs and the matrix regenerates.
 3. The regenerated matrix's `Story files audited: N` (plain or

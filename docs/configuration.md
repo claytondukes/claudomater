@@ -41,6 +41,8 @@ Two files, two owners:
 | `usage.on_threshold` | Per-window behavior at threshold: `pause` \| `degrade`. |
 | `usage.degrade_scoped_at` | Scoped-quota (model-specific) degrade threshold; default 80. |
 | `usage.degrade_path` | Ordered model list a degrade steps down through. |
+| `usage.start_below` | Per-window (`five_hour`, `seven_day`, `scoped`) ceilings the run's FIRST spawn must sit below; defaults 80 / 95 / 80, 100 disables one. |
+| `usage.deny_accounts` | E-mail globs (case-insensitive) that pause every spawn - operator identities stay out of automation phases. |
 | `slack_webhook` | Enables notifications ([runs-and-guardrails.md](runs-and-guardrails.md#notifications)). |
 | `learning.db_path` | Local SQLite lesson index (never committed). Default `~/.omater/learning.db`. |
 | `learning.export_path` | Git-carried JSONL lesson export directory (source of truth). Default `~/.dotfiles/omater/lessons`. |

@@ -633,3 +633,38 @@ class TestCompletionExemptConfig:
                         f'project: p\ncompletion:\n  exempt: ["{bad}"]\n',
                     )
                 )
+
+
+class TestStartHeadroomAndDenyAccountsConfig:
+    """Epic-61 retro A10 keys: usage.start_below and usage.deny_accounts."""
+
+    def test_defaults(self, tmp_path):
+        cfg = load_user_config(tmp_path / "nope.yaml")
+        assert cfg.usage.start_below == {"five_hour": 80, "seven_day": 95, "scoped": 80}
+        assert cfg.usage.deny_accounts == []
+
+    def test_partial_start_below_merges_over_the_defaults(self, tmp_path):
+        path = tmp_path / "config.yaml"
+        path.write_text(
+            "usage:\n  start_below: { five_hour: 70 }\n  deny_accounts: [ ' cdukes@* ', 'tom@*' ]\n",
+            encoding="utf-8",
+        )
+        cfg = load_user_config(path)
+        assert cfg.usage.start_below == {"five_hour": 70, "seven_day": 95, "scoped": 80}
+        assert cfg.usage.deny_accounts == ["cdukes@*", "tom@*"]
+
+    @pytest.mark.parametrize(
+        "text, message",
+        [
+            ("usage:\n  start_below: { weekly: 50 }\n", "unknown window 'weekly'"),
+            ("usage:\n  start_below: { five_hour: 120 }\n", "must be an int 0-100"),
+            ("usage:\n  start_below: { five_hour: true }\n", "must be an int 0-100"),
+            ("usage:\n  deny_accounts: 'cdukes@*'\n", "list of non-blank strings"),
+            ("usage:\n  deny_accounts: [ '' ]\n", "list of non-blank strings"),
+        ],
+    )
+    def test_garbage_fails_at_load(self, tmp_path, text, message):
+        path = tmp_path / "config.yaml"
+        path.write_text(text, encoding="utf-8")
+        with pytest.raises(ConfigError, match=message):
+            load_user_config(path)

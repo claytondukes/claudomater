@@ -18,6 +18,7 @@ from pathlib import Path
 import pytest
 
 from claudomater.qaboard import (
+    ProofCheck,
     QaBoardConfig,
     QaBoardError,
     author_step,
@@ -29,6 +30,7 @@ from claudomater.qaboard import (
     run_gate,
     section_id_for_epic,
     spec_path,
+    verify_step_proofs,
 )
 from claudomater.surface import SurfaceRules
 
@@ -47,6 +49,7 @@ requires_parity = pytest.mark.skipif(
 
 class _StubBoard(BaseHTTPRequestHandler):
     sections: list[dict] = []
+    steps: dict[int, list[dict]] = {}  # section id -> current steps (GET)
     posted: list[tuple[str, dict]] = []
     fail_next_post = False
     post_body_override: str | None = None
@@ -57,6 +60,13 @@ class _StubBoard(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == "/api/sections":
             body = json.dumps(self.sections).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(body)
+        elif self.path.startswith("/api/sections/") and self.path.endswith("/steps"):
+            section_id = int(self.path.split("/")[3])
+            body = json.dumps(self.steps.get(section_id, [])).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.end_headers()
@@ -91,7 +101,9 @@ def board():
     _StubBoard.sections = [
         {"id": 7, "epic_id": "34"},
         {"id": 9, "epic_id": "4-5"},
+        {"id": 11, "epic_id": "9"},
     ]
+    _StubBoard.steps = {}
     _StubBoard.posted = []
     _StubBoard.fail_next_post = False
     server = HTTPServer(("127.0.0.1", 0), _StubBoard)
@@ -296,13 +308,15 @@ class TestFinishFlow:
         # write-ahead contract): a crash between any pair shows exactly
         # what was in flight
         assert [e[1] for e in log.events] == [
+            "qa-board-proof-check-skipped",
             "qa-board-step",
             "qa-board-post",
             "qa-board-posted",
             "qa-board-gate",
             "qa-board-gate-pass",
         ]
-        assert log.events[0][2]["step_label"].startswith("34-36 ")
+        # events[0] is the logged proof-check skip (no project_root here)
+        assert log.events[1][2]["step_label"].startswith("34-36 ")
 
     def test_a_surface_story_without_step_content_is_a_loud_stop(self, cfg):
         with pytest.raises(QaBoardError, match="no walkthrough step content"):
@@ -550,7 +564,8 @@ class TestCloseEpic:
         "  epic-9-retrospective: fable-review-required\n"
     )
 
-    def _arrange(self, tmp_path, audited=2, dirty=False, unpushed=False):
+    def _arrange(self, tmp_path, audited=2, dirty=False, unpushed=False,
+                 board_url="http://board.invalid/api"):
         import subprocess as sp
 
         env = {**os.environ, "GIT_CONFIG_GLOBAL": os.devnull,
@@ -597,19 +612,21 @@ class TestCloseEpic:
         gate.chmod(0o755)
         cfg = QaBoardConfig(
             authoring_dir=artifacts / "qa-viewer" / "authoring",
-            board_url="http://board.invalid/api",
+            board_url=board_url,
             gate_dir=tmp_path,
             gate=("./gate.sh", "{epic}"),
         )
         return cfg, sprint
 
-    def test_happy_path_logs_the_matching_count(self, tmp_path):
-        cfg, sprint = self._arrange(tmp_path, audited=2)
+    def test_happy_path_logs_the_matching_count(self, tmp_path, board):
+        cfg, sprint = self._arrange(tmp_path, audited=2, board_url=board)
         log = _Log()
         result = close_epic(tmp_path, cfg, "9", sprint, log)
         assert result == {"epic": "9", "gate": "PASS", "audited": 2, "expected": 2}
         kinds = [e[1] for e in log.events]
-        assert kinds == ["close-gate-precheck", "close-gate", "close-gate-count"]
+        assert kinds == [
+            "close-gate-precheck", "close-proof-check", "close-gate", "close-gate-count",
+        ]
         count_detail = log.events[-1][2]
         assert (count_detail["audited"], count_detail["expected"]) == (2, 2)
         pre = log.events[0][2]
@@ -629,21 +646,37 @@ class TestCloseEpic:
         with pytest.raises(QaBoardError, match="uncommitted"):
             close_epic(tmp_path, cfg, "9", sprint, _Log())
 
-    def test_a_count_mismatch_fails_loudly_not_a_warning(self, tmp_path):
-        cfg, sprint = self._arrange(tmp_path, audited=1)
+    def test_a_count_mismatch_fails_loudly_not_a_warning(self, tmp_path, board):
+        cfg, sprint = self._arrange(tmp_path, audited=1, board_url=board)
         log = _Log()
         with pytest.raises(QaBoardError, match="audited 1 story file"):
             close_epic(tmp_path, cfg, "9", sprint, log)
         count_detail = log.events[-1][2]
         assert count_detail["ok"] is False
 
-    def test_superseded_stories_do_not_count(self, tmp_path):
+    def test_superseded_stories_do_not_count(self, tmp_path, board):
         """9-3 is superseded: expected is 2, so a matrix auditing 2 passes
         and one auditing 3 would fail - superseded stories own no
         artifacts and no audit row."""
-        cfg, sprint = self._arrange(tmp_path, audited=3)
+        cfg, sprint = self._arrange(tmp_path, audited=3, board_url=board)
         with pytest.raises(QaBoardError, match="audited 3"):
             close_epic(tmp_path, cfg, "9", sprint, _Log())
+
+    def test_a_drifted_board_stops_the_close_before_the_gate(self, tmp_path, board):
+        """Epic-61 retro A2: the range-only gate passed three drifted boards;
+        the close now re-greps every current step first and stops loudly."""
+        cfg, sprint = self._arrange(tmp_path, audited=2, board_url=board)
+        (tmp_path / "app").mkdir()
+        (tmp_path / "app" / "main.py").write_text("x = 1\ny = 2\n", encoding="utf-8")
+        _StubBoard.steps[11] = [
+            {"step_key": "9-1-01", "retired": False,
+             "surface_proof": 'grep -nF "y = 2" app/main.py (moved by a sibling, app/main.py:1)'},
+        ]
+        log = _Log()
+        with pytest.raises(QaBoardError, match="board proof drift on section 11"):
+            close_epic(tmp_path, cfg, "9", sprint, log)
+        names = [e[1] for e in log.events]
+        assert "close-proof-check" in names and "close-gate" not in names
 
     def test_the_regex_reads_the_real_gen_coverage_header(self):
         """The epic-48 live run: gen_coverage.py writes markdown bold, and
@@ -663,8 +696,8 @@ class TestCloseEpic:
         plain = _AUDITED_RE.search("Story files audited: 4")
         assert plain and plain.group(1) == "4"
 
-    def test_a_matrix_without_the_count_line_fails(self, tmp_path):
-        cfg, sprint = self._arrange(tmp_path, audited=2)
+    def test_a_matrix_without_the_count_line_fails(self, tmp_path, board):
+        cfg, sprint = self._arrange(tmp_path, audited=2, board_url=board)
         gate = tmp_path / "gate.sh"
         gate.write_text(
             "#!/bin/sh\nset -e\n"
@@ -757,3 +790,471 @@ class TestFinishStoryPersistsMetrics:
         assert intents, "write-ahead intent event missing after failed append"
         assert intents[0][2]["row"]["story_id"] == "9-1"
         assert "written" not in intents[0][2]
+
+
+class TestProofContentCheck:
+    """Epic-61 retro A2: the range-only gate read PASS over drifted boards in
+    three consecutive consumer epics; the finish and the close now re-run
+    every current step's proof greps against the project tree."""
+
+    @staticmethod
+    def _tree(tmp_path):
+        root = tmp_path / "project"
+        (root / "app" / "src").mkdir(parents=True)
+        (root / "app" / "src" / "Widget.tsx").write_text(
+            "line one\nexport function Widget() {\n  return null;\n}\n",
+            encoding="utf-8",
+        )
+        return root
+
+    @staticmethod
+    def _proof(*entries):
+        return "; ".join(
+            f'grep -nF "{needle}" {path} ({note}, {path}:{line})'
+            for needle, path, note, line in entries
+        )
+
+    def test_every_anchor_lands_on_its_cited_line(self, cfg, tmp_path):
+        root = self._tree(tmp_path)
+        _StubBoard.steps[7] = [
+            {"step_key": "34-1-01", "retired": False, "surface_proof": self._proof(
+                ("export function Widget() {", "app/src/Widget.tsx", "the component", 2),
+                ("return null;", "app/src/Widget.tsx", "the render", 3),
+            )},
+        ]
+        check = verify_step_proofs(cfg, 7, root)
+        assert check == ProofCheck(section_id=7, steps=1, anchors=2, unparsed=0, drift=())
+
+    def test_a_drifted_anchor_names_the_step_the_line_and_the_hits(self, cfg, tmp_path):
+        root = self._tree(tmp_path)
+        _StubBoard.steps[7] = [
+            {"step_key": "34-1-01", "retired": False, "surface_proof": self._proof(
+                ("return null;", "app/src/Widget.tsx", "cited one line too early", 2),
+            )},
+        ]
+        check = verify_step_proofs(cfg, 7, root)
+        assert check.anchors == 1 and len(check.drift) == 1
+        assert check.drift[0].startswith("34-1-01: app/src/Widget.tsx:2 -> hits [3]")
+
+    def test_a_needle_that_hits_nothing_is_drift(self, cfg, tmp_path):
+        root = self._tree(tmp_path)
+        _StubBoard.steps[7] = [
+            {"step_key": "34-1-01", "retired": False, "surface_proof": self._proof(
+                ("text a sibling merge rewrote", "app/src/Widget.tsx", "gone", 2),
+            )},
+        ]
+        line = verify_step_proofs(cfg, 7, root).drift[0]
+        assert line == "34-1-01: app/src/Widget.tsx:2 -> hits []"
+        assert "rewrote" not in line  # never the needle text: the run log has no scrubber
+
+    def test_retired_and_waived_steps_are_skipped_and_range_only_proofs_are_counted(
+        self, cfg, tmp_path
+    ):
+        root = self._tree(tmp_path)
+        _StubBoard.steps[7] = [
+            {"step_key": "34-1-01", "retired": True, "surface_proof": self._proof(
+                ("nowhere", "app/src/Widget.tsx", "retired, never judged", 9),
+            )},
+            {"step_key": "34-PRE-01", "retired": False, "surface_proof": ""},
+            {"step_key": "34-2-01", "retired": False,
+             "surface_proof": "app/src/Widget.tsx:2 the component (range-only proof)"},
+        ]
+        check = verify_step_proofs(cfg, 7, root)
+        assert (check.steps, check.anchors, check.unparsed, check.drift) == (1, 0, 1, ())
+        assert check.unparsed_steps == ("34-2-01",)
+
+    def test_a_range_only_proof_fails_the_gate_not_just_the_count(self, cfg, tmp_path):
+        root = self._tree(tmp_path)
+        _StubBoard.steps[7] = [
+            {"step_key": "34-2-01", "retired": False,
+             "surface_proof": "app/src/Widget.tsx:2 the component (range-only proof)"},
+        ]
+        with pytest.raises(QaBoardError, match="no grep entry \\(34-2-01\\)"):
+            finish_story(
+                "34-36", ["app/src/Widget.tsx"], RULES, cfg, _Log(),
+                step_label="34-36 walkthrough", surface_proof="app/src/Widget.tsx:3",
+                project_root=root,
+            )
+        assert _StubBoard.posted == []
+
+    def test_a_malformed_trailing_fragment_is_drift_not_ignored(self, cfg, tmp_path):
+        root = self._tree(tmp_path)
+        _StubBoard.steps[7] = [
+            {"step_key": "34-1-01", "retired": False, "surface_proof": self._proof(
+                ("return null;", "app/src/Widget.tsx", "the render", 3),
+            ) + '; grep -nF "unparseable" app/src/Widget.tsx'},
+        ]
+        check = verify_step_proofs(cfg, 7, root)
+        assert check.anchors == 1
+        assert check.drift == (
+            "34-1-01: 1 unparsed fragment(s) between or after the 1 grep entries - "
+            'every entry must be `grep -nF "<needle>" <path> (... <path>:<line>)`',
+        )
+
+    @pytest.mark.parametrize("value", ["false", 0, 1, None, "yes"])
+    def test_a_non_boolean_retired_flag_is_a_loud_stop(self, cfg, tmp_path, value):
+        _StubBoard.steps[7] = [
+            {"step_key": "34-1-01", "retired": value,
+             "surface_proof": self._proof(("return null;", "app/src/Widget.tsx", "the render", 3))},
+        ]
+        with pytest.raises(QaBoardError, match="non-boolean retired flag"):
+            verify_step_proofs(cfg, 7, self._tree(tmp_path))
+
+    @pytest.mark.parametrize("sep", [";grep", ";  grep", "; grep"])
+    def test_every_delimiter_spelling_is_seen_by_parser_and_counter_alike(self, cfg, tmp_path, sep):
+        root = self._tree(tmp_path)
+        _StubBoard.steps[7] = [
+            {"step_key": "34-1-01", "retired": False, "surface_proof": self._proof(
+                ("return null;", "app/src/Widget.tsx", "the render", 3),
+            ) + f'{sep} -nF "unparseable" app/src/Widget.tsx'},
+        ]
+        check = verify_step_proofs(cfg, 7, root)
+        assert check.anchors == 1 and len(check.drift) == 1
+        assert check.drift[0].startswith("34-1-01: 1 unparsed fragment(s) between or after the 1 grep entries")
+
+    def test_two_valid_entries_joined_without_a_space_both_run(self, cfg, tmp_path):
+        root = self._tree(tmp_path)
+        _StubBoard.steps[7] = [
+            {"step_key": "34-1-01", "retired": False, "surface_proof":
+             'grep -nF "line one" app/src/Widget.tsx (first, app/src/Widget.tsx:1);grep -nF "return null;" app/src/Widget.tsx (second, app/src/Widget.tsx:2)'},
+        ]
+        check = verify_step_proofs(cfg, 7, root)
+        assert check.anchors == 2
+        assert check.drift == ("34-1-01: app/src/Widget.tsx:2 -> hits [3]",)
+
+    @pytest.mark.parametrize("key", [None, "", "   ", 7])
+    def test_a_row_without_a_step_key_is_a_loud_stop(self, cfg, tmp_path, key):
+        row = {"retired": False, "surface_proof": self._proof(("return null;", "app/src/Widget.tsx", "the render", 3))}
+        if key is not None:
+            row["step_key"] = key
+        _StubBoard.steps[7] = [row]
+        with pytest.raises(QaBoardError, match="carries no step_key"):
+            verify_step_proofs(cfg, 7, self._tree(tmp_path))
+
+    @pytest.mark.parametrize("needle", ["", "   "])
+    def test_an_empty_needle_is_drift_not_a_match_all(self, cfg, tmp_path, needle):
+        root = self._tree(tmp_path)
+        _StubBoard.steps[7] = [
+            {"step_key": "34-1-01", "retired": False,
+             "surface_proof": f'grep -nF "{needle}" app/src/Widget.tsx (would match every line, app/src/Widget.tsx:2)'},
+        ]
+        check = verify_step_proofs(cfg, 7, root)
+        assert check.drift == ("34-1-01: app/src/Widget.tsx:2 has an empty needle - not an anchor",)
+
+    @pytest.mark.parametrize("path", ["-", "app/src", "app/src/Missing.tsx"])
+    def test_stdin_directories_and_missing_files_are_not_anchors(self, cfg, tmp_path, path):
+        root = self._tree(tmp_path)
+        _StubBoard.steps[7] = [
+            {"step_key": "34-1-01", "retired": False,
+             "surface_proof": f'grep -nF "line one" {path} (not a project file, {path}:1)'},
+        ]
+        check = verify_step_proofs(cfg, 7, root)
+        assert check.drift == (f"34-1-01: {path}:1 is not a file inside the project root",)
+
+    def test_a_timed_out_grep_never_puts_the_needle_in_the_drift_line(self, cfg, tmp_path, monkeypatch):
+        import subprocess as sp
+
+        from claudomater import qaboard as qb
+
+        root = self._tree(tmp_path)
+        secret = "hunter2-token-value"
+        _StubBoard.steps[7] = [
+            {"step_key": "34-1-01", "retired": False, "surface_proof": self._proof(
+                (secret, "app/src/Widget.tsx", "a needle that must never be logged", 2),
+            )},
+        ]
+
+        def slow(argv, **kwargs):
+            raise sp.TimeoutExpired(cmd=argv, timeout=30)
+
+        monkeypatch.setattr(qb.subprocess, "run", slow)
+        check = verify_step_proofs(cfg, 7, root)
+        assert check.drift == ("34-1-01: app/src/Widget.tsx:2 grep timed out after 30 s",)
+        assert secret not in json.dumps(check.as_dict())
+
+    def test_a_nul_byte_in_a_needle_is_drift_with_the_class_name_only(self, cfg, tmp_path):
+        root = self._tree(tmp_path)
+        _StubBoard.steps[7] = [
+            {"step_key": "34-1-01", "retired": False, "surface_proof": self._proof(
+                ("secret\x00value", "app/src/Widget.tsx", "an argument grep cannot take", 2),
+            )},
+        ]
+        check = verify_step_proofs(cfg, 7, root)
+        assert check.drift == ("34-1-01: app/src/Widget.tsx:2 grep could not run (ValueError)",)
+
+    def test_an_unsupported_grep_spelling_is_a_counted_fragment(self, cfg, tmp_path):
+        root = self._tree(tmp_path)
+        _StubBoard.steps[7] = [
+            {"step_key": "34-1-01", "retired": False, "surface_proof": self._proof(
+                ("return null;", "app/src/Widget.tsx", "the render", 3),
+            ) + '; grep -F "return null;" app/src/Widget.tsx (no -n, app/src/Widget.tsx:3)'},
+        ]
+        check = verify_step_proofs(cfg, 7, root)
+        assert check.anchors == 1
+        assert check.drift[0].startswith("34-1-01: 1 unparsed fragment(s) between or after the 1 grep entries")
+
+    def test_a_path_the_os_cannot_resolve_is_drift(self, cfg, tmp_path):
+        root = self._tree(tmp_path)
+        _StubBoard.steps[7] = [
+            {"step_key": "34-1-01", "retired": False,
+             "surface_proof": 'grep -nF "line one" app/src/Wid\u0000get.tsx (a NUL in the path, app/src/Wid\u0000get.tsx:1)'},
+        ]
+        check = verify_step_proofs(cfg, 7, root)
+        assert len(check.drift) == 1 and "cannot be resolved" in check.drift[0]
+
+    def test_the_new_steps_proof_must_be_the_grep_form_when_a_root_is_given(self, cfg, tmp_path):
+        root = self._tree(tmp_path)
+        _StubBoard.steps[7] = []
+        with pytest.raises(QaBoardError, match="carries no parseable grep entry"):
+            finish_story(
+                "34-36", ["app/src/Widget.tsx"], RULES, cfg, _Log(),
+                step_label="34-36 walkthrough", surface_proof="app/src/Widget.tsx:3",
+                project_root=root,
+            )
+        assert _StubBoard.posted == []
+        assert not (cfg.authoring_dir / "epic-34-steps.json").exists()
+
+    def test_the_new_steps_proof_must_land_when_a_root_is_given(self, cfg, tmp_path):
+        root = self._tree(tmp_path)
+        _StubBoard.steps[7] = []
+        with pytest.raises(QaBoardError, match="does not land on the merged tree"):
+            finish_story(
+                "34-36", ["app/src/Widget.tsx"], RULES, cfg, _Log(),
+                step_label="34-36 walkthrough",
+                surface_proof=self._proof(("return null;", "app/src/Widget.tsx", "cited too early", 2)),
+                project_root=root,
+            )
+        assert _StubBoard.posted == []
+
+    def test_the_error_names_every_drifted_anchor_not_a_sample(self, cfg, tmp_path):
+        root = self._tree(tmp_path)
+        entries = [("return null;", "app/src/Widget.tsx", f"anchor {i}", 1) for i in range(25)]
+        _StubBoard.steps[7] = [{"step_key": "34-1-01", "retired": False, "surface_proof": self._proof(*entries)}]
+        with pytest.raises(QaBoardError) as exc:
+            finish_story(
+                "34-36", ["app/src/Widget.tsx"], RULES, cfg, _Log(),
+                step_label="34-36 walkthrough",
+                surface_proof=self._proof(("return null;", "app/src/Widget.tsx", "the render", 3)),
+                project_root=root,
+            )
+        assert str(exc.value).count("34-1-01: app/src/Widget.tsx:1 -> hits [3]") == 25
+        assert "more)" not in str(exc.value)
+
+    def test_a_symlink_loop_in_the_path_is_drift_never_a_raw_exception(self, cfg, tmp_path):
+        root = self._tree(tmp_path)
+        (root / "app" / "loop").symlink_to(root / "app" / "loop")
+        _StubBoard.steps[7] = [
+            {"step_key": "34-1-01", "retired": False,
+             "surface_proof": 'grep -nF "line one" app/loop/x.tsx (through a symlink loop, app/loop/x.tsx:1)'},
+        ]
+        check = verify_step_proofs(cfg, 7, root)
+        # newer Pythons resolve a loop without raising and the target is then
+        # not a file; older ones raise and the path cannot be resolved -
+        # fail-closed drift either way, never a raw exception
+        assert len(check.drift) == 1
+        assert ("cannot be resolved" in check.drift[0]) or ("is not a file" in check.drift[0])
+
+    def test_a_resolution_runtime_error_is_drift(self, cfg, tmp_path, monkeypatch):
+        from claudomater import qaboard as qb
+
+        root = self._tree(tmp_path)
+        _StubBoard.steps[7] = [
+            {"step_key": "34-1-01", "retired": False, "surface_proof": self._proof(
+                ("line one", "app/src/Widget.tsx", "resolution explodes", 1),
+            )},
+        ]
+
+        def boom(self, *a, **k):
+            raise RuntimeError("Symlink loop from 'x'")
+
+        monkeypatch.setattr(qb.Path, "resolve", boom)
+        check = verify_step_proofs(cfg, 7, root)
+        assert len(check.drift) == 1 and "cannot be resolved" in check.drift[0]
+
+    def test_a_delimiter_inside_a_quoted_needle_is_not_a_second_command(self, cfg, tmp_path):
+        root = self._tree(tmp_path)
+        (root / "app" / "src" / "Widget.tsx").write_text("const x = 'a; grep b';\n", encoding="utf-8")
+        _StubBoard.steps[7] = [
+            {"step_key": "34-1-01", "retired": False,
+             "surface_proof": 'grep -nF "a; grep b" app/src/Widget.tsx (a needle carrying the delimiter; note also says grep -n, app/src/Widget.tsx:1)'},
+        ]
+        check = verify_step_proofs(cfg, 7, root)
+        assert (check.anchors, check.drift) == (1, ())
+
+    @pytest.mark.parametrize("value", [["grep -nF", "x"], {"grep": 1}, 7])
+    def test_a_non_string_surface_proof_is_a_loud_stop(self, cfg, tmp_path, value):
+        _StubBoard.steps[7] = [{"step_key": "34-1-01", "retired": False, "surface_proof": value}]
+        with pytest.raises(QaBoardError, match="non-string surface_proof"):
+            verify_step_proofs(cfg, 7, self._tree(tmp_path))
+
+    def test_the_error_header_counts_findings_not_anchor_misses(self, cfg, tmp_path):
+        root = self._tree(tmp_path)
+        _StubBoard.steps[7] = [
+            {"step_key": "34-1-01", "retired": False, "surface_proof": self._proof(
+                ("return null;", "app/src/Widget.tsx", "the render", 3),
+            ) + '; grep -F "return null;" app/src/Widget.tsx (no -n, app/src/Widget.tsx:3)'},
+        ]
+        with pytest.raises(QaBoardError, match=r"1 finding\(s\) over 1 re-run anchor\(s\)") as exc:
+            finish_story(
+                "34-36", ["app/src/Widget.tsx"], RULES, cfg, _Log(),
+                step_label="34-36 walkthrough",
+                surface_proof=self._proof(("return null;", "app/src/Widget.tsx", "the render", 3)),
+                project_root=root,
+            )
+        assert "no longer land" not in str(exc.value)
+
+    def test_a_binary_file_match_is_drift_never_a_value_error(self, cfg, tmp_path):
+        root = self._tree(tmp_path)
+        (root / "app" / "src" / "blob.bin").write_bytes(b"\x00\x01return null;\x00\xff\n")
+        _StubBoard.steps[7] = [
+            {"step_key": "34-1-01", "retired": False,
+             "surface_proof": 'grep -nF "return null;" app/src/blob.bin (a binary file, app/src/blob.bin:1)'},
+        ]
+        check = verify_step_proofs(cfg, 7, root)
+        assert check.anchors == 1 and len(check.drift) == 1
+        assert check.drift[0] == "34-1-01: app/src/blob.bin:1 -> hits []"
+
+    def test_unnumbered_grep_output_is_drift(self, cfg, tmp_path, monkeypatch):
+        import subprocess as sp
+
+        from claudomater import qaboard as qb
+
+        root = self._tree(tmp_path)
+        _StubBoard.steps[7] = [
+            {"step_key": "34-1-01", "retired": False, "surface_proof": self._proof(
+                ("return null;", "app/src/Widget.tsx", "the render", 3),
+            )},
+        ]
+
+        def odd(argv, **kwargs):
+            return sp.CompletedProcess(argv, 0, stdout="Binary file app/src/Widget.tsx matches\n", stderr="")
+
+        monkeypatch.setattr(qb.subprocess, "run", odd)
+        check = verify_step_proofs(cfg, 7, root)
+        assert check.drift == (
+            "34-1-01: app/src/Widget.tsx:3 grep produced 1 unnumbered output line(s) - not a source anchor",
+        )
+
+    def test_a_needle_with_an_escaped_double_quote_lands(self, cfg, tmp_path):
+        root = self._tree(tmp_path)
+        (root / "app" / "src" / "Widget.tsx").write_text(
+            'const label = "Save";\n<div role="group" aria-label="Hours">\n', encoding="utf-8"
+        )
+        _StubBoard.steps[7] = [
+            {"step_key": "34-1-01", "retired": False, "surface_proof":
+             'grep -nF "const label = \\"Save\\";" app/src/Widget.tsx (the label, app/src/Widget.tsx:1); '
+             'grep -nF "role=\\"group\\" aria-label=\\"Hours\\"" app/src/Widget.tsx (the group, app/src/Widget.tsx:2)'},
+        ]
+        check = verify_step_proofs(cfg, 7, root)
+        assert (check.anchors, check.unparsed, check.drift) == (2, 0, ())
+
+    def test_an_escaped_backslash_in_a_needle_is_one_backslash(self, cfg, tmp_path):
+        root = self._tree(tmp_path)
+        (root / "app" / "src" / "Widget.tsx").write_text("const re = /a\\\\b/;\n", encoding="utf-8")
+        _StubBoard.steps[7] = [
+            {"step_key": "34-1-01", "retired": False,
+             "surface_proof": 'grep -nF "/a\\\\\\\\b/" app/src/Widget.tsx (two backslashes in the source, app/src/Widget.tsx:1)'},
+        ]
+        check = verify_step_proofs(cfg, 7, root)
+        assert (check.anchors, check.drift) == (1, ())
+
+    def test_an_unterminated_needle_is_unparsed(self, cfg, tmp_path):
+        root = self._tree(tmp_path)
+        _StubBoard.steps[7] = [
+            {"step_key": "34-1-01", "retired": False,
+             "surface_proof": 'grep -nF "return null; app/src/Widget.tsx (no closing quote, app/src/Widget.tsx:3)'},
+        ]
+        check = verify_step_proofs(cfg, 7, root)
+        assert check.unparsed_steps == ("34-1-01",)
+
+    def test_a_non_object_row_is_a_loud_stop(self, cfg, tmp_path):
+        _StubBoard.steps[7] = [["not", "a", "step"]]
+        with pytest.raises(QaBoardError, match="a row is not a JSON object"):
+            verify_step_proofs(cfg, 7, self._tree(tmp_path))
+
+    def test_the_cited_path_must_be_the_grepped_path(self, cfg, tmp_path):
+        root = self._tree(tmp_path)
+        (root / "app" / "src" / "Other.tsx").write_text("export function Widget() {\n")
+        _StubBoard.steps[7] = [
+            {"step_key": "34-1-01", "retired": False,
+             "surface_proof": 'grep -nF "export function Widget() {" app/src/Other.tsx (claims the widget, app/src/Widget.tsx:2)'},
+        ]
+        check = verify_step_proofs(cfg, 7, root)
+        assert check.drift == (
+            "34-1-01: entry greps app/src/Other.tsx but cites app/src/Widget.tsx:2 - "
+            "the cited anchor must be the grepped file",
+        )
+
+    @pytest.mark.parametrize("path", ["/etc/hosts", "../outside.txt", "app/../../outside.txt"])
+    def test_a_path_outside_the_project_root_is_drift_never_read(self, cfg, tmp_path, path):
+        root = self._tree(tmp_path)
+        (tmp_path / "outside.txt").write_text("secret needle\n", encoding="utf-8")
+        _StubBoard.steps[7] = [
+            {"step_key": "34-1-01", "retired": False,
+             "surface_proof": f'grep -nF "secret needle" {path} (escapes the tree, {path}:1)'},
+        ]
+        check = verify_step_proofs(cfg, 7, root)
+        assert len(check.drift) == 1 and "outside the project root" in check.drift[0]
+
+    def test_a_regex_proof_keeps_its_flag(self, cfg, tmp_path):
+        root = self._tree(tmp_path)
+        _StubBoard.steps[7] = [
+            {"step_key": "34-1-01", "retired": False,
+             "surface_proof": 'grep -n "export function W.*t()" app/src/Widget.tsx (regex needle, app/src/Widget.tsx:2)'},
+        ]
+        assert verify_step_proofs(cfg, 7, root).drift == ()
+
+    def test_a_non_list_steps_body_is_a_loud_stop(self, cfg, tmp_path):
+        _StubBoard.steps[7] = {"steps": []}  # type: ignore[assignment]
+        with pytest.raises(QaBoardError, match="expected a JSON list"):
+            verify_step_proofs(cfg, 7, self._tree(tmp_path))
+
+    def test_the_finish_stops_on_a_siblings_drift_before_authoring(self, cfg, tmp_path):
+        root = self._tree(tmp_path)
+        _StubBoard.steps[7] = [
+            {"step_key": "34-1-01", "retired": False, "surface_proof": self._proof(
+                ("return null;", "app/src/Widget.tsx", "drifted by a sibling", 2),
+            )},
+        ]
+        log = _Log()
+        with pytest.raises(QaBoardError, match="board proof drift on section 7"):
+            finish_story(
+                "34-36", ["app/src/Widget.tsx"], RULES, cfg, log,
+                step_label="34-36 walkthrough", surface_proof="app/src/Widget.tsx:3",
+                project_root=root,
+            )
+        assert _StubBoard.posted == []  # nothing authored, nothing posted
+        assert not (cfg.authoring_dir / "epic-34-steps.json").exists()
+        checks = [e for e in log.events if e[1] == "qa-board-proof-check"]
+        assert len(checks) == 1 and checks[0][2]["drift"] == [
+            "34-1-01: app/src/Widget.tsx:2 -> hits [3]"
+        ]
+
+    def test_the_finish_records_a_clean_check_and_proceeds(self, cfg, tmp_path):
+        root = self._tree(tmp_path)
+        _StubBoard.steps[7] = [
+            {"step_key": "34-1-01", "retired": False, "surface_proof": self._proof(
+                ("return null;", "app/src/Widget.tsx", "the render", 3),
+            )},
+        ]
+        log = _Log()
+        result = finish_story(
+            "34-36", ["app/src/Widget.tsx"], RULES, cfg, log,
+            step_label="34-36 walkthrough",
+            surface_proof=self._proof(("return null;", "app/src/Widget.tsx", "the render", 3)),
+            project_root=root,
+        )
+        assert result["ok"] and result["step_key"] == "34-36-01"
+        names = [e[1] for e in log.events]
+        assert names.index("qa-board-proof-check") < names.index("qa-board-step")
+        check = next(e[2] for e in log.events if e[1] == "qa-board-proof-check")
+        assert (check["anchors"], check["drift"]) == (1, [])
+
+    def test_no_project_root_logs_the_skip_never_silently(self, cfg):
+        log = _Log()
+        finish_story(
+            "34-36", ["app/src/Widget.tsx"], RULES, cfg, log,
+            step_label="34-36 walkthrough", surface_proof="app/src/Widget.tsx:3",
+        )
+        skipped = [e for e in log.events if e[1] == "qa-board-proof-check-skipped"]
+        assert len(skipped) == 1 and "not re-verified" in skipped[0][2]["reason"]
