@@ -536,8 +536,17 @@ def verify_step_proofs(
                     cwd=root, capture_output=True, text=True, timeout=30,
                     stdin=subprocess.DEVNULL,
                 )
-            except (OSError, subprocess.TimeoutExpired) as exc:
-                drift.append(f"{key}: {path}:{cited} grep failed to run: {exc}")
+            except subprocess.TimeoutExpired:
+                # fixed metadata only: the exception text carries the whole
+                # command, needle included, and the run log has no scrubber
+                drift.append(f"{key}: {path}:{cited} grep timed out after 30 s")
+                continue
+            except (OSError, ValueError) as exc:
+                # OSError: grep missing / not executable; ValueError: an
+                # embedded NUL in an argument. The class name is enough.
+                drift.append(
+                    f"{key}: {path}:{cited} grep could not run ({type(exc).__name__})"
+                )
                 continue
             if proc.returncode not in (0, 1):
                 drift.append(

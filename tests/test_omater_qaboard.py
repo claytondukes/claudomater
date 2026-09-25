@@ -951,6 +951,37 @@ class TestProofContentCheck:
         check = verify_step_proofs(cfg, 7, root)
         assert check.drift == (f"34-1-01: {path}:1 is not a file inside the project root",)
 
+    def test_a_timed_out_grep_never_puts_the_needle_in_the_drift_line(self, cfg, tmp_path, monkeypatch):
+        import subprocess as sp
+
+        from claudomater import qaboard as qb
+
+        root = self._tree(tmp_path)
+        secret = "hunter2-token-value"
+        _StubBoard.steps[7] = [
+            {"step_key": "34-1-01", "retired": False, "surface_proof": self._proof(
+                (secret, "app/src/Widget.tsx", "a needle that must never be logged", 2),
+            )},
+        ]
+
+        def slow(argv, **kwargs):
+            raise sp.TimeoutExpired(cmd=argv, timeout=30)
+
+        monkeypatch.setattr(qb.subprocess, "run", slow)
+        check = verify_step_proofs(cfg, 7, root)
+        assert check.drift == ("34-1-01: app/src/Widget.tsx:2 grep timed out after 30 s",)
+        assert secret not in json.dumps(check.as_dict())
+
+    def test_a_nul_byte_in_a_needle_is_drift_with_the_class_name_only(self, cfg, tmp_path):
+        root = self._tree(tmp_path)
+        _StubBoard.steps[7] = [
+            {"step_key": "34-1-01", "retired": False, "surface_proof": self._proof(
+                ("secret\x00value", "app/src/Widget.tsx", "an argument grep cannot take", 2),
+            )},
+        ]
+        check = verify_step_proofs(cfg, 7, root)
+        assert check.drift == ("34-1-01: app/src/Widget.tsx:2 grep could not run (ValueError)",)
+
     def test_a_non_object_row_is_a_loud_stop(self, cfg, tmp_path):
         _StubBoard.steps[7] = [["not", "a", "step"]]
         with pytest.raises(QaBoardError, match="a row is not a JSON object"):
