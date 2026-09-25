@@ -86,8 +86,11 @@ After a story's PR merges and BEFORE its done-flip:
   (insert-only append to the epic's authoring spec AND an idempotent POST to
   the live board, section resolved by epic), then regenerate the coverage
   matrix and run the epic gate in one shot - judged by EXIT CODE, never by
-  parsing output. Drift is a loud stop naming every anchor before anything is
-  authored; a call without `project_root` logs the skip, never silently.
+  parsing output. Drift is a loud stop naming every anchor (step, path,
+  line and hits - never the needle text) before anything is authored; a
+  proof with no grep entry fails the same way, every path is confined to the
+  project root, and the cited path must be the grepped file. A call without
+  `project_root` logs the skip, never silently.
 - **No-surface story**: write the waiver EVALUATION (verdict buckets and
   all) to the run log - "no step needed" is a recorded decision, not a
   silence.

@@ -1411,3 +1411,30 @@ class TestDenyAccounts:
     def test_an_identity_without_an_email_cannot_match(self):
         d = evaluate(snapshot(account={"uuid": "acct-1"}), self._cfg())
         assert d.action == "ok"
+
+    def test_a_stale_reading_is_still_denied(self):
+        stale = UsageUnavailable(
+            "stale-cache: 120s old",
+            snapshot=snapshot(five=10, account={"email": "cdukes@example.com"}),
+            age_s=120,
+        )
+        d = evaluate(stale, self._cfg())
+        assert d.action == "pause" and "usage.deny_accounts" in d.reasons[-1]
+
+
+class TestStartHeadroomOnStaleReadings:
+    def test_a_stale_first_spawn_reading_is_judged_as_read(self):
+        stale = UsageUnavailable(
+            "stale-cache: 120s old",
+            snapshot=snapshot(five=85), age_s=120,
+        )
+        d = evaluate(stale, UserConfig(), first_spawn=True)
+        assert d.action == "pause" and d.window == "five_hour"
+        assert any("first spawn of the run" in r for r in d.reasons)
+
+    def test_a_stale_later_spawn_keeps_the_stale_rule(self):
+        stale = UsageUnavailable(
+            "stale-cache: 120s old",
+            snapshot=snapshot(five=85), age_s=120,
+        )
+        assert evaluate(stale, UserConfig()).action != "pause"

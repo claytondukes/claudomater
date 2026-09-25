@@ -381,8 +381,11 @@ def _git_out(repo: Path, *args: str) -> str:
 # boards whose anchors had drifted under sibling merges while that gate read
 # PASS. Content closes it: each `grep -nF "<needle>" <path> (... <path>:<line>)`
 # entry is re-run against the checkout and the cited line must be among the
-# hits. A proof with no grep entry (a range-only proof) is COUNTED as
-# unparsed, never treated as verified.
+# hits. A proof with no grep entry (a range-only proof) is counted as
+# unparsed by the checker and FAILS the gate: a proof the check cannot read
+# must never read as verified. Every path is confined to the project root
+# and the cited path must be the grepped path; drift lines never carry the
+# needle text (the run log has no scrubber), only step, path, line and hits.
 _PROOF_ENTRY_RE = re.compile(
     r'grep (-nF|-n) "(.*?)" (\S+) \((.*?)\)(?=; grep -n|$)', re.S
 )
@@ -397,6 +400,7 @@ class ProofCheck:
     anchors: int  # grep entries that parsed and were re-run
     unparsed: int  # inspected steps whose proof carried no grep entry
     drift: tuple[str, ...]  # one line per anchor that no longer lands
+    unparsed_steps: tuple[str, ...] = ()  # the step keys behind `unparsed`
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -404,8 +408,24 @@ class ProofCheck:
             "steps": self.steps,
             "anchors": self.anchors,
             "unparsed": self.unparsed,
+            "unparsed_steps": list(self.unparsed_steps),
             "drift": list(self.drift),
         }
+
+
+def _confined(root: Path, rel: str) -> Path | None:
+    """The proof's path resolved inside `root`, or None when it is absolute,
+    escapes the root (`..`, a symlink out), or is empty. The board authors
+    the path; the check must judge the project tree and nothing else."""
+    if not rel or rel.startswith("/") or Path(rel).is_absolute():
+        return None
+    root_r = root.resolve()
+    target = (root_r / rel).resolve()
+    try:
+        target.relative_to(root_r)
+    except ValueError:
+        return None
+    return target
 
 
 def verify_step_proofs(
@@ -423,10 +443,18 @@ def verify_step_proofs(
             f"{type(rows).__name__} - a proof set that cannot be read must not "
             "read as verified"
         )
-    steps = anchors = unparsed = 0
+    steps = anchors = 0
     drift: list[str] = []
+    unparsed_steps: list[str] = []
     for step in rows:
-        if not isinstance(step, dict) or step.get("retired"):
+        if not isinstance(step, dict):
+            # the section listing path fails closed on a malformed entry;
+            # a proof set with an unreadable row must not read as clean
+            raise QaBoardError(
+                f"board section {section_id} steps: a row is not a JSON object "
+                f"({type(step).__name__}) - refusing to judge a malformed proof set"
+            )
+        if step.get("retired"):
             continue
         key = str(step.get("step_key", "?"))
         if _WAIVED_STEP_RE.search(key):
@@ -434,7 +462,7 @@ def verify_step_proofs(
         steps += 1
         entries = list(_PROOF_ENTRY_RE.finditer(str(step.get("surface_proof") or "")))
         if not entries:
-            unparsed += 1
+            unparsed_steps.append(key)
             continue
         for m in entries:
             flag, needle, path, note = m.group(1), m.group(2), m.group(3), m.group(4)
@@ -442,8 +470,20 @@ def verify_step_proofs(
             if not cites:
                 drift.append(f"{key}: {path} entry cites no file:line")
                 continue
-            cited = int(cites[-1][1])
+            cited_path, cited = cites[-1][0], int(cites[-1][1])
             anchors += 1
+            if cited_path.removeprefix("./") != path.removeprefix("./"):
+                drift.append(
+                    f"{key}: entry greps {path} but cites {cited_path}:{cited} - "
+                    "the cited anchor must be the grepped file"
+                )
+                continue
+            if _confined(root, path) is None:
+                drift.append(
+                    f"{key}: {path}:{cited} is outside the project root - "
+                    "a proof must anchor inside the tree being judged"
+                )
+                continue
             try:
                 proc = subprocess.run(
                     ["grep", flag, "--", needle, path],
@@ -459,12 +499,13 @@ def verify_step_proofs(
                 continue
             hits = [int(line.split(":", 1)[0]) for line in proc.stdout.splitlines()]
             if cited not in hits:
-                drift.append(
-                    f"{key}: {path}:{cited} -> hits {hits} needle={needle[:60]!r}"
-                )
+                # no needle text here: the run log has no scrubber and the
+                # step key + path identify the anchor on the board
+                drift.append(f"{key}: {path}:{cited} -> hits {hits}")
     return ProofCheck(
         section_id=section_id, steps=steps, anchors=anchors,
-        unparsed=unparsed, drift=tuple(drift),
+        unparsed=len(unparsed_steps), drift=tuple(drift),
+        unparsed_steps=tuple(unparsed_steps),
     )
 
 
@@ -491,6 +532,13 @@ def _proof_gate(
         return
     check = verify_step_proofs(cfg, section_id, project_root)
     runlog.event(phase, event_prefix, {**detail, **check.as_dict()}, story_key=story_key)
+    if check.unparsed:
+        raise QaBoardError(
+            f"board section {section_id}: {check.unparsed} current step(s) carry a "
+            f"proof with no grep entry ({', '.join(check.unparsed_steps)}) - a "
+            "proof the check cannot re-run must never read as verified; author "
+            'the `grep -nF "<needle>" <path> (... <path>:<line>)` form'
+        )
     if check.drift:
         shown = "\n  ".join(check.drift[:20])
         more = f"\n  (+{len(check.drift) - 20} more)" if len(check.drift) > 20 else ""

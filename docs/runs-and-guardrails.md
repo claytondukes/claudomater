@@ -78,7 +78,8 @@ evaluates the operator's thresholds. Exit codes: 0 ok, 3 pause, 4 degrade.
   run log yet) must sit below `usage.start_below` on every window, so a run
   starts on an account with room for the whole run, not for one more phase.
   A resumed run is never re-gated as a fresh start. Without a run log the
-  gate cannot be known and is not applied.
+  gate cannot be known and is not applied. Both this gate and the deny list
+  apply to a stale-but-readable reading exactly as to a fresh one.
 - **Account deny list**: `usage.deny_accounts` globs pause every spawn under
   a matching e-mail - an operator's personal identity never carries an
   automation phase, whatever its headroom.

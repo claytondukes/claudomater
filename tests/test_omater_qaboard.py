@@ -843,9 +843,9 @@ class TestProofContentCheck:
                 ("text a sibling merge rewrote", "app/src/Widget.tsx", "gone", 2),
             )},
         ]
-        assert verify_step_proofs(cfg, 7, root).drift[0].endswith(
-            "-> hits [] needle='text a sibling merge rewrote'"
-        )
+        line = verify_step_proofs(cfg, 7, root).drift[0]
+        assert line == "34-1-01: app/src/Widget.tsx:2 -> hits []"
+        assert "rewrote" not in line  # never the needle text: the run log has no scrubber
 
     def test_retired_and_waived_steps_are_skipped_and_range_only_proofs_are_counted(
         self, cfg, tmp_path
@@ -861,6 +861,50 @@ class TestProofContentCheck:
         ]
         check = verify_step_proofs(cfg, 7, root)
         assert (check.steps, check.anchors, check.unparsed, check.drift) == (1, 0, 1, ())
+        assert check.unparsed_steps == ("34-2-01",)
+
+    def test_a_range_only_proof_fails_the_gate_not_just_the_count(self, cfg, tmp_path):
+        root = self._tree(tmp_path)
+        _StubBoard.steps[7] = [
+            {"step_key": "34-2-01", "retired": False,
+             "surface_proof": "app/src/Widget.tsx:2 the component (range-only proof)"},
+        ]
+        with pytest.raises(QaBoardError, match="no grep entry \\(34-2-01\\)"):
+            finish_story(
+                "34-36", ["app/src/Widget.tsx"], RULES, cfg, _Log(),
+                step_label="34-36 walkthrough", surface_proof="app/src/Widget.tsx:3",
+                project_root=root,
+            )
+        assert _StubBoard.posted == []
+
+    def test_a_non_object_row_is_a_loud_stop(self, cfg, tmp_path):
+        _StubBoard.steps[7] = [["not", "a", "step"]]
+        with pytest.raises(QaBoardError, match="a row is not a JSON object"):
+            verify_step_proofs(cfg, 7, self._tree(tmp_path))
+
+    def test_the_cited_path_must_be_the_grepped_path(self, cfg, tmp_path):
+        root = self._tree(tmp_path)
+        (root / "app" / "src" / "Other.tsx").write_text("export function Widget() {\n")
+        _StubBoard.steps[7] = [
+            {"step_key": "34-1-01", "retired": False,
+             "surface_proof": 'grep -nF "export function Widget() {" app/src/Other.tsx (claims the widget, app/src/Widget.tsx:2)'},
+        ]
+        check = verify_step_proofs(cfg, 7, root)
+        assert check.drift == (
+            "34-1-01: entry greps app/src/Other.tsx but cites app/src/Widget.tsx:2 - "
+            "the cited anchor must be the grepped file",
+        )
+
+    @pytest.mark.parametrize("path", ["/etc/hosts", "../outside.txt", "app/../../outside.txt"])
+    def test_a_path_outside_the_project_root_is_drift_never_read(self, cfg, tmp_path, path):
+        root = self._tree(tmp_path)
+        (tmp_path / "outside.txt").write_text("secret needle\n", encoding="utf-8")
+        _StubBoard.steps[7] = [
+            {"step_key": "34-1-01", "retired": False,
+             "surface_proof": f'grep -nF "secret needle" {path} (escapes the tree, {path}:1)'},
+        ]
+        check = verify_step_proofs(cfg, 7, root)
+        assert len(check.drift) == 1 and "outside the project root" in check.drift[0]
 
     def test_a_regex_proof_keeps_its_flag(self, cfg, tmp_path):
         root = self._tree(tmp_path)
@@ -892,7 +936,9 @@ class TestProofContentCheck:
         assert _StubBoard.posted == []  # nothing authored, nothing posted
         assert not (cfg.authoring_dir / "epic-34-steps.json").exists()
         checks = [e for e in log.events if e[1] == "qa-board-proof-check"]
-        assert len(checks) == 1 and checks[0][2]["drift"]
+        assert len(checks) == 1 and checks[0][2]["drift"] == [
+            "34-1-01: app/src/Widget.tsx:2 -> hits [3]"
+        ]
 
     def test_the_finish_records_a_clean_check_and_proceeds(self, cfg, tmp_path):
         root = self._tree(tmp_path)

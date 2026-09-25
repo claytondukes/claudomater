@@ -260,7 +260,13 @@ def evaluate(
     for one more phase. `usage.deny_accounts` applies to every spawn."""
     if snapshot is None or isinstance(snapshot, UsageUnavailable):
         if isinstance(snapshot, UsageUnavailable) and snapshot.snapshot is not None:
-            return _stale_decision(snapshot, cfg, baseline_account=baseline_account)
+            # the policy gates below judge identity and headroom on the
+            # reading the stale path used - a denied identity or an
+            # exhausted first spawn is no less so for being 10 minutes old
+            return _policy_gates(
+                _stale_decision(snapshot, cfg, baseline_account=baseline_account),
+                snapshot.snapshot, cfg, first_spawn,
+            )
         reason = str(snapshot) if snapshot else "no usage data"
         return Decision(
             action=PAUSE,
@@ -330,9 +336,20 @@ def evaluate(
             f"{snapshot.scoped:.0f}% >= {cfg.usage.degrade_scoped_at}% -> degrade"
         )
 
-    # Account deny list (epic-61 retro A10): an operator's own identity must
-    # never carry an automation phase - judged on EVERY spawn, and a pause
-    # rather than a degrade because no model choice makes it acceptable.
+    return _policy_gates(decision, snapshot, cfg, first_spawn)
+
+
+def _policy_gates(
+    decision: Decision, snapshot: UsageSnapshot, cfg: UserConfig, first_spawn: bool
+) -> Decision:
+    """The two epic-61 retro A10 gates, applied to the FRESH and the STALE
+    path alike (the stale path used to return before them). Pause dominates:
+    a decision already paused is returned as is."""
+    if decision.action == PAUSE:
+        return decision
+    # Account deny list: an operator's own identity must never carry an
+    # automation phase - judged on EVERY spawn, and a pause rather than a
+    # degrade because no model choice makes it acceptable.
     email = str(snapshot.account.get("email", "")) if isinstance(snapshot.account, dict) else ""
     if email:
         for pattern in cfg.usage.deny_accounts:
@@ -343,11 +360,11 @@ def evaluate(
                     "automation never runs under it"
                 )
                 return decision
-
-    # Start headroom (epic-61 retro A10): the FIRST spawn of a run needs room
-    # for the whole run. Both epic-61 quota parks fired on the account the
-    # create phase had just exhausted - a per-spawn threshold cannot see that.
-    if first_spawn and decision.action != PAUSE:
+    # Start headroom: the FIRST spawn of a run needs room for the whole run.
+    # Both epic-61 quota parks fired on the account the create phase had just
+    # exhausted - a per-spawn threshold cannot see that. A stale reading is
+    # judged as read: it is the best evidence there is at spawn time.
+    if first_spawn:
         windows = (
             ("five_hour", snapshot.five_hour, snapshot.five_hour_resets_at),
             ("seven_day", snapshot.seven_day, snapshot.seven_day_resets_at),
@@ -365,7 +382,6 @@ def evaluate(
                     "headroom for the whole run"
                 )
                 break
-
     return decision
 
 
