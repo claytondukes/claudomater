@@ -389,12 +389,14 @@ def _git_out(repo: Path, *args: str) -> str:
 # Entry and fragment boundaries share ONE delimiter shape (`;` with any
 # whitespace before `grep -n`): a boundary the counter sees but the parser
 # does not, or the reverse, is exactly how a hidden fragment slips through.
-_PROOF_DELIM = r";\s*grep -n"
+_PROOF_DELIM = r";\s*grep\b"
 _PROOF_ENTRY_RE = re.compile(
     r'grep (-nF|-n) "(.*?)" (\S+) \((.*?)\)(?=' + _PROOF_DELIM + r"|$)", re.S
 )
 _PROOF_CITED_RE = re.compile(r"(\S+):(\d+)")
-_PROOF_FRAGMENT_RE = re.compile(r"(?:^|" + _PROOF_DELIM[:-7] + r")grep -n")
+# every `grep` at an entry boundary, whatever its flags: an unsupported
+# spelling (`grep -F`, `grep -c`) is a fragment the parser did not accept
+_PROOF_FRAGMENT_RE = re.compile(r"(?:^|;\s*)grep\b")
 _WAIVED_STEP_RE = re.compile(r"-(PRE|OBS)-\d+$")
 
 
@@ -422,15 +424,99 @@ def _confined(root: Path, rel: str) -> Path | None:
     """The proof's path resolved inside `root`, or None when it is absolute,
     escapes the root (`..`, a symlink out), or is empty. The board authors
     the path; the check must judge the project tree and nothing else."""
-    if not rel or rel.startswith("/") or Path(rel).is_absolute():
-        return None
-    root_r = root.resolve()
-    target = (root_r / rel).resolve()
     try:
+        if not rel or rel.startswith("/") or Path(rel).is_absolute():
+            return None
+        root_r = root.resolve()
+        target = (root_r / rel).resolve()
         target.relative_to(root_r)
-    except ValueError:
+    except (ValueError, OSError):
+        # an embedded NUL, an over-long name, a resolution the OS refuses:
+        # none of them is a path inside the tree
         return None
     return target
+
+
+def _judge_proof(key: str, proof: str, root: Path) -> tuple[int, bool, list[str]]:
+    """Judge ONE proof text against `root`: (anchors re-run, unparsed, drift
+    lines). `unparsed` is True when the text carries no parseable grep entry
+    at all. Drift lines carry the step key, path, cited line and hits -
+    never the needle text (the run log has no scrubber)."""
+    entries = list(_PROOF_ENTRY_RE.finditer(proof))
+    if not entries:
+        return 0, True, []
+    drift: list[str] = []
+    anchors = 0
+    # Every grep fragment must be a parsed entry: a malformed or unsupported
+    # fragment after a valid one would otherwise pass unseen on the strength
+    # of its sibling, and "inspected every proof command" would be false.
+    fragments = len(_PROOF_FRAGMENT_RE.findall(proof))
+    if fragments != len(entries):
+        drift.append(
+            f"{key}: {fragments - len(entries)} grep fragment(s) could not be "
+            f"parsed ({fragments} present, {len(entries)} parsed) - every entry "
+            'must be `grep -nF "<needle>" <path> (... <path>:<line>)`'
+        )
+    for m in entries:
+        flag, needle, path, note = m.group(1), m.group(2), m.group(3), m.group(4)
+        cites = _PROOF_CITED_RE.findall(note)
+        if not cites:
+            drift.append(f"{key}: {path} entry cites no file:line")
+            continue
+        cited_path, cited = cites[-1][0], int(cites[-1][1])
+        anchors += 1
+        if cited_path.removeprefix("./") != path.removeprefix("./"):
+            drift.append(
+                f"{key}: entry greps {path} but cites {cited_path}:{cited} - "
+                "the cited anchor must be the grepped file"
+            )
+            continue
+        if not needle.strip():
+            # an empty fixed string matches every line: any cited line
+            # would pass whatever the file now says
+            drift.append(f"{key}: {path}:{cited} has an empty needle - not an anchor")
+            continue
+        target = _confined(root, path)
+        if target is None:
+            drift.append(
+                f"{key}: {path}:{cited} is outside the project root or cannot be "
+                "resolved - a proof must anchor inside the tree being judged"
+            )
+            continue
+        if not target.is_file():
+            # `-` (grep's stdin), a directory, or a missing file: none
+            # is the project tree the proof claims to anchor in
+            drift.append(f"{key}: {path}:{cited} is not a file inside the project root")
+            continue
+        try:
+            # the VALIDATED path is the one grep reads, never the raw
+            # board string; stdin is closed so no operand can read it
+            proc = subprocess.run(
+                ["grep", flag, "--", needle, str(target)],
+                cwd=root, capture_output=True, text=True, timeout=30,
+                stdin=subprocess.DEVNULL,
+            )
+        except subprocess.TimeoutExpired:
+            # fixed metadata only: the exception text carries the whole
+            # command, needle included, and the run log has no scrubber
+            drift.append(f"{key}: {path}:{cited} grep timed out after 30 s")
+            continue
+        except (OSError, ValueError) as exc:
+            # OSError: grep missing / not executable; ValueError: an
+            # embedded NUL in an argument. The class name is enough.
+            drift.append(
+                f"{key}: {path}:{cited} grep could not run ({type(exc).__name__})"
+            )
+            continue
+        if proc.returncode not in (0, 1):
+            drift.append(
+                f"{key}: {path}:{cited} grep error: {proc.stderr.strip()[:120]}"
+            )
+            continue
+        hits = [int(line.split(":", 1)[0]) for line in proc.stdout.splitlines()]
+        if cited not in hits:
+            drift.append(f"{key}: {path}:{cited} -> hits {hits}")
+    return anchors, False, drift
 
 
 def verify_step_proofs(
@@ -482,82 +568,13 @@ def verify_step_proofs(
         if _WAIVED_STEP_RE.search(key):
             continue
         steps += 1
-        proof = str(step.get("surface_proof") or "")
-        entries = list(_PROOF_ENTRY_RE.finditer(proof))
-        if not entries:
+        row_anchors, unparsed, row_drift = _judge_proof(
+            key, str(step.get("surface_proof") or ""), root
+        )
+        if unparsed:
             unparsed_steps.append(key)
-            continue
-        # Every grep fragment must be a parsed entry: a malformed fragment
-        # after a valid one would otherwise pass unseen on the strength of
-        # its sibling, and "inspected every proof command" would be false.
-        fragments = len(_PROOF_FRAGMENT_RE.findall(proof))
-        if fragments != len(entries):
-            drift.append(
-                f"{key}: {fragments - len(entries)} grep fragment(s) could not be "
-                f"parsed ({fragments} present, {len(entries)} parsed) - every entry "
-                'must be `grep -nF "<needle>" <path> (... <path>:<line>)`'
-            )
-        for m in entries:
-            flag, needle, path, note = m.group(1), m.group(2), m.group(3), m.group(4)
-            cites = _PROOF_CITED_RE.findall(note)
-            if not cites:
-                drift.append(f"{key}: {path} entry cites no file:line")
-                continue
-            cited_path, cited = cites[-1][0], int(cites[-1][1])
-            anchors += 1
-            if cited_path.removeprefix("./") != path.removeprefix("./"):
-                drift.append(
-                    f"{key}: entry greps {path} but cites {cited_path}:{cited} - "
-                    "the cited anchor must be the grepped file"
-                )
-                continue
-            if not needle.strip():
-                # an empty fixed string matches every line: any cited line
-                # would pass whatever the file now says
-                drift.append(f"{key}: {path}:{cited} has an empty needle - not an anchor")
-                continue
-            target = _confined(root, path)
-            if target is None:
-                drift.append(
-                    f"{key}: {path}:{cited} is outside the project root - "
-                    "a proof must anchor inside the tree being judged"
-                )
-                continue
-            if not target.is_file():
-                # `-` (grep's stdin), a directory, or a missing file: none
-                # is the project tree the proof claims to anchor in
-                drift.append(f"{key}: {path}:{cited} is not a file inside the project root")
-                continue
-            try:
-                # the VALIDATED path is the one grep reads, never the raw
-                # board string; stdin is closed so no operand can read it
-                proc = subprocess.run(
-                    ["grep", flag, "--", needle, str(target)],
-                    cwd=root, capture_output=True, text=True, timeout=30,
-                    stdin=subprocess.DEVNULL,
-                )
-            except subprocess.TimeoutExpired:
-                # fixed metadata only: the exception text carries the whole
-                # command, needle included, and the run log has no scrubber
-                drift.append(f"{key}: {path}:{cited} grep timed out after 30 s")
-                continue
-            except (OSError, ValueError) as exc:
-                # OSError: grep missing / not executable; ValueError: an
-                # embedded NUL in an argument. The class name is enough.
-                drift.append(
-                    f"{key}: {path}:{cited} grep could not run ({type(exc).__name__})"
-                )
-                continue
-            if proc.returncode not in (0, 1):
-                drift.append(
-                    f"{key}: {path}:{cited} grep error: {proc.stderr.strip()[:120]}"
-                )
-                continue
-            hits = [int(line.split(":", 1)[0]) for line in proc.stdout.splitlines()]
-            if cited not in hits:
-                # no needle text here: the run log has no scrubber and the
-                # step key + path identify the anchor on the board
-                drift.append(f"{key}: {path}:{cited} -> hits {hits}")
+        anchors += row_anchors
+        drift.extend(row_drift)
     return ProofCheck(
         section_id=section_id, steps=steps, anchors=anchors,
         unparsed=len(unparsed_steps), drift=tuple(drift),
@@ -820,6 +837,24 @@ def finish_story(
         cfg, section_id, project_root, runlog, "merge", "qa-board-proof-check",
         story_id, {"story": story_id, "epic": epic_id},
     )
+    if project_root is not None:
+        # The NEW step is held to the same rule before it is authored: a
+        # range-only or drifted proof posted now would make the next finish
+        # or close refuse the section - the flow must not invalidate itself.
+        _, unparsed, drift = _judge_proof(
+            f"{story_id} (new step)", surface_proof, Path(project_root)
+        )
+        if unparsed:
+            raise QaBoardError(
+                f"story {story_id}: the new step's surface_proof carries no "
+                'parseable grep entry - author the `grep -nF "<needle>" <path> '
+                "(... <path>:<line>)` form so the content check can re-run it"
+            )
+        if drift:
+            raise QaBoardError(
+                f"story {story_id}: the new step's surface_proof does not land on "
+                "the merged tree - fix it before it is authored:\n  " + "\n  ".join(drift)
+            )
     # run-log discipline: an INTENT event lands before each action (the
     # log's own contract) and a completion event after it, so a crash
     # between the two shows exactly what was being attempted - content

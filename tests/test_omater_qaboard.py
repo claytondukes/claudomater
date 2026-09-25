@@ -982,6 +982,50 @@ class TestProofContentCheck:
         check = verify_step_proofs(cfg, 7, root)
         assert check.drift == ("34-1-01: app/src/Widget.tsx:2 grep could not run (ValueError)",)
 
+    def test_an_unsupported_grep_spelling_is_a_counted_fragment(self, cfg, tmp_path):
+        root = self._tree(tmp_path)
+        _StubBoard.steps[7] = [
+            {"step_key": "34-1-01", "retired": False, "surface_proof": self._proof(
+                ("return null;", "app/src/Widget.tsx", "the render", 3),
+            ) + '; grep -F "return null;" app/src/Widget.tsx (no -n, app/src/Widget.tsx:3)'},
+        ]
+        check = verify_step_proofs(cfg, 7, root)
+        assert check.anchors == 1
+        assert check.drift[0].startswith("34-1-01: 1 grep fragment(s) could not be parsed (2 present, 1 parsed)")
+
+    def test_a_path_the_os_cannot_resolve_is_drift(self, cfg, tmp_path):
+        root = self._tree(tmp_path)
+        _StubBoard.steps[7] = [
+            {"step_key": "34-1-01", "retired": False,
+             "surface_proof": 'grep -nF "line one" app/src/Wid\u0000get.tsx (a NUL in the path, app/src/Wid\u0000get.tsx:1)'},
+        ]
+        check = verify_step_proofs(cfg, 7, root)
+        assert len(check.drift) == 1 and "cannot be resolved" in check.drift[0]
+
+    def test_the_new_steps_proof_must_be_the_grep_form_when_a_root_is_given(self, cfg, tmp_path):
+        root = self._tree(tmp_path)
+        _StubBoard.steps[7] = []
+        with pytest.raises(QaBoardError, match="carries no parseable grep entry"):
+            finish_story(
+                "34-36", ["app/src/Widget.tsx"], RULES, cfg, _Log(),
+                step_label="34-36 walkthrough", surface_proof="app/src/Widget.tsx:3",
+                project_root=root,
+            )
+        assert _StubBoard.posted == []
+        assert not (cfg.authoring_dir / "epic-34-steps.json").exists()
+
+    def test_the_new_steps_proof_must_land_when_a_root_is_given(self, cfg, tmp_path):
+        root = self._tree(tmp_path)
+        _StubBoard.steps[7] = []
+        with pytest.raises(QaBoardError, match="does not land on the merged tree"):
+            finish_story(
+                "34-36", ["app/src/Widget.tsx"], RULES, cfg, _Log(),
+                step_label="34-36 walkthrough",
+                surface_proof=self._proof(("return null;", "app/src/Widget.tsx", "cited too early", 2)),
+                project_root=root,
+            )
+        assert _StubBoard.posted == []
+
     def test_a_non_object_row_is_a_loud_stop(self, cfg, tmp_path):
         _StubBoard.steps[7] = [["not", "a", "step"]]
         with pytest.raises(QaBoardError, match="a row is not a JSON object"):
@@ -1055,7 +1099,8 @@ class TestProofContentCheck:
         log = _Log()
         result = finish_story(
             "34-36", ["app/src/Widget.tsx"], RULES, cfg, log,
-            step_label="34-36 walkthrough", surface_proof="app/src/Widget.tsx:3",
+            step_label="34-36 walkthrough",
+            surface_proof=self._proof(("return null;", "app/src/Widget.tsx", "the render", 3)),
             project_root=root,
         )
         assert result["ok"] and result["step_key"] == "34-36-01"
