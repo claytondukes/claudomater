@@ -1040,6 +1040,37 @@ class TestProofContentCheck:
         assert str(exc.value).count("34-1-01: app/src/Widget.tsx:1 -> hits [3]") == 25
         assert "more)" not in str(exc.value)
 
+    def test_a_symlink_loop_in_the_path_is_drift_never_a_raw_exception(self, cfg, tmp_path):
+        root = self._tree(tmp_path)
+        (root / "app" / "loop").symlink_to(root / "app" / "loop")
+        _StubBoard.steps[7] = [
+            {"step_key": "34-1-01", "retired": False,
+             "surface_proof": 'grep -nF "line one" app/loop/x.tsx (through a symlink loop, app/loop/x.tsx:1)'},
+        ]
+        check = verify_step_proofs(cfg, 7, root)
+        # newer Pythons resolve a loop without raising and the target is then
+        # not a file; older ones raise and the path cannot be resolved -
+        # fail-closed drift either way, never a raw exception
+        assert len(check.drift) == 1
+        assert ("cannot be resolved" in check.drift[0]) or ("is not a file" in check.drift[0])
+
+    def test_a_resolution_runtime_error_is_drift(self, cfg, tmp_path, monkeypatch):
+        from claudomater import qaboard as qb
+
+        root = self._tree(tmp_path)
+        _StubBoard.steps[7] = [
+            {"step_key": "34-1-01", "retired": False, "surface_proof": self._proof(
+                ("line one", "app/src/Widget.tsx", "resolution explodes", 1),
+            )},
+        ]
+
+        def boom(self, *a, **k):
+            raise RuntimeError("Symlink loop from 'x'")
+
+        monkeypatch.setattr(qb.Path, "resolve", boom)
+        check = verify_step_proofs(cfg, 7, root)
+        assert len(check.drift) == 1 and "cannot be resolved" in check.drift[0]
+
     def test_a_non_object_row_is_a_loud_stop(self, cfg, tmp_path):
         _StubBoard.steps[7] = [["not", "a", "step"]]
         with pytest.raises(QaBoardError, match="a row is not a JSON object"):

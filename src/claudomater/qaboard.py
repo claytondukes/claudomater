@@ -430,8 +430,9 @@ def _confined(root: Path, rel: str) -> Path | None:
         root_r = root.resolve()
         target = (root_r / rel).resolve()
         target.relative_to(root_r)
-    except (ValueError, OSError):
-        # an embedded NUL, an over-long name, a resolution the OS refuses:
+    except (ValueError, OSError, RuntimeError):
+        # an embedded NUL, an over-long name, a resolution the OS refuses,
+        # a symlink loop (RuntimeError on older Pythons, ELOOP on newer):
         # none of them is a path inside the tree
         return None
     return target
