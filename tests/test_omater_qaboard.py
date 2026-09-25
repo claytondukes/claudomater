@@ -887,7 +887,7 @@ class TestProofContentCheck:
         check = verify_step_proofs(cfg, 7, root)
         assert check.anchors == 1
         assert check.drift == (
-            "34-1-01: 1 grep fragment(s) could not be parsed (2 present, 1 parsed) - "
+            "34-1-01: 1 unparsed fragment(s) between or after the 1 grep entries - "
             'every entry must be `grep -nF "<needle>" <path> (... <path>:<line>)`',
         )
 
@@ -910,7 +910,7 @@ class TestProofContentCheck:
         ]
         check = verify_step_proofs(cfg, 7, root)
         assert check.anchors == 1 and len(check.drift) == 1
-        assert check.drift[0].startswith("34-1-01: 1 grep fragment(s) could not be parsed (2 present, 1 parsed)")
+        assert check.drift[0].startswith("34-1-01: 1 unparsed fragment(s) between or after the 1 grep entries")
 
     def test_two_valid_entries_joined_without_a_space_both_run(self, cfg, tmp_path):
         root = self._tree(tmp_path)
@@ -991,7 +991,7 @@ class TestProofContentCheck:
         ]
         check = verify_step_proofs(cfg, 7, root)
         assert check.anchors == 1
-        assert check.drift[0].startswith("34-1-01: 1 grep fragment(s) could not be parsed (2 present, 1 parsed)")
+        assert check.drift[0].startswith("34-1-01: 1 unparsed fragment(s) between or after the 1 grep entries")
 
     def test_a_path_the_os_cannot_resolve_is_drift(self, cfg, tmp_path):
         root = self._tree(tmp_path)
@@ -1070,6 +1070,38 @@ class TestProofContentCheck:
         monkeypatch.setattr(qb.Path, "resolve", boom)
         check = verify_step_proofs(cfg, 7, root)
         assert len(check.drift) == 1 and "cannot be resolved" in check.drift[0]
+
+    def test_a_delimiter_inside_a_quoted_needle_is_not_a_second_command(self, cfg, tmp_path):
+        root = self._tree(tmp_path)
+        (root / "app" / "src" / "Widget.tsx").write_text("const x = 'a; grep b';\n", encoding="utf-8")
+        _StubBoard.steps[7] = [
+            {"step_key": "34-1-01", "retired": False,
+             "surface_proof": 'grep -nF "a; grep b" app/src/Widget.tsx (a needle carrying the delimiter; note also says grep -n, app/src/Widget.tsx:1)'},
+        ]
+        check = verify_step_proofs(cfg, 7, root)
+        assert (check.anchors, check.drift) == (1, ())
+
+    @pytest.mark.parametrize("value", [["grep -nF", "x"], {"grep": 1}, 7])
+    def test_a_non_string_surface_proof_is_a_loud_stop(self, cfg, tmp_path, value):
+        _StubBoard.steps[7] = [{"step_key": "34-1-01", "retired": False, "surface_proof": value}]
+        with pytest.raises(QaBoardError, match="non-string surface_proof"):
+            verify_step_proofs(cfg, 7, self._tree(tmp_path))
+
+    def test_the_error_header_counts_findings_not_anchor_misses(self, cfg, tmp_path):
+        root = self._tree(tmp_path)
+        _StubBoard.steps[7] = [
+            {"step_key": "34-1-01", "retired": False, "surface_proof": self._proof(
+                ("return null;", "app/src/Widget.tsx", "the render", 3),
+            ) + '; grep -F "return null;" app/src/Widget.tsx (no -n, app/src/Widget.tsx:3)'},
+        ]
+        with pytest.raises(QaBoardError, match=r"1 finding\(s\) over 1 re-run anchor\(s\)") as exc:
+            finish_story(
+                "34-36", ["app/src/Widget.tsx"], RULES, cfg, _Log(),
+                step_label="34-36 walkthrough",
+                surface_proof=self._proof(("return null;", "app/src/Widget.tsx", "the render", 3)),
+                project_root=root,
+            )
+        assert "no longer land" not in str(exc.value)
 
     def test_a_non_object_row_is_a_loud_stop(self, cfg, tmp_path):
         _StubBoard.steps[7] = [["not", "a", "step"]]

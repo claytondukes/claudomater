@@ -394,9 +394,8 @@ _PROOF_ENTRY_RE = re.compile(
     r'grep (-nF|-n) "(.*?)" (\S+) \((.*?)\)(?=' + _PROOF_DELIM + r"|$)", re.S
 )
 _PROOF_CITED_RE = re.compile(r"(\S+):(\d+)")
-# every `grep` at an entry boundary, whatever its flags: an unsupported
-# spelling (`grep -F`, `grep -c`) is a fragment the parser did not accept
-_PROOF_FRAGMENT_RE = re.compile(r"(?:^|;\s*)grep\b")
+# the only text allowed BETWEEN parsed entries (and after the last one)
+_PROOF_GAP_RE = re.compile(r"^\s*(?:;\s*)?$")
 _WAIVED_STEP_RE = re.compile(r"-(PRE|OBS)-\d+$")
 
 
@@ -448,15 +447,25 @@ def _judge_proof(key: str, proof: str, root: Path) -> tuple[int, bool, list[str]
         return 0, True, []
     drift: list[str] = []
     anchors = 0
-    # Every grep fragment must be a parsed entry: a malformed or unsupported
-    # fragment after a valid one would otherwise pass unseen on the strength
-    # of its sibling, and "inspected every proof command" would be false.
-    fragments = len(_PROOF_FRAGMENT_RE.findall(proof))
-    if fragments != len(entries):
+    # The parsed entries must COVER the proof: anything between two entries
+    # (or after the last) that is not a bare delimiter is a fragment the
+    # parser did not accept - an unsupported spelling, a malformed entry -
+    # and it must not pass unseen on the strength of its siblings. Judging
+    # the gaps (not counting `grep` in the raw text) keeps a `; grep` inside
+    # a quoted needle or a note from reading as a second command.
+    pos = 0
+    leftovers = 0
+    for m in entries:
+        if not _PROOF_GAP_RE.match(proof[pos:m.start()]):
+            leftovers += 1
+        pos = m.end()
+    if not _PROOF_GAP_RE.match(proof[pos:]):
+        leftovers += 1
+    if leftovers:
         drift.append(
-            f"{key}: {fragments - len(entries)} grep fragment(s) could not be "
-            f"parsed ({fragments} present, {len(entries)} parsed) - every entry "
-            'must be `grep -nF "<needle>" <path> (... <path>:<line>)`'
+            f"{key}: {leftovers} unparsed fragment(s) between or after the "
+            f"{len(entries)} grep entries - every entry must be "
+            '`grep -nF "<needle>" <path> (... <path>:<line>)`'
         )
     for m in entries:
         flag, needle, path, note = m.group(1), m.group(2), m.group(3), m.group(4)
@@ -569,9 +578,18 @@ def verify_step_proofs(
         if _WAIVED_STEP_RE.search(key):
             continue
         steps += 1
-        row_anchors, unparsed, row_drift = _judge_proof(
-            key, str(step.get("surface_proof") or ""), root
-        )
+        proof = step.get("surface_proof")
+        if proof is None:
+            proof = ""
+        if not isinstance(proof, str):
+            # a list or object coerced to text could even parse: a corrupted
+            # row must fail closed, never read as a verified proof
+            raise QaBoardError(
+                f"board section {section_id} steps: step {key!r} carries a "
+                f"non-string surface_proof ({type(proof).__name__}) - refusing to "
+                "judge a malformed proof set"
+            )
+        row_anchors, unparsed, row_drift = _judge_proof(key, proof, root)
         if unparsed:
             unparsed_steps.append(key)
         anchors += row_anchors
@@ -617,9 +635,10 @@ def _proof_gate(
         # every anchor, not a sample: the operator re-anchors from this text
         # (the run-log event carries the same list as data)
         raise QaBoardError(
-            f"board proof drift on section {section_id} ({len(check.drift)} of "
-            f"{check.anchors} anchors no longer land on their cited line) - "
-            "re-anchor through PATCH /steps/{id} before finishing:\n  " + "\n  ".join(check.drift)
+            f"board proof drift on section {section_id} ({len(check.drift)} "
+            f"finding(s) over {check.anchors} re-run anchor(s): a drifted line, an "
+            "unparsed fragment, an unresolvable path or an empty needle) - fix "
+            "through PATCH /steps/{id} before finishing:\n  " + "\n  ".join(check.drift)
         )
 
 
