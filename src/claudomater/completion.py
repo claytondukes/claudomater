@@ -39,6 +39,20 @@ from typing import Sequence
 
 TASKS_HEADING_RE = re.compile(r"^##\s+Tasks(\s*/\s*Subtasks)?\s*$", re.MULTILINE)
 FILE_LIST_HEADING_RE = re.compile(r"^###\s+File List\s*$", re.MULTILINE)
+# The operator's post-merge record. Its heading carries a suffix in every
+# ui3 story ("(operator, 2026-09-30)"), so the match stops at the words.
+LAB_RECORD_HEADING_RE = re.compile(r"^###\s+Merge and lab record\b.*$", re.MULTILINE)
+# The literal disposition vocabulary a lab record must use (epic-64 retro
+# A3, epic-65 A4, epic-66 A6, epic-63 F5: four epics of records that
+# carried it by discipline alone). `induced` must appear, and the record
+# must say what was NOT induced - or that nothing was left un-induced.
+_INDUCED_RE = re.compile(r"\binduced\b", re.IGNORECASE)
+_NOT_INDUCED_RE = re.compile(
+    r"\bnot induced\b|\bnot inducible\b|\bSTATED\b|\bevery arm induced\b"
+    r"|\bno (?:non-inducible|not-induced) arm\b|\bno runtime arm\b",
+    re.IGNORECASE,
+)
+LAB_RECORD_MODES = ("off", "required")
 _HEADING_RE = re.compile(r"^#{2,3}\s+\S", re.MULTILINE)
 # \s* after the box, not \s+: a bare `- [ ]` with no label text is still
 # an unchecked box, and the gate's contract is ANY unchecked box blocks
@@ -53,6 +67,20 @@ _LIST_ENTRY_RE = re.compile(
 
 class CompletionError(Exception):
     """The gate cannot be evaluated honestly. Never a pass."""
+
+
+def normalize_lab_record(value: object) -> str:
+    """The `completion.lab_record` mode from config: `off` (default; the
+    record is not judged) or `required` (the finish refuses a story whose
+    `### Merge and lab record` lacks the literal induced / not-induced
+    vocabulary). Anything else is a config error, never a silent off."""
+    if value is None:
+        return "off"
+    if not isinstance(value, str) or value not in LAB_RECORD_MODES:
+        raise CompletionError(
+            f"completion.lab_record must be one of {LAB_RECORD_MODES}, got {value!r}"
+        )
+    return value
 
 
 def normalize_exempt(entries: object) -> tuple[str, ...]:
@@ -115,6 +143,7 @@ class CompletionReport:
 
     unchecked: list[str] = field(default_factory=list)
     missing_from_list: list[str] = field(default_factory=list)
+    lab_record_missing: list[str] = field(default_factory=list)
     phantom_in_list: list[str] = field(default_factory=list)
     problems: list[str] = field(default_factory=list)
 
@@ -128,6 +157,7 @@ class CompletionReport:
             "unchecked": self.unchecked,
             "missing_from_list": self.missing_from_list,
             "phantom_in_list": self.phantom_in_list,
+            "lab_record_missing": self.lab_record_missing,
             "problems": self.problems,
         }
 
@@ -204,13 +234,16 @@ def run_completion_gate(
     root = Path(project_root)
     try:
         raw_exempt = cfg.completion_exempt
+        lab_record = cfg.completion_lab_record
     except AttributeError as exc:
         # typed, not defaulted: a cfg without the field is a wrong OBJECT
         # (not a project that declared no exemptions), and silently running
         # the strict gate against it would hide the caller's bug
         raise CompletionError(
-            "cfg has no completion_exempt - pass a loaded ProjectConfig"
+            "cfg has no completion_exempt / completion_lab_record - pass a "
+            "loaded ProjectConfig"
         ) from exc
+    lab_record = normalize_lab_record(lab_record)
     if not isinstance(raw_exempt, (list, tuple)) or not all(
         isinstance(e, str) for e in raw_exempt
     ):
@@ -227,7 +260,11 @@ def run_completion_gate(
         raise CompletionError(f"cannot read story file {story_path}: {exc}") from exc
     merged = merged_files_of(root, merge_sha)
     report = _completion_report(
-        story_text, merged, exempt=exempt, require_file_list=require_file_list
+        story_text,
+        merged,
+        exempt=exempt,
+        require_file_list=require_file_list,
+        lab_record=lab_record,
     )
     # One event carrying the inputs, the exempt list USED (not the
     # config's state at some later read), and the verdict.
@@ -240,6 +277,7 @@ def run_completion_gate(
             "exempt": list(exempt),
             "merged_files": len(merged),
             "require_file_list": require_file_list,
+            "lab_record": lab_record,
             **report.as_dict(),
         },
     )
@@ -252,8 +290,9 @@ def _completion_report(
     *,
     exempt: Sequence[str] = (),
     require_file_list: bool = True,
+    lab_record: str = "off",
 ) -> CompletionReport:
-    """Evaluate both blades against the story file's text and the ACTUAL
+    """Evaluate the blades against the story file's text and the ACTUAL
     merged file set (use `merged_files_of` to read it from git). Module
     private: `exempt` is config-owned state, reachable in production only
     through `run_completion_gate`."""
@@ -310,6 +349,34 @@ def _completion_report(
                 "in the File List but not in the merge: "
                 + ", ".join(report.phantom_in_list)
             )
+
+    if normalize_lab_record(lab_record) == "required":
+        # The third blade: the post-merge record must say, in the literal
+        # words, what the lab arms induced and what they did not. The
+        # engine cannot enumerate the arms (they are prose), so it holds
+        # the vocabulary: a record with no `induced` at all, or one that
+        # never says what was NOT induced (or that nothing was left
+        # un-induced), is a record a later reader cannot trust.
+        lab = _section(story_text, LAB_RECORD_HEADING_RE)
+        if lab is None:
+            report.lab_record_missing.append("section")
+            report.problems.append(
+                "no `### Merge and lab record` section found - the finish "
+                "cannot judge a lab record it cannot see"
+            )
+        else:
+            if not _INDUCED_RE.search(lab):
+                report.lab_record_missing.append("induced")
+            if not _NOT_INDUCED_RE.search(lab):
+                report.lab_record_missing.append("not-induced")
+            if report.lab_record_missing:
+                report.problems.append(
+                    "the `### Merge and lab record` lacks the literal induced / "
+                    "not-induced line: missing "
+                    + ", ".join(report.lab_record_missing)
+                    + " (say per failure arm `induced` or `not induced` / "
+                    "`not inducible` / `STATED`, or that every arm was induced)"
+                )
     return report
 
 

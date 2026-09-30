@@ -291,8 +291,9 @@ def _synthetic_repo(tmp_path, files):
 
 
 class _CfgWithExempt:
-    def __init__(self, exempt):
+    def __init__(self, exempt, lab_record="off"):
         self.completion_exempt = tuple(exempt)
+        self.completion_lab_record = lab_record
 
 
 CROSS_REPO_STORY = STORY.replace(
@@ -417,6 +418,83 @@ class TestGateCfgShapeIsTyped:
             run_completion_gate(tmp_path, Wrong(), "s.md", "sha", _FakeRunLog())
 
     def test_a_non_sequence_exempt_is_a_typed_error(self, tmp_path):
-        bad_cfg = type("C", (), {"completion_exempt": "x"})()
+        bad_cfg = type("C", (), {"completion_exempt": "x", "completion_lab_record": "off"})()
         with pytest.raises(CompletionError, match="sequence of strings"):
             run_completion_gate(tmp_path, bad_cfg, "s.md", "sha", _FakeRunLog())
+
+
+LAB_RECORD_OK = """\
+### Merge and lab record (operator, 2026-09-30)
+
+- Merged as `abcd1234`.
+- Lab: the interface arm INDUCED for real and restored; STATED, not
+  induced: the port arm (a port change takes the shared lab down).
+"""
+LAB_RECORD_NO_DISPOSITION = """\
+### Merge and lab record (operator, 2026-09-30)
+
+- Merged as `abcd1234`.
+- Lab: 29/29 on the first run, every arm exact-wire.
+"""
+LAB_RECORD_EVERY_ARM = """\
+### Merge and lab record (operator, 2026-09-30)
+
+- Lab: 18/18; every arm induced - every arm is a click.
+"""
+
+
+class TestLabRecordBlade:
+    """Issue #31 (epic-64 A3, epic-65 A4, epic-66 A6, epic-63 F5): the
+    finish refuses a story whose post-merge record never says, in the
+    literal words, what the lab arms induced and what they did not."""
+
+    def _story(self, record):
+        return STORY + "\n" + record + "\n### File List\n\n- app/src/Widget.tsx\n"
+
+    def test_off_never_judges_the_record(self):
+        report = completion_report(self._story(LAB_RECORD_NO_DISPOSITION), ["app/src/Widget.tsx"])
+        assert report.lab_record_missing == []
+
+    def test_required_passes_a_record_with_both_words(self):
+        from claudomater.completion import _completion_report
+
+        report = _completion_report(self._story(LAB_RECORD_OK), ["app/src/Widget.tsx"], lab_record="required")
+        assert report.lab_record_missing == [] and report.ok
+
+    def test_required_accepts_every_arm_induced(self):
+        from claudomater.completion import _completion_report
+
+        report = _completion_report(self._story(LAB_RECORD_EVERY_ARM), ["app/src/Widget.tsx"], lab_record="required")
+        assert report.lab_record_missing == [] and report.ok
+
+    def test_required_fails_a_record_without_the_disposition(self):
+        from claudomater.completion import _completion_report
+
+        report = _completion_report(self._story(LAB_RECORD_NO_DISPOSITION), ["app/src/Widget.tsx"], lab_record="required")
+        assert report.lab_record_missing == ["induced", "not-induced"]
+        assert not report.ok and any("lacks the literal induced" in p for p in report.problems)
+
+    def test_required_fails_when_the_section_is_absent(self):
+        from claudomater.completion import _completion_report
+
+        report = _completion_report(STORY, ["app/src/Widget.tsx"], lab_record="required")
+        assert report.lab_record_missing == ["section"] and not report.ok
+
+    def test_an_unknown_mode_is_a_typed_error(self):
+        from claudomater.completion import _completion_report
+
+        with pytest.raises(CompletionError, match="completion.lab_record"):
+            _completion_report(STORY, ["app/src/Widget.tsx"], lab_record="strict")
+
+    def test_the_gate_reads_the_mode_from_config_and_logs_it(self, tmp_path):
+        repo, sha = _synthetic_repo(tmp_path, {"app/src/Widget.tsx": "w\n"})
+        (repo / "story.md").write_text(self._story(LAB_RECORD_NO_DISPOSITION))
+        log = _FakeRunLog()
+        report = run_completion_gate(repo, _CfgWithExempt([], lab_record="required"), "story.md", sha, log)
+        assert not report.ok and report.lab_record_missing == ["induced", "not-induced"]
+        (ev,) = log.events
+        assert ev["detail"]["lab_record"] == "required"
+        assert ev["detail"]["lab_record_missing"] == ["induced", "not-induced"]
+        # off: the same story passes
+        assert run_completion_gate(repo, _CfgWithExempt([]), "story.md", sha, _FakeRunLog()).ok
+

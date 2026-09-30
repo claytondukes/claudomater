@@ -624,6 +624,19 @@ class TestCompletionExemptConfig:
                 )
             )
 
+    def test_lab_record_defaults_off_and_accepts_required(self, tmp_path):
+        assert load_project_config(write_project(tmp_path, "project: p\n")).completion_lab_record == "off"
+        cfg = load_project_config(
+            write_project(tmp_path, "project: p\ncompletion:\n  lab_record: required\n")
+        )
+        assert cfg.completion_lab_record == "required"
+
+    def test_lab_record_refuses_an_unknown_mode(self, tmp_path):
+        with pytest.raises(ConfigError, match="completion.lab_record"):
+            load_project_config(
+                write_project(tmp_path, "project: p\ncompletion:\n  lab_record: strict\n")
+            )
+
     def test_dangerous_entries_fail_at_load(self, tmp_path):
         for bad in ("/abs", "a/../b", "."):
             with pytest.raises(ConfigError, match="completion.exempt"):
