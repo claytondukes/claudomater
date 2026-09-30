@@ -81,6 +81,54 @@ def runs_root(project_root: Path | str) -> Path:
     return Path(project_root) / OMATER_DIR / RUNS_DIR
 
 
+# The learning store's timestamp width (learnstore.TIMESTAMP_FORMAT); kept
+# local so runlog stays import-free of the store. A test pins the equality.
+_STORE_TIMESTAMP_FORMAT = "%Y-%m-%dT%H:%M:%S.%fZ"
+
+
+def epic_first_run_started_at(project_root: Path | str, epic: str) -> str | None:
+    """The learning-store-format timestamp of the earliest `run-created`
+    event among the runs whose `story-start` detail names this epic
+    (`{"epic": "67"}`), or None when no run has started a story of it.
+    The lessons injector takes it as the recency boundary, so a phase
+    prefers what the epic itself has taught over the same high-refs set.
+    Read-only over `.omater/runs/`; symlinks (`current`) and directories
+    without an events log are skipped; a corrupt events log raises as it
+    does everywhere else (damage propagates, it is never rounded to
+    'no runs')."""
+    root = runs_root(project_root)
+    if not root.is_dir():
+        return None
+    earliest: str | None = None
+    for run_dir in sorted(root.iterdir()):
+        if run_dir.is_symlink() or not run_dir.is_dir():
+            continue
+        if not (run_dir / EVENTS_JSONL).is_file():
+            continue
+        events = RunLog(run_dir, run_dir.name).events()
+        created = next((e for e in events if e.get("event") == "run-created"), None)
+        if created is None:
+            continue
+        names_epic = any(
+            e.get("event") == "story-start"
+            and isinstance(e.get("detail"), dict)
+            and str(e["detail"].get("epic")) == str(epic)
+            for e in events
+        )
+        if not names_epic:
+            continue
+        ts = created.get("ts")
+        if not isinstance(ts, str):
+            continue
+        if earliest is None or ts < earliest:
+            earliest = ts
+    if earliest is None:
+        return None
+    return datetime.strptime(earliest, "%Y-%m-%dT%H:%M:%SZ").strftime(
+        _STORE_TIMESTAMP_FORMAT
+    )
+
+
 def _remove_lock(lock: Path) -> None:
     """Remove the create lock whatever it is. rmtree alone silently no-ops
     on a file/symlink (tampering, older versions), leaving run creation

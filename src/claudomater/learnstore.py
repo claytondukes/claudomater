@@ -510,19 +510,32 @@ class LearnStore:
         scopes: Sequence[str],
         domains: Sequence[str] = (),
         budget: int = 20,
+        since: str | None = None,
+        recent_share: float = 0.5,
     ) -> list[dict[str, Any]]:
         """What a phase agent gets (design: always-loaded rules for its
         scopes plus an FTS query seeded with the story's domains, max ~20
         per phase, ranked by refs):
 
+        0. when `since` is given (a store-format timestamp, typically the
+           epic's first run), LIVE lessons in scope created at or after it,
+           NEWEST first, take up to ceil(budget * recent_share) slots ahead
+           of everything else - so a phase sees what the epic learned this
+           week instead of the same high-refs twenty forever (refs only
+           ever grow on the rows already injected, which is why the refs
+           tiers alone converged on one fixed set across three epics),
         1. every PROMOTED lesson in scope (the always-loaded set),
         2. then ACTIVE lessons whose `domain` matches a story domain,
         3. then ACTIVE lessons whose text FTS-matches the domain terms,
 
-        deduplicated in that priority order, refs-ranked within each tier,
+        deduplicated in that priority order, refs-ranked within tiers 1-3,
         truncated to `budget`. Superseded rows never surface."""
         if not scopes or budget <= 0:
             return []
+        if since is not None and not _validate_timestamp(since):
+            raise LearnStoreError(
+                f"since must be a {TIMESTAMP_FORMAT} timestamp, got {since!r}"
+            )
         chosen: list[dict[str, Any]] = []
         seen: set[int] = set()
 
@@ -534,10 +547,23 @@ class LearnStore:
                     seen.add(row["id"])
                     chosen.append(row)
 
+        marks = ",".join("?" * len(scopes))
+        if since is not None and recent_share > 0:
+            # the reserved share is a ceiling on RECENT rows, not a floor:
+            # fewer recent rows leave the slots to the refs tiers below
+            reserve = min(budget, max(1, -(-budget * recent_share // 1)))
+            take(
+                dict(r)
+                for r in self.conn.execute(
+                    f"SELECT * FROM lesson WHERE status IN ('active','promoted') "
+                    f"AND scope IN ({marks}) AND created_at >= ? "
+                    "ORDER BY created_at DESC, id DESC LIMIT ?",
+                    (*scopes, since, int(reserve)),
+                )
+            )
         # tiers 1 and 2 are status-disjoint (promoted vs active), so an
         # exact LIMIT per tier is safe — and the cursor is iterated, never
         # materialized: only up to `budget` rows can be consumed
-        marks = ",".join("?" * len(scopes))
         take(
             dict(r)
             for r in self.conn.execute(

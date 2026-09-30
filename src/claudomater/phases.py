@@ -52,6 +52,9 @@ class PhaseSpec:
     # `lessons_applied` in the result is validated against — an id that was
     # never injected can mint no credit
     injected_lessons: tuple[int, ...] = ()
+    # the recency boundary the injection used (store-format timestamp), for
+    # the lessons-injected event; None when no boundary was given
+    lessons_since: str | None = None
 
 
 @dataclass
@@ -294,6 +297,7 @@ def inject_lessons(
     scopes: Sequence[str],
     domains: Sequence[str] = (),
     budget: int = 20,
+    since: str | None = None,
 ) -> PhaseSpec:
     """Compose lesson retrieval into a phase spec — the ONE seam where the
     prompt gains the injection block AND `injected_lessons` is set, so the
@@ -306,13 +310,14 @@ def inject_lessons(
     """
     from claudomater.learnstore import injection_block
 
-    rows = store.lessons_for_phase(scopes, domains, budget=budget)
+    rows = store.lessons_for_phase(scopes, domains, budget=budget, since=since)
     if not rows:
         return spec
     return replace(
         spec,
         prompt=f"{spec.prompt}\n\n{injection_block(rows)}",
         injected_lessons=tuple(row["id"] for row in rows),
+        lessons_since=since,
     )
 
 
@@ -1002,10 +1007,16 @@ class PhaseRunner:
                 # provenance, write-ahead: WHAT the agent was given is on
                 # record before the agent exists — lessons_applied is later
                 # validated against exactly this set
+                injected_detail: dict[str, Any] = {
+                    "ids": list(spec.injected_lessons),
+                    "attempt": attempt,
+                }
+                if spec.lessons_since is not None:
+                    injected_detail["since"] = spec.lessons_since
                 self.runlog.event(
                     spec.name,
                     "lessons-injected",
-                    {"ids": list(spec.injected_lessons), "attempt": attempt},
+                    injected_detail,
                     story_key=spec.story_key,
                 )
             # Write-ahead: intent hits the log BEFORE the agent spawns.

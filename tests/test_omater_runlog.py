@@ -693,3 +693,55 @@ class TestPark:
         with pytest.raises(RunError):
             sibling.park("too late")
         assert not log.is_live()
+
+
+class TestEpicFirstRunStartedAt:
+    """The recency boundary the lessons injector uses (issue #32)."""
+
+    @staticmethod
+    def _write_run(root, run_id, created_ts, epic=None):
+        import json
+
+        d = root / ".omater" / "runs" / run_id
+        d.mkdir(parents=True)
+        lines = [{"event": "run-created", "phase": "run", "run_id": run_id, "ts": created_ts, "detail": {"run_id": run_id}}]
+        if epic is not None:
+            lines.append({"event": "story-start", "phase": "run", "run_id": run_id, "ts": created_ts,
+                          "story_key": f"{epic}-1-x", "detail": {"epic": epic, "blocked_on": None}})
+        (d / "events.jsonl").write_text("".join(json.dumps(x) + "\n" for x in lines))
+        return d
+
+    def test_earliest_run_of_the_epic_widened_to_store_width(self, tmp_path):
+        from claudomater.runlog import epic_first_run_started_at
+
+        self._write_run(tmp_path, "20260930-144001-1bc5", "2026-09-30T18:40:01Z", epic="64")
+        self._write_run(tmp_path, "20260930-144509-0f9c", "2026-09-30T18:45:09Z", epic="63")
+        self._write_run(tmp_path, "20261001-090000-aaaa", "2026-10-01T09:00:00Z", epic="67")
+        self._write_run(tmp_path, "20261001-120000-bbbb", "2026-10-01T12:00:00Z", epic="67")
+        self._write_run(tmp_path, "20261001-130000-cccc", "2026-10-01T13:00:00Z")  # no story-start
+        # the `current` symlink and a lock directory are not runs
+        (tmp_path / ".omater" / "runs" / "current").symlink_to("20261001-120000-bbbb")
+        (tmp_path / ".omater" / "runs" / ".create-lock").mkdir()
+        assert epic_first_run_started_at(tmp_path, "67") == "2026-10-01T09:00:00.000000Z"
+        assert epic_first_run_started_at(tmp_path, 67) == "2026-10-01T09:00:00.000000Z"
+        assert epic_first_run_started_at(tmp_path, "63") == "2026-09-30T18:45:09.000000Z"
+        assert epic_first_run_started_at(tmp_path, "68") is None
+
+    def test_no_runs_directory_is_none(self, tmp_path):
+        from claudomater.runlog import epic_first_run_started_at
+
+        assert epic_first_run_started_at(tmp_path, "67") is None
+
+    def test_store_width_matches_the_learning_store(self):
+        from claudomater import learnstore, runlog
+
+        assert runlog._STORE_TIMESTAMP_FORMAT == learnstore.TIMESTAMP_FORMAT
+
+    def test_a_corrupt_events_log_propagates(self, tmp_path):
+        from claudomater.runlog import RunError, epic_first_run_started_at
+
+        d = self._write_run(tmp_path, "20261001-090000-aaaa", "2026-10-01T09:00:00Z", epic="67")
+        (d / "events.jsonl").write_text('{"event": "run-created"}\nnot json at all\n{"event": "x"}\n')
+        with pytest.raises(RunError):
+            epic_first_run_started_at(tmp_path, "67")
+
