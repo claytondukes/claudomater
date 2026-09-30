@@ -113,6 +113,17 @@ _ALL_INDUCED_RE = re.compile(
 _ARM_WORD_RE = re.compile(r"\barms?\b", re.IGNORECASE)
 
 
+def _all_induced(text: str) -> bool:
+    """A whole-record exception ("every arm induced", "no runtime arm") holds
+    only in a clause with no negation token before it: "Not every arm was
+    induced" is a negative statement, not an exception."""
+    for clause in _clauses(text):
+        m = _ALL_INDUCED_RE.search(clause)
+        if m and not _NEGATION_RE.search(clause[: m.start()]):
+            return True
+    return False
+
+
 def _positive_induced(text: str) -> bool:
     return _clause_dispositions(text)[0]
 
@@ -123,8 +134,9 @@ def _negative_induced(text: str) -> bool:
 
 def _has_disposition(item: str) -> bool:
     """A bullet item carries a disposition when one of its clauses says
-    induced positively, negates an induce-word, or carries STATED."""
-    return any(_clause_dispositions(item))
+    induced positively, negates an induce-word, carries STATED, or states
+    a whole-record exception (every arm induced, no runtime arm)."""
+    return any(_clause_dispositions(item)) or _all_induced(item)
 _BULLET_RE = re.compile(r"^\s*[-*]\s")
 _WS_RE = re.compile(r"\s+")
 
@@ -181,7 +193,7 @@ def lab_record_problems(section: str) -> tuple[list[str], list[str]]:
             f"bullet item(s) {', '.join(str(n) for n in undisposed)} of {len(items)} "
             "in the `### Merge and lab record` section (numbered from 1)"
         )
-    all_induced = bool(_ALL_INDUCED_RE.search(flat))
+    all_induced = _all_induced(flat)
     if not _positive_induced(flat) and not all_induced:
         missing.append("induced")
     if not _negative_induced(flat) and not all_induced:
