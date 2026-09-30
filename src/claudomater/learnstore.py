@@ -533,7 +533,7 @@ class LearnStore:
         truncated to `budget`. Superseded rows never surface."""
         # inputs are judged before the no-work return: an off-format boundary
         # or share is a caller bug whatever the scopes or budget say
-        if since is not None and not _validate_timestamp(since):
+        if since is not None and not (isinstance(since, str) and _validate_timestamp(since)):
             raise LearnStoreError(
                 f"since must be a {TIMESTAMP_FORMAT} timestamp, got {since!r}"
             )

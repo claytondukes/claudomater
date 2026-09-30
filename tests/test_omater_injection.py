@@ -127,8 +127,9 @@ class TestLessonsForPhase:
         from claudomater.learnstore import LearnStoreError
 
         lesson(store, "k")
-        with pytest.raises(LearnStoreError):
-            store.lessons_for_phase(["global"], since="2026-09-30")
+        for bad in ("2026-09-30", 123, 1_700_000_000.0, b"2026-08-30T00:00:00.000000Z"):
+            with pytest.raises(LearnStoreError):
+                store.lessons_for_phase(["global"], since=bad)
 
     def test_recent_share_must_be_a_finite_fraction(self, store):
         from claudomater.learnstore import LearnStoreError
