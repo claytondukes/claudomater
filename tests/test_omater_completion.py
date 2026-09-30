@@ -587,6 +587,22 @@ class TestLabRecordBlade:
         report = _completion_report(self._story(record), self.MERGED, lab_record="required")
         assert report.lab_record_missing == ["induced"]
 
+    def test_a_negated_coordination_without_a_new_subject_stays_negative(self):
+        from claudomater.completion import _completion_report
+
+        for line in (
+            "- No arm was exercised and induced; STATED.",
+            "- The port arm was not exercised and induced; STATED.",
+            "- The port arm was never restarted and induced, STATED.",
+        ):
+            record = "### Merge and lab record (operator, 2026-09-30)\n\n" + line + "\n"
+            report = _completion_report(self._story(record), self.MERGED, lab_record="required")
+            assert report.lab_record_missing == ["induced"] and not report.ok, line
+        # a conjunction that continues the SAME arm keeps a positive positive
+        record = ("### Merge and lab record (operator, 2026-09-30)\n\n"
+                  "- The interface arm was induced and restored; the port arm was not induced.\n")
+        assert _completion_report(self._story(record), self.MERGED, lab_record="required").ok
+
     def test_a_negated_all_induced_statement_is_not_an_exception(self):
         from claudomater.completion import _completion_report
 
