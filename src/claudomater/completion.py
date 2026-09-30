@@ -58,16 +58,44 @@ LAB_RECORD_HEADING_RE = re.compile(r"^###\s+Merge and lab record\b.*$", re.MULTI
 # A3, epic-65 A4, epic-66 A6, epic-63 F5: four epics of records that
 # carried it by discipline alone). `induced` must appear, and the record
 # must say what was NOT induced - or that nothing was left un-induced.
-# The negative dispositions. Every negative span is REMOVED from the text
-# before the positive search, so no modifier (not, never, no, un-, was not,
-# cannot be, ...) can leave an `induced` behind for the positive side to
-# count: "never induced; STATED" is a negative-only record.
-_NEGATIVE_SPAN_RE = re.compile(
-    r"\b(?:not|never|no|un-|non-|cannot be|could not be|was not|were not|wasn't|weren't|isn't|is not)"
-    r"[\s-]*(?:be[\s-]+)?induc(?:ed|ible)\b|\bSTATED\b",
+# The vocabulary is judged CLAUSE by clause (a clause ends at . ; : or a
+# line's bullet), not by adjacency: "No arm was induced", "none of the
+# arms were induced", "the port arm was not induced" and "never induced"
+# all carry a negation token somewhere before `induced` in their clause
+# and are negative; a clause whose `induced` has no negation before it is
+# positive. STATED is a negative marker on its own. Enumerating adjacent
+# modifiers was the previous approach and lost to every new phrasing.
+_CLAUSE_SPLIT_RE = re.compile(r"[.;:]|\s+[-*]\s")
+_INDUCE_WORD_RE = re.compile(r"\b(?:un-|non-)?induc(?:ed|ible)\b", re.IGNORECASE)
+_NEGATION_RE = re.compile(
+    r"\b(?:not|never|no|none|neither|nor|without|cannot|can't|couldn't|wasn't|weren't|isn't|aren't|didn't)\b"
+    r"|\b(?:un|non)-(?=induc)",
     re.IGNORECASE,
 )
-_INDUCED_RE = re.compile(r"\binduced\b", re.IGNORECASE)
+_STATED_RE = re.compile(r"\bSTATED\b")
+
+
+def _clauses(text: str) -> list[str]:
+    return [c for c in _CLAUSE_SPLIT_RE.split(text) if c and c.strip()]
+
+
+def _clause_dispositions(text: str) -> tuple[bool, bool]:
+    """(positive, negative): positive when some clause says `induced` with
+    no negation token before it; negative when some clause negates an
+    induce-word, uses an un-/non- form, or carries STATED."""
+    positive = negative = False
+    for clause in _clauses(text):
+        if _STATED_RE.search(clause):
+            negative = True
+        for m in _INDUCE_WORD_RE.finditer(clause):
+            before = clause[: m.start()]
+            negated = bool(_NEGATION_RE.search(before)) or m.group(0).lower().startswith(("un-", "non-"))
+            if negated or m.group(0).lower().endswith("inducible") and negated:
+                negative = True
+            elif m.group(0).lower().endswith("induced"):
+                positive = True
+            # a bare "inducible" without negation says nothing either way
+    return positive, negative
 # The whole-record statements that stand in for a negative line: nothing
 # was left un-induced, or there is no runtime arm at all. A "no
 # non-inducible arm" says every arm COULD be induced, not that it was, so
@@ -81,14 +109,17 @@ _ARM_WORD_RE = re.compile(r"\barms?\b", re.IGNORECASE)
 
 
 def _positive_induced(text: str) -> bool:
-    """True when an `induced` survives the removal of every negative span."""
-    return bool(_INDUCED_RE.search(_NEGATIVE_SPAN_RE.sub(" ", text)))
+    return _clause_dispositions(text)[0]
+
+
+def _negative_induced(text: str) -> bool:
+    return _clause_dispositions(text)[1]
 
 
 def _has_disposition(item: str) -> bool:
-    """A bullet item carries a disposition when it says induced (positively)
-    or carries a negative span (not / never induced, not inducible, STATED)."""
-    return bool(_NEGATIVE_SPAN_RE.search(item)) or _positive_induced(item)
+    """A bullet item carries a disposition when one of its clauses says
+    induced positively, negates an induce-word, or carries STATED."""
+    return any(_clause_dispositions(item))
 _BULLET_RE = re.compile(r"^\s*[-*]\s")
 _WS_RE = re.compile(r"\s+")
 
@@ -148,7 +179,7 @@ def lab_record_problems(section: str) -> tuple[list[str], list[str]]:
     all_induced = bool(_ALL_INDUCED_RE.search(flat))
     if not _positive_induced(flat) and not all_induced:
         missing.append("induced")
-    if not _NEGATIVE_SPAN_RE.search(flat) and not all_induced:
+    if not _negative_induced(flat) and not all_induced:
         missing.append("not-induced")
     words = [m for m in missing if not m.startswith("arm:")]
     if words:

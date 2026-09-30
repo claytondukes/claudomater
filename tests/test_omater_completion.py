@@ -543,6 +543,27 @@ class TestLabRecordBlade:
         report = _completion_report(self._story(record), self.MERGED, lab_record="required")
         assert report.lab_record_missing == ["induced"] and not report.ok
 
+    def test_subject_separated_negations_are_negative(self):
+        from claudomater.completion import _completion_report
+
+        for line in (
+            "- No arm was induced; STATED.",
+            "- none of the arms were induced; STATED.",
+            "- the port arm was not induced (a port change takes the lab down); STATED.",
+            "- neither arm could be induced on the shared lab; STATED.",
+        ):
+            record = "### Merge and lab record (operator, 2026-09-30)\n\n" + line + "\n"
+            report = _completion_report(self._story(record), self.MERGED, lab_record="required")
+            assert report.lab_record_missing == ["induced"], line
+            assert not report.ok
+
+    def test_a_positive_clause_after_a_negative_one_counts(self):
+        from claudomater.completion import _completion_report
+
+        record = ("### Merge and lab record (operator, 2026-09-30)\n\n"
+                  "- The port arm was not induced; the interface arm was induced for real and restored.\n")
+        assert _completion_report(self._story(record), self.MERGED, lab_record="required").ok
+
     def test_no_non_inducible_arm_is_not_an_all_induced_statement(self):
         from claudomater.completion import _completion_report
 
