@@ -608,6 +608,44 @@ class TestLabRecordBlade:
         report = _completion_report(self._story(record), self.MERGED, lab_record="required")
         assert report.ok, report.problems
 
+    def test_a_negated_stated_is_not_a_disposition(self):
+        from claudomater.completion import _completion_report
+
+        record = ("### Merge and lab record (operator, 2026-09-30)\n\n"
+                  "- ADMIN arm: induced for real and restored.\n"
+                  "- PORT arm: not STATED because the lab was unavailable.\n")
+        report = _completion_report(self._story(record), self.MERGED, lab_record="required")
+        assert report.lab_record_missing == ["arm:2", "not-induced"] and not report.ok
+        # the same arm with a real disposition passes
+        record = record.replace("not STATED because the lab was unavailable",
+                                "not induced (the lab was unavailable); STATED")
+        assert _completion_report(self._story(record), self.MERGED, lab_record="required").ok
+
+    def test_no_runtime_arm_with_another_predicate_is_not_the_exception(self):
+        from claudomater.completion import _completion_report
+
+        for line in (
+            "- No runtime arm passed validation.",
+            "- No runtime arm requires induction.",
+            "- No runtime arm was induced.",
+        ):
+            record = "### Merge and lab record (operator, 2026-09-30)\n\n" + line + "\n"
+            report = _completion_report(self._story(record), self.MERGED, lab_record="required")
+            assert "induced" in report.lab_record_missing and not report.ok, line
+
+    def test_the_standalone_no_runtime_arm_clause_is_the_exception(self):
+        from claudomater.completion import _completion_report
+
+        for line in (
+            "- No runtime arm.",
+            "- No runtime arm exists (the merge touches docs only).",
+            "- Docs only, no runtime arm; STATED.",
+            "- There is no runtime arm for this story.",
+        ):
+            record = "### Merge and lab record (operator, 2026-09-30)\n\n" + line + "\n"
+            report = _completion_report(self._story(record), self.MERGED, lab_record="required")
+            assert report.ok, (line, report.problems)
+
     def test_a_positive_clause_after_a_negative_one_counts(self):
         from claudomater.completion import _completion_report
 

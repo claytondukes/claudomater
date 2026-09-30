@@ -87,10 +87,13 @@ def _clauses(text: str) -> list[str]:
 def _clause_dispositions(text: str) -> tuple[bool, bool]:
     """(positive, negative): positive when some clause says `induced` with
     no negation token before it; negative when some clause negates an
-    induce-word, uses an un-/non- form, or carries STATED."""
+    induce-word, uses an un-/non- form, or carries STATED with no negation
+    token before it ("not STATED because the lab was unavailable" is an
+    undisposed arm, not a negative one)."""
     positive = negative = False
     for clause in _clauses(text):
-        if _STATED_RE.search(clause):
+        stated = _STATED_RE.search(clause)
+        if stated and not _NEGATION_RE.search(clause[: stated.start()]):
             negative = True
         for m in _INDUCE_WORD_RE.finditer(clause):
             before = clause[: m.start()]
@@ -105,25 +108,39 @@ def _clause_dispositions(text: str) -> tuple[bool, bool]:
 # was left un-induced, or there is no runtime arm at all. A "no
 # non-inducible arm" says every arm COULD be induced, not that it was, so
 # it is deliberately not here.
-# The no-runtime-arm exception is a complete assertion ("no runtime arm
-# exists"), never the start of a sentence that goes on to a verb ("no
-# runtime arm was induced" reports zero inductions and is refused).
 _ALL_INDUCED_RE = re.compile(
     r"\bevery arm (?:was )?induced\b|\ball arms (?:were )?induced\b"
-    r"|\bno not-induced arm\b"
-    r"|\bno runtime arm\b(?!\s+(?:was|were|is|has|had|could|can|would|will|got)\b)",
+    r"|\bno not-induced arm\b",
     re.IGNORECASE,
 )
+# The no-runtime-arm exception is a whole clause, never a phrase inside
+# one: the clause says nothing but that no runtime arm exists ("No runtime
+# arm.", "no runtime arm exists", "there is no runtime arm for this story",
+# an optional parenthetical). A clause that goes on to any predicate ("no
+# runtime arm was induced", "no runtime arm passed validation") reports
+# something about arms that do exist and is refused: enumerating the verbs
+# to block lost to the first verb not on the list.
+_NO_RUNTIME_ARM_RE = re.compile(
+    r"(?:there (?:is|was|are|were) )?no runtime arms?"
+    r"(?: (?:exists?|existed|applies|applied))?"
+    r"(?: (?:in|for) this (?:story|merge|change))?"
+    r"(?: \([^()]*\))?",
+    re.IGNORECASE,
+)
+_LEADING_BULLET_RE = re.compile(r"^[-*]\s+")
 _ARM_WORD_RE = re.compile(r"\barms?\b", re.IGNORECASE)
 
 
 def _all_induced(text: str) -> bool:
-    """A whole-record exception ("every arm induced", "no runtime arm") holds
-    only in a clause with no negation token before it: "Not every arm was
-    induced" is a negative statement, not an exception."""
+    """A whole-record exception holds in a clause with no negation token
+    before it ("Not every arm was induced" is a negative statement, not an
+    exception) or in a clause that is, entire, the no-runtime-arm
+    assertion."""
     for clause in _clauses(text):
         m = _ALL_INDUCED_RE.search(clause)
         if m and not _NEGATION_RE.search(clause[: m.start()]):
+            return True
+        if _NO_RUNTIME_ARM_RE.fullmatch(_LEADING_BULLET_RE.sub("", clause.strip())):
             return True
     return False
 
