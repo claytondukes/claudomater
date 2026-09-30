@@ -67,7 +67,10 @@ LAB_RECORD_HEADING_RE = re.compile(
 # and are negative; a clause whose `induced` has no negation before it is
 # positive. STATED is a negative marker on its own. Enumerating adjacent
 # modifiers was the previous approach and lost to every new phrasing.
-_CLAUSE_SPLIT_RE = re.compile(r"[.;:]|\s+[-*]\s")
+# A clause also ends at a coordinating conjunction, so "the port arm was not
+# induced but the interface arm was induced" scopes its negation to the
+# first arm only.
+_CLAUSE_SPLIT_RE = re.compile(r"[.;:,]|\s+[-*]\s|\b(?:but|and|while|whereas|yet)\b", re.IGNORECASE)
 _INDUCE_WORD_RE = re.compile(r"\b(?:un-|non-)?induc(?:ed|ible)\b", re.IGNORECASE)
 _NEGATION_RE = re.compile(
     r"\b(?:not|never|no|none|neither|nor|without|cannot|can't|couldn't|wasn't|weren't|isn't|aren't|didn't)\b"

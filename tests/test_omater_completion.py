@@ -570,6 +570,23 @@ class TestLabRecordBlade:
             assert report.lab_record_missing == ["induced"], line
             assert not report.ok
 
+    def test_coordinated_clauses_scope_their_own_negation(self):
+        from claudomater.completion import _completion_report
+
+        for line in (
+            "- The port arm was not induced but the interface arm was induced.",
+            "- The port arm was not induced and the interface arm was induced for real.",
+            "- No arm was skipped, the interface arm was induced while the port arm was not induced.",
+        ):
+            record = "### Merge and lab record (operator, 2026-09-30)\n\n" + line + "\n"
+            report = _completion_report(self._story(record), self.MERGED, lab_record="required")
+            assert report.ok, (line, report.problems)
+        # and a coordinated all-negative line stays negative-only
+        record = ("### Merge and lab record (operator, 2026-09-30)\n\n"
+                  "- The port arm was not induced and the TLS arm was never induced; STATED.\n")
+        report = _completion_report(self._story(record), self.MERGED, lab_record="required")
+        assert report.lab_record_missing == ["induced"]
+
     def test_a_positive_clause_after_a_negative_one_counts(self):
         from claudomater.completion import _completion_report
 
