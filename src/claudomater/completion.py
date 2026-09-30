@@ -112,23 +112,27 @@ def _bullet_items(section: str) -> list[str]:
 def lab_record_problems(section: str) -> tuple[list[str], list[str]]:
     """(missing, problems) for a lab-record section under `required`:
     every bullet item that names an arm is judged on its own and a
-    dispositionless one is named; then the section as a whole must carry
-    a positive `induced` and a negative disposition, unless it says every
+    dispositionless one is named by its POSITION among the section's
+    bullet items (never by its text: the report rides into events.jsonl,
+    progress.log and the CLI unredacted, and a lab record can carry a
+    token-shaped value); then the section as a whole must carry a
+    positive `induced` and a negative disposition, unless it says every
     arm was induced or no runtime arm exists."""
     missing: list[str] = []
     problems: list[str] = []
     flat = _flat(section)
+    items = [_flat(i) for i in _bullet_items(section)]
     undisposed = [
-        item for item in (_flat(i) for i in _bullet_items(section))
+        n for n, item in enumerate(items, start=1)
         if _ARM_WORD_RE.search(item) and not _DISPOSITION_RE.search(item)
     ]
-    for item in undisposed:
-        missing.append(f"arm:{item[:60]}")
+    for n in undisposed:
+        missing.append(f"arm:{n}")
     if undisposed:
         problems.append(
-            "lab-record arm entries without an induced / not-induced disposition: "
-            + "; ".join(repr(i[:60]) for i in undisposed[:5])
-            + (" ..." if len(undisposed) > 5 else "")
+            f"lab-record arm entries without an induced / not-induced disposition: "
+            f"bullet item(s) {', '.join(str(n) for n in undisposed)} of {len(items)} "
+            "in the `### Merge and lab record` section (numbered from 1)"
         )
     all_induced = bool(_ALL_INDUCED_RE.search(flat))
     if not _INDUCED_RE.search(flat) and not all_induced:

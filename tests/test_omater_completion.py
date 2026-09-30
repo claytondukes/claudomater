@@ -477,11 +477,7 @@ class TestLabRecordBlade:
         report = _completion_report(self._story(LAB_RECORD_NO_DISPOSITION), self.MERGED, lab_record="required")
         # "every arm exact-wire" names arms without a disposition, so it is an
         # undisposed arm entry on top of the two missing words
-        assert report.lab_record_missing == [
-            "arm:- Lab: 29/29 on the first run, every arm exact-wire.",
-            "induced",
-            "not-induced",
-        ]
+        assert report.lab_record_missing == ["arm:2", "induced", "not-induced"]
         assert not report.ok and any("lacks the literal induced" in p for p in report.problems)
 
     def test_required_fails_when_the_section_is_absent(self):
@@ -503,10 +499,23 @@ class TestLabRecordBlade:
 - Cleanup asserted 204.
 """
         report = _completion_report(self._story(record), self.MERGED, lab_record="required")
-        assert len(report.lab_record_missing) == 1
-        assert report.lab_record_missing[0].startswith("arm:- ERROR arm: the transport error")
-        assert not report.ok and any("arm entries without" in p for p in report.problems)
+        # the third bullet is the undisposed arm; the report carries its position, never its text
+        assert report.lab_record_missing == ["arm:3"]
+        assert not report.ok and any("bullet item(s) 3 of 4" in p for p in report.problems)
+        joined = " ".join(report.problems) + " ".join(report.lab_record_missing)
+        assert "transport error" not in joined and "useServerTimeZone" not in joined
         assert not any("lacks the literal" in p for p in report.problems)
+
+    def test_story_text_never_reaches_the_report(self):
+        from claudomater.completion import _completion_report
+
+        record = (
+            "### Merge and lab record (operator, 2026-09-30)\n\n"
+            "- TOKEN arm: the probe used sk-live-EXAMPLE-SECRET-0000 and saw 200.\n"
+        )
+        report = _completion_report(self._story(record), self.MERGED, lab_record="required")
+        assert report.lab_record_missing[0] == "arm:1"
+        assert "EXAMPLE-SECRET" not in (" ".join(report.problems) + " ".join(report.lab_record_missing))
 
     def test_a_negative_only_record_fails_the_positive_side(self):
         from claudomater.completion import _completion_report
