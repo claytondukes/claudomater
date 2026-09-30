@@ -480,6 +480,19 @@ class TestLabRecordBlade:
         assert report.lab_record_missing == ["arm:2", "induced", "not-induced"]
         assert not report.ok and any("lacks the literal induced" in p for p in report.problems)
 
+    def test_a_heading_with_trailing_words_is_not_the_record(self):
+        from claudomater.completion import _completion_report
+
+        template = (
+            "### Merge and lab record instructions\n\n"
+            "- say per arm whether it was induced or not induced; STATED for non-runtime arms.\n"
+        )
+        report = _completion_report(self._story(template), self.MERGED, lab_record="required")
+        assert report.lab_record_missing == ["section"] and not report.ok
+        # the documented annotation form is still the record
+        titled = LAB_RECORD_OK.replace("(operator, 2026-09-30)", "(operator, 2026-10-01, re-run)")
+        assert _completion_report(self._story(titled), self.MERGED, lab_record="required").ok
+
     def test_required_fails_when_the_section_is_absent(self):
         from claudomater.completion import _completion_report
 

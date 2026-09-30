@@ -50,10 +50,12 @@ from typing import Sequence
 
 TASKS_HEADING_RE = re.compile(r"^##\s+Tasks(\s*/\s*Subtasks)?\s*$", re.MULTILINE)
 FILE_LIST_HEADING_RE = re.compile(r"^###\s+File List\s*$", re.MULTILINE)
-# The operator's post-merge record. Its heading carries a suffix in the
-# records seen so far ("(operator, 2026-09-30)"), so the match stops at
-# the words.
-LAB_RECORD_HEADING_RE = re.compile(r"^###\s+Merge and lab record\b.*$", re.MULTILINE)
+# The operator's post-merge record. Its heading carries at most one
+# parenthesized annotation ("(operator, 2026-09-30)"); anything else after
+# the words ("... instructions") is another section, never the record.
+LAB_RECORD_HEADING_RE = re.compile(
+    r"^###\s+Merge and lab record(?:\s*\([^)\n]*\))?\s*$", re.MULTILINE
+)
 # The literal disposition vocabulary a lab record must use (epic-64 retro
 # A3, epic-65 A4, epic-66 A6, epic-63 F5: four epics of records that
 # carried it by discipline alone). `induced` must appear, and the record
