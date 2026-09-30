@@ -475,7 +475,13 @@ class TestLabRecordBlade:
         from claudomater.completion import _completion_report
 
         report = _completion_report(self._story(LAB_RECORD_NO_DISPOSITION), self.MERGED, lab_record="required")
-        assert report.lab_record_missing == ["induced", "not-induced"]
+        # "every arm exact-wire" names arms without a disposition, so it is an
+        # undisposed arm entry on top of the two missing words
+        assert report.lab_record_missing == [
+            "arm:- Lab: 29/29 on the first run, every arm exact-wire.",
+            "induced",
+            "not-induced",
+        ]
         assert not report.ok and any("lacks the literal induced" in p for p in report.problems)
 
     def test_required_fails_when_the_section_is_absent(self):
@@ -483,6 +489,43 @@ class TestLabRecordBlade:
 
         report = _completion_report(STORY, self.MERGED, lab_record="required")
         assert report.lab_record_missing == ["section"] and not report.ok
+
+    def test_each_arm_entry_is_judged_and_the_undisposed_one_is_named(self):
+        from claudomater.completion import _completion_report
+
+        record = """\
+### Merge and lab record (operator, 2026-09-30)
+
+- ADMIN arm: induced through the real dialog.
+- PORT arm: not induced (a port change takes the shared lab down).
+- ERROR arm: the transport error, covered by the pins
+  (`useServerTimeZone.test.tsx`).
+- Cleanup asserted 204.
+"""
+        report = _completion_report(self._story(record), self.MERGED, lab_record="required")
+        assert len(report.lab_record_missing) == 1
+        assert report.lab_record_missing[0].startswith("arm:- ERROR arm: the transport error")
+        assert not report.ok and any("arm entries without" in p for p in report.problems)
+        assert not any("lacks the literal" in p for p in report.problems)
+
+    def test_a_negative_only_record_fails_the_positive_side(self):
+        from claudomater.completion import _completion_report
+
+        record = "### Merge and lab record (operator, 2026-09-30)\n\n- not induced: the port arm.\n"
+        report = _completion_report(self._story(record), self.MERGED, lab_record="required")
+        assert report.lab_record_missing == ["induced"] and not report.ok
+
+    def test_every_arm_induced_satisfies_both_sides(self):
+        from claudomater.completion import _completion_report
+
+        record = "### Merge and lab record (operator, 2026-09-30)\n\n- Lab: 18/18; every arm induced - every arm is a click.\n"
+        assert _completion_report(self._story(record), self.MERGED, lab_record="required").ok
+
+    def test_bare_yaml_off_and_on_normalize(self):
+        from claudomater.completion import normalize_lab_record
+
+        assert normalize_lab_record(False) == "off"
+        assert normalize_lab_record(True) == "required"
 
     def test_an_unknown_mode_is_a_typed_error(self):
         from claudomater.completion import _completion_report
@@ -498,10 +541,10 @@ class TestLabRecordBlade:
         (repo / "story.md").write_text(self._story(LAB_RECORD_NO_DISPOSITION))
         log = _FakeRunLog()
         report = run_completion_gate(repo, _CfgWithExempt([], lab_record="required"), "story.md", sha, log)
-        assert not report.ok and report.lab_record_missing == ["induced", "not-induced"]
+        assert not report.ok and report.lab_record_missing[-2:] == ["induced", "not-induced"]
         (ev,) = log.events
         assert ev["detail"]["lab_record"] == "required"
-        assert ev["detail"]["lab_record_missing"] == ["induced", "not-induced"]
+        assert ev["detail"]["lab_record_missing"][-2:] == ["induced", "not-induced"]
         # off: the same story passes
         assert run_completion_gate(repo, _CfgWithExempt([]), "story.md", sha, _FakeRunLog()).ok
 

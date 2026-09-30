@@ -8,7 +8,7 @@ bookkeeping genuinely not done - the run session narrated completion and
 nothing diffed the narration against the file. This gate reads the story
 file and the ACTUAL merged changeset; narration never satisfies it.
 
-Two blades, both fail-closed:
+Three blades, all fail-closed (the third is an opt-in):
 
 1. TASK BOXES - any unchecked `- [ ]` inside `## Tasks / Subtasks`, at
    any indent (the evidence's sub-items were indented), blocks. A story
@@ -27,6 +27,17 @@ Two blades, both fail-closed:
    all - the gate must at least SAY that, because "no list" and "list
    agrees" must never read the same. `require_file_list=False` is the
    explicit project-level opt-out for templates that do not mandate one.
+
+3. LAB RECORD VOCABULARY (`completion.lab_record: required`) - the
+   `### Merge and lab record` must say, in the literal words, what the
+   lab arms induced and what they did not: every bullet item in the
+   section that names an arm (the word `arm`) carries `induced`,
+   `not induced`, `not inducible` or `STATED`, the section as a whole
+   carries at least one positive `induced` and at least one negative
+   disposition (or says every arm was induced / no runtime arm exists),
+   and a missing section blocks. Four epics of close reviews found the
+   line carried by discipline alone under an epic sentence promising this
+   gate. Off by default: a project opts in per `.omater.yaml`.
 """
 
 from __future__ import annotations
@@ -47,12 +58,84 @@ LAB_RECORD_HEADING_RE = re.compile(r"^###\s+Merge and lab record\b.*$", re.MULTI
 # A3, epic-65 A4, epic-66 A6, epic-63 F5: four epics of records that
 # carried it by discipline alone). `induced` must appear, and the record
 # must say what was NOT induced - or that nothing was left un-induced.
-_INDUCED_RE = re.compile(r"\binduced\b", re.IGNORECASE)
+# A positive `induced` is one not preceded by `not` / `not-` / `un-`:
+# "not induced: the port arm" must never satisfy the positive side.
+_INDUCED_RE = re.compile(r"(?<!\bnot )(?<!\bnot-)(?<!\bun-)\binduced\b", re.IGNORECASE)
 _NOT_INDUCED_RE = re.compile(
-    r"\bnot induced\b|\bnot inducible\b|\bSTATED\b|\bevery arm induced\b"
-    r"|\bno (?:non-inducible|not-induced) arm\b|\bno runtime arm\b",
+    r"\bnot induced\b|\bnot-induced\b|\bnot inducible\b|\bSTATED\b",
     re.IGNORECASE,
 )
+# The whole-record statements that stand in for a negative line (nothing
+# was left un-induced, or there is no runtime arm at all).
+_ALL_INDUCED_RE = re.compile(
+    r"\bevery arm (?:was )?induced\b|\bno (?:non-inducible|not-induced) arm\b"
+    r"|\bno runtime arm\b|\ball arms induced\b",
+    re.IGNORECASE,
+)
+_ARM_WORD_RE = re.compile(r"\barms?\b", re.IGNORECASE)
+_DISPOSITION_RE = re.compile(
+    r"(?<!\bnot )(?<!\bnot-)(?<!\bun-)\binduced\b|\bnot induced\b|\bnot-induced\b"
+    r"|\bnot inducible\b|\bSTATED\b",
+    re.IGNORECASE,
+)
+_BULLET_RE = re.compile(r"^\s*[-*]\s")
+
+
+def _bullet_items(section: str) -> list[str]:
+    """The section's bullet items, each with its indented continuation
+    lines joined; prose paragraphs are not items."""
+    items: list[str] = []
+    current: list[str] | None = None
+    for line in section.splitlines():
+        if _BULLET_RE.match(line):
+            if current:
+                items.append(" ".join(current))
+            current = [line.strip()]
+        elif current is not None and line.strip() and line[:1].isspace():
+            current.append(line.strip())
+        else:
+            if current:
+                items.append(" ".join(current))
+            current = None
+    if current:
+        items.append(" ".join(current))
+    return items
+
+
+def lab_record_problems(section: str) -> tuple[list[str], list[str]]:
+    """(missing, problems) for a lab-record section under `required`:
+    every bullet item that names an arm is judged on its own and a
+    dispositionless one is named; then the section as a whole must carry
+    a positive `induced` and a negative disposition, unless it says every
+    arm was induced or no runtime arm exists."""
+    missing: list[str] = []
+    problems: list[str] = []
+    undisposed = [
+        item for item in _bullet_items(section)
+        if _ARM_WORD_RE.search(item) and not _DISPOSITION_RE.search(item)
+    ]
+    for item in undisposed:
+        missing.append(f"arm:{item[:60]}")
+    if undisposed:
+        problems.append(
+            "lab-record arm entries without an induced / not-induced disposition: "
+            + "; ".join(repr(i[:60]) for i in undisposed[:5])
+            + (" ..." if len(undisposed) > 5 else "")
+        )
+    all_induced = bool(_ALL_INDUCED_RE.search(section))
+    if not _INDUCED_RE.search(section) and not all_induced:
+        missing.append("induced")
+    if not _NOT_INDUCED_RE.search(section) and not all_induced:
+        missing.append("not-induced")
+    words = [m for m in missing if not m.startswith("arm:")]
+    if words:
+        problems.append(
+            "the `### Merge and lab record` lacks the literal induced / "
+            "not-induced line: missing " + ", ".join(words)
+            + " (say per failure arm `induced` or `not induced` / `not inducible` "
+            "/ `STATED`, or that every arm was induced)"
+        )
+    return missing, problems
 LAB_RECORD_MODES = ("off", "required")
 _HEADING_RE = re.compile(r"^#{2,3}\s+\S", re.MULTILINE)
 # \s* after the box, not \s+: a bare `- [ ]` with no label text is still
@@ -77,6 +160,13 @@ def normalize_lab_record(value: object) -> str:
     vocabulary). Anything else is a config error, never a silent off."""
     if value is None:
         return "off"
+    # YAML 1.1 parses bare off/on as booleans - the documented values must
+    # work unquoted, so map them back before validating (merge.converge
+    # does the same).
+    if value is False:
+        return "off"
+    if value is True:
+        return "required"
     if not isinstance(value, str) or value not in LAB_RECORD_MODES:
         raise CompletionError(
             f"completion.lab_record must be one of {LAB_RECORD_MODES}, got {value!r}"
@@ -139,8 +229,9 @@ def normalize_exempt(entries: object) -> tuple[str, ...]:
 
 @dataclass
 class CompletionReport:
-    """The gate's verdict with its evidence. `ok` is True only when both
-    blades found nothing."""
+    """The gate's verdict with its evidence. `ok` is True only when no
+    blade found anything (the lab-record blade contributes only when the
+    project opted in)."""
 
     unchecked: list[str] = field(default_factory=list)
     missing_from_list: list[str] = field(default_factory=list)
@@ -366,18 +457,9 @@ def _completion_report(
                 "cannot judge a lab record it cannot see"
             )
         else:
-            if not _INDUCED_RE.search(lab):
-                report.lab_record_missing.append("induced")
-            if not _NOT_INDUCED_RE.search(lab):
-                report.lab_record_missing.append("not-induced")
-            if report.lab_record_missing:
-                report.problems.append(
-                    "the `### Merge and lab record` lacks the literal induced / "
-                    "not-induced line: missing "
-                    + ", ".join(report.lab_record_missing)
-                    + " (say per failure arm `induced` or `not induced` / "
-                    "`not inducible` / `STATED`, or that every arm was induced)"
-                )
+            missing, problems = lab_record_problems(lab)
+            report.lab_record_missing.extend(missing)
+            report.problems.extend(problems)
     return report
 
 

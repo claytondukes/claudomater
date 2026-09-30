@@ -27,6 +27,7 @@ Two files, two owners:
 | `commit_scope` | Per-repo commit allowlist for the pre-commit guard: `"."` is the project root; any other key must be an `artifact_roots` git repo. An armed repo with no declared scope blocks every gated commit (fail-closed). |
 | `surface_rules` | The QA-board surface gate's SURFACE-TOUCHING / exclusion pattern lists (`surface:`, `exclude:`, `exclude_root_dotfiles:`). Exclusions win; `**` respects path-segment boundaries. `null` = no surface gate declared. |
 | `completion.exempt` | File List path prefixes that legitimately ride outside the merge commit (driver-owned artifacts in a separate repo). Config is the ONLY source of exemptions - no code path accepts an ad-hoc exempt list. |
+| `completion.lab_record` | `off` (default) or `required`: the completion gate's third blade - the story's `### Merge and lab record` must carry the literal induced / not-induced vocabulary per arm (bare `off` / `on` work unquoted). |
 | `conventions` | A list of standing style/policy rule strings, injected VERBATIM into every phase prompt via `phases.inject_conventions`. Policy belongs in config, not in a GO prompt's standing-rules paragraph. |
 | `ci.tier_on_push` / `ci.tier_on_merge` | `fast` \| `full`. |
 | `gates.copilot_max_rounds_kpi` | A target the run report scores (not a stop). |
