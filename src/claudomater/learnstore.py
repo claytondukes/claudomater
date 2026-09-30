@@ -37,6 +37,7 @@ travel between machines; chains are reconstructed, not copied).
 from __future__ import annotations
 
 import json
+import math
 import re
 import sqlite3
 import subprocess
@@ -510,17 +511,40 @@ class LearnStore:
         scopes: Sequence[str],
         domains: Sequence[str] = (),
         budget: int = 20,
+        since: str | None = None,
+        recent_share: float = 0.5,
     ) -> list[dict[str, Any]]:
         """What a phase agent gets (design: always-loaded rules for its
         scopes plus an FTS query seeded with the story's domains, max ~20
         per phase, ranked by refs):
 
+        0. when `since` is given (a store-format timestamp, typically the
+           epic's first run), LIVE lessons in scope created at or after it,
+           NEWEST first, take up to ceil(budget * recent_share) slots ahead
+           of everything else - so a phase sees what the epic learned this
+           week instead of the same high-refs twenty forever (refs only
+           ever grow on the rows already injected, which is why the refs
+           tiers alone converged on one fixed set across three epics),
         1. every PROMOTED lesson in scope (the always-loaded set),
         2. then ACTIVE lessons whose `domain` matches a story domain,
         3. then ACTIVE lessons whose text FTS-matches the domain terms,
 
-        deduplicated in that priority order, refs-ranked within each tier,
+        deduplicated in that priority order, refs-ranked within tiers 1-3,
         truncated to `budget`. Superseded rows never surface."""
+        # inputs are judged before the no-work return: an off-format boundary
+        # or share is a caller bug whatever the scopes or budget say
+        if since is not None and not (isinstance(since, str) and _validate_timestamp(since)):
+            raise LearnStoreError(
+                f"since must be a {TIMESTAMP_FORMAT} timestamp, got {since!r}"
+            )
+        # a share is a finite fraction of the budget: NaN or an infinity would
+        # silently disable or degenerate the recent tier, so they are refused
+        # like every other malformed numeric input in this package
+        if not (isinstance(recent_share, (int, float)) and math.isfinite(recent_share)
+                and 0 <= recent_share <= 1):
+            raise LearnStoreError(
+                f"recent_share must be a finite number in [0, 1], got {recent_share!r}"
+            )
         if not scopes or budget <= 0:
             return []
         chosen: list[dict[str, Any]] = []
@@ -534,10 +558,23 @@ class LearnStore:
                     seen.add(row["id"])
                     chosen.append(row)
 
+        marks = ",".join("?" * len(scopes))
+        if since is not None and recent_share > 0:
+            # the reserved share is a ceiling on RECENT rows, not a floor:
+            # fewer recent rows leave the slots to the refs tiers below
+            reserve = min(budget, max(1, math.ceil(budget * recent_share)))
+            take(
+                dict(r)
+                for r in self.conn.execute(
+                    f"SELECT * FROM lesson WHERE status IN ('active','promoted') "
+                    f"AND scope IN ({marks}) AND created_at >= ? "
+                    "ORDER BY created_at DESC, id DESC LIMIT ?",
+                    (*scopes, since, int(reserve)),
+                )
+            )
         # tiers 1 and 2 are status-disjoint (promoted vs active), so an
         # exact LIMIT per tier is safe — and the cursor is iterated, never
         # materialized: only up to `budget` rows can be consumed
-        marks = ",".join("?" * len(scopes))
         take(
             dict(r)
             for r in self.conn.execute(
@@ -549,13 +586,17 @@ class LearnStore:
         )
         if domains and len(chosen) < budget:
             dmarks = ",".join("?" * len(domains))
+            # the LIMIT covers the whole budget, not the remainder: rows the
+            # recent tier already chose can top this tier too (a high-refs
+            # domain row is also recent), and after dedupe they would eat
+            # the remainder's slots and break the fill guarantee
             take(
                 dict(r)
                 for r in self.conn.execute(
                     f"SELECT * FROM lesson WHERE status='active' "
                     f"AND scope IN ({marks}) AND domain IN ({dmarks}) "
                     "ORDER BY refs DESC, scope, domain, topic LIMIT ?",
-                    (*scopes, *domains, budget - len(chosen)),
+                    (*scopes, *domains, budget),
                 )
             )
             # FTS terms are phrase-quoted with embedded quotes doubled:

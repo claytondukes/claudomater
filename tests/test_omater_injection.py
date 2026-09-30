@@ -80,6 +80,106 @@ class TestLessonsForPhase:
         rows = store.lessons_for_phase(["global"], domains=["charts"])
         assert [r["rule"] for r in rows] == ["new judgment"]
 
+    def test_since_reserves_the_newest_in_scope_rows_ahead_of_refs(self, store):
+        # four old, well-referenced lessons - the set the refs tiers always pick
+        old_ids = [lesson(store, f"old{i}", domain="charts") for i in range(4)]
+        store.conn.execute("UPDATE lesson SET refs=9")
+        store.conn.commit()
+        # then the epic learns three things (refs 0, so the refs tiers rank them last)
+        new_a = lesson(store, "new-a", domain="charts")
+        new_b = lesson(store, "new-b", domain="misc", rule="nothing about charts")
+        new_c = lesson(store, "new-c", domain="charts")
+        since = store.conn.execute(
+            "SELECT created_at FROM lesson WHERE id=?", (new_a,)
+        ).fetchone()[0]
+
+        rows = store.lessons_for_phase(["global"], domains=["charts"], budget=4, since=since)
+        ids = [r["id"] for r in rows]
+        # half the budget (2 of 4) goes to the newest in-scope rows, newest first,
+        # regardless of domain; the refs tiers fill the rest
+        assert ids[:2] == [new_c, new_b]
+        assert len(ids) == 4
+        assert all(i in old_ids for i in ids[2:])
+        assert new_a not in ids  # the reserve is a ceiling: two slots, two newest
+
+        # the same call without a boundary is the old refs-ranked selection
+        plain = [r["id"] for r in store.lessons_for_phase(["global"], domains=["charts"], budget=4)]
+        assert plain == old_ids[:4] or set(plain) == set(old_ids)
+
+    def test_since_beyond_every_row_changes_nothing(self, store):
+        ids = [lesson(store, f"t{i}", domain="charts") for i in range(3)]
+        rows = store.lessons_for_phase(
+            ["global"], domains=["charts"], since="2030-01-01T00:00:00.000000Z"
+        )
+        assert [r["id"] for r in rows] == ids
+
+    def test_since_respects_scope_and_never_surfaces_superseded(self, store):
+        lesson(store, "elsewhere", scope="other", domain="charts")
+        k = lesson(store, "k", domain="charts")
+        store.supersede("global", "charts", "k", "new judgment", "w")
+        rows = store.lessons_for_phase(
+            ["global"], domains=["charts"], since="2026-08-30T00:00:00.000000Z"
+        )
+        assert [r["rule"] for r in rows] == ["new judgment"]
+        assert k not in [r["id"] for r in rows]
+
+    def test_since_must_be_a_store_format_timestamp(self, store):
+        from claudomater.learnstore import LearnStoreError
+
+        lesson(store, "k")
+        for bad in ("2026-09-30", 123, 1_700_000_000.0, b"2026-08-30T00:00:00.000000Z"):
+            with pytest.raises(LearnStoreError):
+                store.lessons_for_phase(["global"], since=bad)
+
+    def test_recent_share_must_be_a_finite_fraction(self, store):
+        from claudomater.learnstore import LearnStoreError
+
+        lesson(store, "k")
+        since = "2026-08-30T00:00:00.000000Z"
+        for bad in (float("nan"), float("inf"), float("-inf"), -0.1, 1.5, "half"):
+            with pytest.raises(LearnStoreError):
+                store.lessons_for_phase(["global"], since=since, recent_share=bad)
+
+    def test_inputs_are_judged_before_the_no_work_return(self, store):
+        from claudomater.learnstore import LearnStoreError
+
+        with pytest.raises(LearnStoreError):
+            store.lessons_for_phase([], since="2026-09-30")
+        with pytest.raises(LearnStoreError):
+            store.lessons_for_phase(["global"], budget=0, since="2026-09-30")
+        with pytest.raises(LearnStoreError):
+            store.lessons_for_phase([], since="2026-08-30T00:00:00.000000Z", recent_share=2)
+
+    def test_recent_rows_that_top_the_domain_tier_do_not_eat_its_slots(self, store):
+        # four old domain rows whose text never FTS-matches "charts"
+        old_ids = [lesson(store, f"old{i}", domain="charts", rule=f"rule number {i}") for i in range(4)]
+        # two recent domain rows that also RANK FIRST in the domain tier
+        new_a = lesson(store, "new-a", domain="charts", rule="rule number a")
+        new_b = lesson(store, "new-b", domain="charts", rule="rule number b")
+        store.conn.execute("UPDATE lesson SET refs=9 WHERE topic IN ('new-a','new-b')")
+        store.conn.commit()
+        since = store.conn.execute(
+            "SELECT created_at FROM lesson WHERE id=?", (new_a,)
+        ).fetchone()[0]
+        rows = store.lessons_for_phase(["global"], domains=["charts"], budget=4, since=since)
+        ids = [r["id"] for r in rows]
+        assert ids[:2] == [new_b, new_a]
+        assert len(ids) == 4  # the fill guarantee holds through the duplicates
+        assert all(i in old_ids for i in ids[2:])
+
+    def test_recent_share_zero_disables_the_recent_tier(self, store):
+        old = lesson(store, "old", domain="charts")
+        store.conn.execute("UPDATE lesson SET refs=9")
+        store.conn.commit()
+        new = lesson(store, "new", domain="misc")
+        since = store.conn.execute(
+            "SELECT created_at FROM lesson WHERE id=?", (new,)
+        ).fetchone()[0]
+        rows = store.lessons_for_phase(
+            ["global"], domains=["charts"], budget=1, since=since, recent_share=0
+        )
+        assert [r["id"] for r in rows] == [old]
+
     def test_no_scopes_or_zero_budget_is_empty(self, store):
         lesson(store, "k")
         assert store.lessons_for_phase([], domains=["review"]) == []
@@ -422,6 +522,22 @@ class TestInjectLessonsSeam:
             assert f"[L{lid}]" in injected.prompt
         assert spec.injected_lessons == ()  # the caller's spec is untouched
 
+    def test_since_passes_through_and_is_recorded_on_the_spec(self, store):
+        from claudomater.phases import inject_lessons
+
+        old = lesson(store, "old", domain="charts")
+        store.conn.execute("UPDATE lesson SET refs=9")
+        store.conn.commit()
+        new = lesson(store, "new", domain="misc")
+        since = store.conn.execute(
+            "SELECT created_at FROM lesson WHERE id=?", (new,)
+        ).fetchone()[0]
+        spec = PhaseSpec("dev", "m", "p")
+        injected = inject_lessons(spec, store, ["global"], ["charts"], budget=2, since=since)
+        assert injected.injected_lessons == (new, old)
+        assert injected.lessons_since == since
+        assert inject_lessons(spec, store, ["global"], ["charts"], budget=2).lessons_since is None
+
     def test_empty_retrieval_returns_the_spec_unchanged(self, store):
         from claudomater.phases import inject_lessons
 
@@ -438,15 +554,33 @@ class TestInjectLessonsSeam:
             def run(self, spec, model):
                 return ExecutionResult(text=GOOD_APPLYING % lid)
 
+        since = "2026-08-30T00:00:00.000000Z"
         spec = inject_lessons(
-            PhaseSpec("dev", "m", "p"), store, ["global"], ["charts"]
+            PhaseSpec("dev", "m", "p"), store, ["global"], ["charts"], since=since
         )
         outcome = PhaseRunner(tmp_path, log, Applies(), learn_store=store).run_phase(spec)
         assert outcome.status == "verified"
         (inj,) = [e for e in log.events() if e["event"] == "lessons-injected"]
         (app,) = [e for e in log.events() if e["event"] == "lessons-applied"]
         assert inj["detail"]["ids"] == [lid] and app["detail"]["applied"] == [lid]
+        # the boundary the injection used is on the record next to the ids
+        assert inj["detail"]["since"] == since
         assert store.conn.execute("SELECT refs FROM lesson").fetchone()["refs"] == 1
+
+    def test_no_boundary_leaves_the_event_without_since(self, tmp_path, store):
+        from claudomater.phases import inject_lessons
+
+        lid = lesson(store, "k", domain="charts")
+        log = RunLog.create(tmp_path)
+
+        class Applies:
+            def run(self, spec, model):
+                return ExecutionResult(text=GOOD_APPLYING % lid)
+
+        spec = inject_lessons(PhaseSpec("dev", "m", "p"), store, ["global"], ["charts"])
+        PhaseRunner(tmp_path, log, Applies(), learn_store=store).run_phase(spec)
+        (inj,) = [e for e in log.events() if e["event"] == "lessons-injected"]
+        assert "since" not in inj["detail"]
 
 
 class TestCandidacyCountsDistinctAppliedRuns:
