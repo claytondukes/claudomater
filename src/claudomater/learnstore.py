@@ -531,8 +531,8 @@ class LearnStore:
 
         deduplicated in that priority order, refs-ranked within tiers 1-3,
         truncated to `budget`. Superseded rows never surface."""
-        if not scopes or budget <= 0:
-            return []
+        # inputs are judged before the no-work return: an off-format boundary
+        # or share is a caller bug whatever the scopes or budget say
         if since is not None and not _validate_timestamp(since):
             raise LearnStoreError(
                 f"since must be a {TIMESTAMP_FORMAT} timestamp, got {since!r}"
@@ -545,6 +545,8 @@ class LearnStore:
             raise LearnStoreError(
                 f"recent_share must be a finite number in [0, 1], got {recent_share!r}"
             )
+        if not scopes or budget <= 0:
+            return []
         chosen: list[dict[str, Any]] = []
         seen: set[int] = set()
 
@@ -584,13 +586,17 @@ class LearnStore:
         )
         if domains and len(chosen) < budget:
             dmarks = ",".join("?" * len(domains))
+            # the LIMIT covers the whole budget, not the remainder: rows the
+            # recent tier already chose can top this tier too (a high-refs
+            # domain row is also recent), and after dedupe they would eat
+            # the remainder's slots and break the fill guarantee
             take(
                 dict(r)
                 for r in self.conn.execute(
                     f"SELECT * FROM lesson WHERE status='active' "
                     f"AND scope IN ({marks}) AND domain IN ({dmarks}) "
                     "ORDER BY refs DESC, scope, domain, topic LIMIT ?",
-                    (*scopes, *domains, budget - len(chosen)),
+                    (*scopes, *domains, budget),
                 )
             )
             # FTS terms are phrase-quoted with embedded quotes doubled:

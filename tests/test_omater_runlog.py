@@ -753,6 +753,28 @@ class TestEpicFirstRunStartedAt:
         with pytest.raises(RunError):
             epic_first_run_started_at(tmp_path, "67")
 
+    def test_a_matching_run_without_run_created_raises(self, tmp_path):
+        import json
+
+        from claudomater.runlog import RunError, epic_first_run_started_at
+
+        d = self._write_run(tmp_path, "20261001-090000-aaaa", "2026-10-01T09:00:00Z", epic="67")
+        lines = [json.loads(x) for x in (d / "events.jsonl").read_text().splitlines()]
+        (d / "events.jsonl").write_text("".join(json.dumps(x) + "\n" for x in lines[1:]))
+        with pytest.raises(RunError):
+            epic_first_run_started_at(tmp_path, "67")
+        # a run of ANOTHER epic without run-created is not this epic's business
+        assert epic_first_run_started_at(tmp_path, "68") is None
+
+    def test_a_calendar_invalid_timestamp_raises_wherever_it_sorts(self, tmp_path):
+        from claudomater.runlog import RunError, epic_first_run_started_at
+
+        self._write_run(tmp_path, "20261001-090000-aaaa", "2026-10-01T09:00:00Z", epic="67")
+        # shape-valid, calendar-invalid, and lexically LATER than the valid one
+        self._write_run(tmp_path, "20261001-120000-bbbb", "2026-99-01T00:00:00Z", epic="67")
+        with pytest.raises(RunError):
+            epic_first_run_started_at(tmp_path, "67")
+
     def test_a_corrupt_events_log_propagates(self, tmp_path):
         from claudomater.runlog import RunError, epic_first_run_started_at
 

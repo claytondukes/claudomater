@@ -84,8 +84,6 @@ def runs_root(project_root: Path | str) -> Path:
 # The learning store's timestamp width (learnstore.TIMESTAMP_FORMAT); kept
 # local so runlog stays import-free of the store. A test pins the equality.
 _STORE_TIMESTAMP_FORMAT = "%Y-%m-%dT%H:%M:%S.%fZ"
-# the event log's own second-resolution UTC shape (_utc_now above)
-_EVENT_TS_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z")
 
 
 def epic_first_run_started_at(project_root: Path | str, epic: str | int) -> str | None:
@@ -102,16 +100,16 @@ def epic_first_run_started_at(project_root: Path | str, epic: str | int) -> str 
     root = runs_root(project_root)
     if not root.is_dir():
         return None
-    earliest: str | None = None
+    earliest: datetime | None = None
     for run_dir in sorted(root.iterdir()):
         if run_dir.is_symlink() or not run_dir.is_dir():
             continue
         if not (run_dir / EVENTS_JSONL).is_file():
             continue
         events = RunLog(run_dir, run_dir.name).events()
-        created = next((e for e in events if e.get("event") == "run-created"), None)
-        if created is None:
-            continue
+        # membership first: only a run that names the epic is judged, and a
+        # judged run must carry a well-formed run-created - anything less is
+        # damaged history, raised rather than skipped into a later boundary
         names_epic = any(
             e.get("event") == "story-start"
             and isinstance(e.get("detail"), dict)
@@ -120,19 +118,33 @@ def epic_first_run_started_at(project_root: Path | str, epic: str | int) -> str 
         )
         if not names_epic:
             continue
-        ts = created.get("ts")
-        if not isinstance(ts, str) or not _EVENT_TS_RE.fullmatch(ts):
+        created = next((e for e in events if e.get("event") == "run-created"), None)
+        if created is None:
             raise RunError(
-                f"run {run_dir.name}: run-created carries no valid ts "
-                f"({ts!r}) - the epic's first-run boundary cannot be trusted"
+                f"run {run_dir.name}: names epic {epic} but has no run-created "
+                "event - the epic's first-run boundary cannot be trusted"
             )
-        if earliest is None or ts < earliest:
-            earliest = ts
+        ts = created.get("ts")
+        if not isinstance(ts, str):
+            raise RunError(
+                f"run {run_dir.name}: run-created carries no ts ({ts!r}) - "
+                "the epic's first-run boundary cannot be trusted"
+            )
+        try:
+            # every matching timestamp is parsed, not just the lexical
+            # minimum: a shape-valid but calendar-invalid value must raise
+            # wherever it sorts
+            parsed = datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ")
+        except ValueError as exc:
+            raise RunError(
+                f"run {run_dir.name}: run-created ts {ts!r} is not a valid "
+                "UTC timestamp - the epic's first-run boundary cannot be trusted"
+            ) from exc
+        if earliest is None or parsed < earliest:
+            earliest = parsed
     if earliest is None:
         return None
-    return datetime.strptime(earliest, "%Y-%m-%dT%H:%M:%SZ").strftime(
-        _STORE_TIMESTAMP_FORMAT
-    )
+    return earliest.strftime(_STORE_TIMESTAMP_FORMAT)
 
 
 def _remove_lock(lock: Path) -> None:

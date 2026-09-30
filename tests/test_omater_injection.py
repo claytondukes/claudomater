@@ -139,6 +139,33 @@ class TestLessonsForPhase:
             with pytest.raises(LearnStoreError):
                 store.lessons_for_phase(["global"], since=since, recent_share=bad)
 
+    def test_inputs_are_judged_before_the_no_work_return(self, store):
+        from claudomater.learnstore import LearnStoreError
+
+        with pytest.raises(LearnStoreError):
+            store.lessons_for_phase([], since="2026-09-30")
+        with pytest.raises(LearnStoreError):
+            store.lessons_for_phase(["global"], budget=0, since="2026-09-30")
+        with pytest.raises(LearnStoreError):
+            store.lessons_for_phase([], since="2026-08-30T00:00:00.000000Z", recent_share=2)
+
+    def test_recent_rows_that_top_the_domain_tier_do_not_eat_its_slots(self, store):
+        # four old domain rows whose text never FTS-matches "charts"
+        old_ids = [lesson(store, f"old{i}", domain="charts", rule=f"rule number {i}") for i in range(4)]
+        # two recent domain rows that also RANK FIRST in the domain tier
+        new_a = lesson(store, "new-a", domain="charts", rule="rule number a")
+        new_b = lesson(store, "new-b", domain="charts", rule="rule number b")
+        store.conn.execute("UPDATE lesson SET refs=9 WHERE topic IN ('new-a','new-b')")
+        store.conn.commit()
+        since = store.conn.execute(
+            "SELECT created_at FROM lesson WHERE id=?", (new_a,)
+        ).fetchone()[0]
+        rows = store.lessons_for_phase(["global"], domains=["charts"], budget=4, since=since)
+        ids = [r["id"] for r in rows]
+        assert ids[:2] == [new_b, new_a]
+        assert len(ids) == 4  # the fill guarantee holds through the duplicates
+        assert all(i in old_ids for i in ids[2:])
+
     def test_recent_share_zero_disables_the_recent_tier(self, store):
         old = lesson(store, "old", domain="charts")
         store.conn.execute("UPDATE lesson SET refs=9")
