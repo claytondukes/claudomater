@@ -130,6 +130,28 @@ class TestLessonsForPhase:
         with pytest.raises(LearnStoreError):
             store.lessons_for_phase(["global"], since="2026-09-30")
 
+    def test_recent_share_must_be_a_finite_fraction(self, store):
+        from claudomater.learnstore import LearnStoreError
+
+        lesson(store, "k")
+        since = "2026-08-30T00:00:00.000000Z"
+        for bad in (float("nan"), float("inf"), float("-inf"), -0.1, 1.5, "half"):
+            with pytest.raises(LearnStoreError):
+                store.lessons_for_phase(["global"], since=since, recent_share=bad)
+
+    def test_recent_share_zero_disables_the_recent_tier(self, store):
+        old = lesson(store, "old", domain="charts")
+        store.conn.execute("UPDATE lesson SET refs=9")
+        store.conn.commit()
+        new = lesson(store, "new", domain="misc")
+        since = store.conn.execute(
+            "SELECT created_at FROM lesson WHERE id=?", (new,)
+        ).fetchone()[0]
+        rows = store.lessons_for_phase(
+            ["global"], domains=["charts"], budget=1, since=since, recent_share=0
+        )
+        assert [r["id"] for r in rows] == [old]
+
     def test_no_scopes_or_zero_budget_is_empty(self, store):
         lesson(store, "k")
         assert store.lessons_for_phase([], domains=["review"]) == []
@@ -504,15 +526,33 @@ class TestInjectLessonsSeam:
             def run(self, spec, model):
                 return ExecutionResult(text=GOOD_APPLYING % lid)
 
+        since = "2026-08-30T00:00:00.000000Z"
         spec = inject_lessons(
-            PhaseSpec("dev", "m", "p"), store, ["global"], ["charts"]
+            PhaseSpec("dev", "m", "p"), store, ["global"], ["charts"], since=since
         )
         outcome = PhaseRunner(tmp_path, log, Applies(), learn_store=store).run_phase(spec)
         assert outcome.status == "verified"
         (inj,) = [e for e in log.events() if e["event"] == "lessons-injected"]
         (app,) = [e for e in log.events() if e["event"] == "lessons-applied"]
         assert inj["detail"]["ids"] == [lid] and app["detail"]["applied"] == [lid]
+        # the boundary the injection used is on the record next to the ids
+        assert inj["detail"]["since"] == since
         assert store.conn.execute("SELECT refs FROM lesson").fetchone()["refs"] == 1
+
+    def test_no_boundary_leaves_the_event_without_since(self, tmp_path, store):
+        from claudomater.phases import inject_lessons
+
+        lid = lesson(store, "k", domain="charts")
+        log = RunLog.create(tmp_path)
+
+        class Applies:
+            def run(self, spec, model):
+                return ExecutionResult(text=GOOD_APPLYING % lid)
+
+        spec = inject_lessons(PhaseSpec("dev", "m", "p"), store, ["global"], ["charts"])
+        PhaseRunner(tmp_path, log, Applies(), learn_store=store).run_phase(spec)
+        (inj,) = [e for e in log.events() if e["event"] == "lessons-injected"]
+        assert "since" not in inj["detail"]
 
 
 class TestCandidacyCountsDistinctAppliedRuns:

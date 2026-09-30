@@ -737,6 +737,22 @@ class TestEpicFirstRunStartedAt:
 
         assert runlog._STORE_TIMESTAMP_FORMAT == learnstore.TIMESTAMP_FORMAT
 
+    def test_a_matching_run_with_a_bad_created_timestamp_raises(self, tmp_path):
+        import json
+
+        from claudomater.runlog import RunError, epic_first_run_started_at
+
+        d = self._write_run(tmp_path, "20261001-090000-aaaa", "2026-10-01T09:00:00Z", epic="67")
+        lines = [json.loads(x) for x in (d / "events.jsonl").read_text().splitlines()]
+        lines[0]["ts"] = "yesterday"
+        (d / "events.jsonl").write_text("".join(json.dumps(x) + "\n" for x in lines))
+        with pytest.raises(RunError):
+            epic_first_run_started_at(tmp_path, "67")
+        del lines[0]["ts"]
+        (d / "events.jsonl").write_text("".join(json.dumps(x) + "\n" for x in lines))
+        with pytest.raises(RunError):
+            epic_first_run_started_at(tmp_path, "67")
+
     def test_a_corrupt_events_log_propagates(self, tmp_path):
         from claudomater.runlog import RunError, epic_first_run_started_at
 

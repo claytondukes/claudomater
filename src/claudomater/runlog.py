@@ -84,18 +84,21 @@ def runs_root(project_root: Path | str) -> Path:
 # The learning store's timestamp width (learnstore.TIMESTAMP_FORMAT); kept
 # local so runlog stays import-free of the store. A test pins the equality.
 _STORE_TIMESTAMP_FORMAT = "%Y-%m-%dT%H:%M:%S.%fZ"
+# the event log's own second-resolution UTC shape (_utc_now above)
+_EVENT_TS_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z")
 
 
-def epic_first_run_started_at(project_root: Path | str, epic: str) -> str | None:
+def epic_first_run_started_at(project_root: Path | str, epic: str | int) -> str | None:
     """The learning-store-format timestamp of the earliest `run-created`
     event among the runs whose `story-start` detail names this epic
     (`{"epic": "67"}`), or None when no run has started a story of it.
     The lessons injector takes it as the recency boundary, so a phase
     prefers what the epic itself has taught over the same high-refs set.
     Read-only over `.omater/runs/`; symlinks (`current`) and directories
-    without an events log are skipped; a corrupt events log raises as it
-    does everywhere else (damage propagates, it is never rounded to
-    'no runs')."""
+    without an events log are skipped; a corrupt events log, or a matching
+    run whose `run-created` timestamp is missing or malformed, raises as it
+    does everywhere else (damage propagates, it is never rounded to a later
+    boundary or to 'no runs')."""
     root = runs_root(project_root)
     if not root.is_dir():
         return None
@@ -118,8 +121,11 @@ def epic_first_run_started_at(project_root: Path | str, epic: str) -> str | None
         if not names_epic:
             continue
         ts = created.get("ts")
-        if not isinstance(ts, str):
-            continue
+        if not isinstance(ts, str) or not _EVENT_TS_RE.fullmatch(ts):
+            raise RunError(
+                f"run {run_dir.name}: run-created carries no valid ts "
+                f"({ts!r}) - the epic's first-run boundary cannot be trusted"
+            )
         if earliest is None or ts < earliest:
             earliest = ts
     if earliest is None:

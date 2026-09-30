@@ -37,6 +37,7 @@ travel between machines; chains are reconstructed, not copied).
 from __future__ import annotations
 
 import json
+import math
 import re
 import sqlite3
 import subprocess
@@ -536,6 +537,14 @@ class LearnStore:
             raise LearnStoreError(
                 f"since must be a {TIMESTAMP_FORMAT} timestamp, got {since!r}"
             )
+        # a share is a finite fraction of the budget: NaN or an infinity would
+        # silently disable or degenerate the recent tier, so they are refused
+        # like every other malformed numeric input in this package
+        if not (isinstance(recent_share, (int, float)) and math.isfinite(recent_share)
+                and 0 <= recent_share <= 1):
+            raise LearnStoreError(
+                f"recent_share must be a finite number in [0, 1], got {recent_share!r}"
+            )
         chosen: list[dict[str, Any]] = []
         seen: set[int] = set()
 
@@ -551,7 +560,7 @@ class LearnStore:
         if since is not None and recent_share > 0:
             # the reserved share is a ceiling on RECENT rows, not a floor:
             # fewer recent rows leave the slots to the refs tiers below
-            reserve = min(budget, max(1, -(-budget * recent_share // 1)))
+            reserve = min(budget, max(1, math.ceil(budget * recent_share)))
             take(
                 dict(r)
                 for r in self.conn.execute(
