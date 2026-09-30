@@ -448,46 +448,53 @@ class TestLabRecordBlade:
     finish refuses a story whose post-merge record never says, in the
     literal words, what the lab arms induced and what they did not."""
 
+    # STORY already carries a File List; the record goes in front of it and the
+    # merged set is the three files that list names.
+    MERGED = ["app/src/Widget.tsx", "app/src/Widget.test.tsx", "docs/note.md"]
+
     def _story(self, record):
-        return STORY + "\n" + record + "\n### File List\n\n- app/src/Widget.tsx\n"
+        return STORY.replace("### File List", record + "\n### File List", 1)
 
     def test_off_never_judges_the_record(self):
-        report = completion_report(self._story(LAB_RECORD_NO_DISPOSITION), ["app/src/Widget.tsx"])
+        report = completion_report(self._story(LAB_RECORD_NO_DISPOSITION), self.MERGED)
         assert report.lab_record_missing == []
 
     def test_required_passes_a_record_with_both_words(self):
         from claudomater.completion import _completion_report
 
-        report = _completion_report(self._story(LAB_RECORD_OK), ["app/src/Widget.tsx"], lab_record="required")
+        report = _completion_report(self._story(LAB_RECORD_OK), self.MERGED, lab_record="required")
         assert report.lab_record_missing == [] and report.ok
 
     def test_required_accepts_every_arm_induced(self):
         from claudomater.completion import _completion_report
 
-        report = _completion_report(self._story(LAB_RECORD_EVERY_ARM), ["app/src/Widget.tsx"], lab_record="required")
+        report = _completion_report(self._story(LAB_RECORD_EVERY_ARM), self.MERGED, lab_record="required")
         assert report.lab_record_missing == [] and report.ok
 
     def test_required_fails_a_record_without_the_disposition(self):
         from claudomater.completion import _completion_report
 
-        report = _completion_report(self._story(LAB_RECORD_NO_DISPOSITION), ["app/src/Widget.tsx"], lab_record="required")
+        report = _completion_report(self._story(LAB_RECORD_NO_DISPOSITION), self.MERGED, lab_record="required")
         assert report.lab_record_missing == ["induced", "not-induced"]
         assert not report.ok and any("lacks the literal induced" in p for p in report.problems)
 
     def test_required_fails_when_the_section_is_absent(self):
         from claudomater.completion import _completion_report
 
-        report = _completion_report(STORY, ["app/src/Widget.tsx"], lab_record="required")
+        report = _completion_report(STORY, self.MERGED, lab_record="required")
         assert report.lab_record_missing == ["section"] and not report.ok
 
     def test_an_unknown_mode_is_a_typed_error(self):
         from claudomater.completion import _completion_report
 
         with pytest.raises(CompletionError, match="completion.lab_record"):
-            _completion_report(STORY, ["app/src/Widget.tsx"], lab_record="strict")
+            _completion_report(STORY, self.MERGED, lab_record="strict")
 
     def test_the_gate_reads_the_mode_from_config_and_logs_it(self, tmp_path):
-        repo, sha = _synthetic_repo(tmp_path, {"app/src/Widget.tsx": "w\n"})
+        repo, sha = _synthetic_repo(
+            tmp_path,
+            {"app/src/Widget.tsx": "w\n", "app/src/Widget.test.tsx": "t\n", "docs/note.md": "n\n"},
+        )
         (repo / "story.md").write_text(self._story(LAB_RECORD_NO_DISPOSITION))
         log = _FakeRunLog()
         report = run_completion_gate(repo, _CfgWithExempt([], lab_record="required"), "story.md", sha, log)
