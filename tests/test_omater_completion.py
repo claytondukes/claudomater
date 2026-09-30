@@ -594,6 +594,13 @@ class TestLabRecordBlade:
         report = _completion_report(self._story(record), self.MERGED, lab_record="required")
         assert "induced" in report.lab_record_missing and not report.ok
 
+    def test_no_runtime_arm_followed_by_a_verb_is_not_the_exception(self):
+        from claudomater.completion import _completion_report
+
+        record = "### Merge and lab record (operator, 2026-09-30)\n\n- No runtime arm was induced.\n"
+        report = _completion_report(self._story(record), self.MERGED, lab_record="required")
+        assert "induced" in report.lab_record_missing and not report.ok
+
     def test_the_no_runtime_arm_exception_works_as_a_normal_bullet(self):
         from claudomater.completion import _completion_report
 

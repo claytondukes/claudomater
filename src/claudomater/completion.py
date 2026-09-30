@@ -105,9 +105,13 @@ def _clause_dispositions(text: str) -> tuple[bool, bool]:
 # was left un-induced, or there is no runtime arm at all. A "no
 # non-inducible arm" says every arm COULD be induced, not that it was, so
 # it is deliberately not here.
+# The no-runtime-arm exception is a complete assertion ("no runtime arm
+# exists"), never the start of a sentence that goes on to a verb ("no
+# runtime arm was induced" reports zero inductions and is refused).
 _ALL_INDUCED_RE = re.compile(
     r"\bevery arm (?:was )?induced\b|\ball arms (?:were )?induced\b"
-    r"|\bno not-induced arm\b|\bno runtime arm\b",
+    r"|\bno not-induced arm\b"
+    r"|\bno runtime arm\b(?!\s+(?:was|were|is|has|had|could|can|would|will|got)\b)",
     re.IGNORECASE,
 )
 _ARM_WORD_RE = re.compile(r"\barms?\b", re.IGNORECASE)
