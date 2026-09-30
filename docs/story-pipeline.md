@@ -55,7 +55,8 @@ Three fail-closed blades, run against the MERGE COMMIT (the third is an opt-in):
    a malformed entry and refuse - an unreadable entry must not silently
    thin the list).
 
-3. LAB RECORD VOCABULARY, when `completion: lab_record: required` - the
+3. LAB RECORD VOCABULARY, when `completion.lab_record` is `required` in
+   `.omater.yaml` (`completion:` mapping, `lab_record:` key) - the
    `### Merge and lab record` must say in the literal words what the lab
    arms induced and what they did not: every bullet item naming an arm
    carries `induced`, `not induced`, `not inducible` or `STATED`; the section

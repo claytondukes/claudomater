@@ -58,26 +58,37 @@ LAB_RECORD_HEADING_RE = re.compile(r"^###\s+Merge and lab record\b.*$", re.MULTI
 # A3, epic-65 A4, epic-66 A6, epic-63 F5: four epics of records that
 # carried it by discipline alone). `induced` must appear, and the record
 # must say what was NOT induced - or that nothing was left un-induced.
-# A positive `induced` is one not preceded by `not` / `not-` / `un-`:
-# "not induced: the port arm" must never satisfy the positive side.
-_INDUCED_RE = re.compile(r"(?<!\bnot )(?<!\bnot-)(?<!\bun-)\binduced\b", re.IGNORECASE)
-_NOT_INDUCED_RE = re.compile(
-    r"\bnot induced\b|\bnot-induced\b|\bnot inducible\b|\bSTATED\b",
+# The negative dispositions. Every negative span is REMOVED from the text
+# before the positive search, so no modifier (not, never, no, un-, was not,
+# cannot be, ...) can leave an `induced` behind for the positive side to
+# count: "never induced; STATED" is a negative-only record.
+_NEGATIVE_SPAN_RE = re.compile(
+    r"\b(?:not|never|no|un-|non-|cannot be|could not be|was not|were not|wasn't|weren't|isn't|is not)"
+    r"[\s-]*(?:be[\s-]+)?induc(?:ed|ible)\b|\bSTATED\b",
     re.IGNORECASE,
 )
-# The whole-record statements that stand in for a negative line (nothing
-# was left un-induced, or there is no runtime arm at all).
+_INDUCED_RE = re.compile(r"\binduced\b", re.IGNORECASE)
+# The whole-record statements that stand in for a negative line: nothing
+# was left un-induced, or there is no runtime arm at all. A "no
+# non-inducible arm" says every arm COULD be induced, not that it was, so
+# it is deliberately not here.
 _ALL_INDUCED_RE = re.compile(
-    r"\bevery arm (?:was )?induced\b|\bno (?:non-inducible|not-induced) arm\b"
-    r"|\bno runtime arm\b|\ball arms induced\b",
+    r"\bevery arm (?:was )?induced\b|\ball arms (?:were )?induced\b"
+    r"|\bno not-induced arm\b|\bno runtime arm\b",
     re.IGNORECASE,
 )
 _ARM_WORD_RE = re.compile(r"\barms?\b", re.IGNORECASE)
-_DISPOSITION_RE = re.compile(
-    r"(?<!\bnot )(?<!\bnot-)(?<!\bun-)\binduced\b|\bnot induced\b|\bnot-induced\b"
-    r"|\bnot inducible\b|\bSTATED\b",
-    re.IGNORECASE,
-)
+
+
+def _positive_induced(text: str) -> bool:
+    """True when an `induced` survives the removal of every negative span."""
+    return bool(_INDUCED_RE.search(_NEGATIVE_SPAN_RE.sub(" ", text)))
+
+
+def _has_disposition(item: str) -> bool:
+    """A bullet item carries a disposition when it says induced (positively)
+    or carries a negative span (not / never induced, not inducible, STATED)."""
+    return bool(_NEGATIVE_SPAN_RE.search(item)) or _positive_induced(item)
 _BULLET_RE = re.compile(r"^\s*[-*]\s")
 _WS_RE = re.compile(r"\s+")
 
@@ -124,7 +135,7 @@ def lab_record_problems(section: str) -> tuple[list[str], list[str]]:
     items = [_flat(i) for i in _bullet_items(section)]
     undisposed = [
         n for n, item in enumerate(items, start=1)
-        if _ARM_WORD_RE.search(item) and not _DISPOSITION_RE.search(item)
+        if _ARM_WORD_RE.search(item) and not _has_disposition(item)
     ]
     for n in undisposed:
         missing.append(f"arm:{n}")
@@ -135,9 +146,9 @@ def lab_record_problems(section: str) -> tuple[list[str], list[str]]:
             "in the `### Merge and lab record` section (numbered from 1)"
         )
     all_induced = bool(_ALL_INDUCED_RE.search(flat))
-    if not _INDUCED_RE.search(flat) and not all_induced:
+    if not _positive_induced(flat) and not all_induced:
         missing.append("induced")
-    if not _NOT_INDUCED_RE.search(flat) and not all_induced:
+    if not _NEGATIVE_SPAN_RE.search(flat) and not all_induced:
         missing.append("not-induced")
     words = [m for m in missing if not m.startswith("arm:")]
     if words:

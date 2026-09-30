@@ -536,6 +536,22 @@ class TestLabRecordBlade:
         report = _completion_report(self._story(record), self.MERGED, lab_record="required")
         assert report.lab_record_missing == ["induced"] and not report.ok
 
+    def test_never_induced_with_stated_is_negative_only(self):
+        from claudomater.completion import _completion_report
+
+        record = "### Merge and lab record (operator, 2026-09-30)\n\n- ADMIN arm: never induced; STATED.\n"
+        report = _completion_report(self._story(record), self.MERGED, lab_record="required")
+        assert report.lab_record_missing == ["induced"] and not report.ok
+
+    def test_no_non_inducible_arm_is_not_an_all_induced_statement(self):
+        from claudomater.completion import _completion_report
+
+        record = "### Merge and lab record (operator, 2026-09-30)\n\n- Lab: 12/12; no non-inducible arm exists.\n"
+        report = _completion_report(self._story(record), self.MERGED, lab_record="required")
+        # "non-inducible" is a negative span (so the negative side is met) but
+        # nothing says an arm WAS induced
+        assert report.lab_record_missing == ["induced"] and not report.ok
+
     def test_every_arm_induced_satisfies_both_sides(self):
         from claudomater.completion import _completion_report
 
