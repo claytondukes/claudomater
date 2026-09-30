@@ -515,6 +515,18 @@ class TestLabRecordBlade:
         report = _completion_report(self._story(record), self.MERGED, lab_record="required")
         assert report.lab_record_missing == ["induced"] and not report.ok
 
+    def test_a_wrapped_negative_only_record_fails_the_positive_side(self):
+        from claudomater.completion import _completion_report
+
+        # markdown wraps the phrase: "not" ends one line, "induced" starts the next
+        record = (
+            "### Merge and lab record (operator, 2026-09-30)\n\n"
+            "- The port arm was not\n  induced (a port change takes the shared lab down);\n"
+            "  STATED.\n"
+        )
+        report = _completion_report(self._story(record), self.MERGED, lab_record="required")
+        assert report.lab_record_missing == ["induced"] and not report.ok
+
     def test_every_arm_induced_satisfies_both_sides(self):
         from claudomater.completion import _completion_report
 

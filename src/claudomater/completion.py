@@ -79,6 +79,13 @@ _DISPOSITION_RE = re.compile(
     re.IGNORECASE,
 )
 _BULLET_RE = re.compile(r"^\s*[-*]\s")
+_WS_RE = re.compile(r"\s+")
+
+
+def _flat(text: str) -> str:
+    """Whitespace-normalized: markdown wraps `not\n  induced` across lines,
+    and the vocabulary matchers must see the phrase, never the wrap."""
+    return _WS_RE.sub(" ", text)
 
 
 def _bullet_items(section: str) -> list[str]:
@@ -110,8 +117,9 @@ def lab_record_problems(section: str) -> tuple[list[str], list[str]]:
     arm was induced or no runtime arm exists."""
     missing: list[str] = []
     problems: list[str] = []
+    flat = _flat(section)
     undisposed = [
-        item for item in _bullet_items(section)
+        item for item in (_flat(i) for i in _bullet_items(section))
         if _ARM_WORD_RE.search(item) and not _DISPOSITION_RE.search(item)
     ]
     for item in undisposed:
@@ -122,10 +130,10 @@ def lab_record_problems(section: str) -> tuple[list[str], list[str]]:
             + "; ".join(repr(i[:60]) for i in undisposed[:5])
             + (" ..." if len(undisposed) > 5 else "")
         )
-    all_induced = bool(_ALL_INDUCED_RE.search(section))
-    if not _INDUCED_RE.search(section) and not all_induced:
+    all_induced = bool(_ALL_INDUCED_RE.search(flat))
+    if not _INDUCED_RE.search(flat) and not all_induced:
         missing.append("induced")
-    if not _NOT_INDUCED_RE.search(section) and not all_induced:
+    if not _NOT_INDUCED_RE.search(flat) and not all_induced:
         missing.append("not-induced")
     words = [m for m in missing if not m.startswith("arm:")]
     if words:
