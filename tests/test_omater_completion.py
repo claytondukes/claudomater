@@ -706,6 +706,21 @@ class TestLabRecordBlade:
         report = _completion_report(self._story(record), self.MERGED, lab_record="required")
         assert report.lab_record_missing == ["induced"] and not report.ok
 
+    def test_ordered_list_items_are_arm_items_too(self):
+        from claudomater.completion import _completion_report
+
+        for marker in ("1.", "1)"):
+            second = marker.replace("1", "2"); third = marker.replace("1", "3")
+            record = ("### Merge and lab record (operator, 2026-09-30)\n\n"
+                      f"{marker} ADMIN arm: induced through the real dialog.\n"
+                      f"{second} PORT arm: evidence pending.\n"
+                      f"{third} FALLBACK arm: not induced; STATED.\n")
+            report = _completion_report(self._story(record), self.MERGED, lab_record="required")
+            assert report.lab_record_missing == ["arm:2"] and not report.ok, marker
+        record = ("### Merge and lab record (operator, 2026-09-30)\n\n"
+                  "1) No runtime arm (the merge touches docs only).\n")
+        assert _completion_report(self._story(record), self.MERGED, lab_record="required").ok
+
     def test_a_negated_all_induced_statement_is_not_an_exception(self):
         from claudomater.completion import _completion_report
 
