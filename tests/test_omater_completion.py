@@ -603,6 +603,18 @@ class TestLabRecordBlade:
                   "- The interface arm was induced and restored; the port arm was not induced.\n")
         assert _completion_report(self._story(record), self.MERGED, lab_record="required").ok
 
+    def test_plus_sign_bullets_are_arm_items_too(self):
+        from claudomater.completion import _completion_report
+
+        # `+` is a Markdown bullet marker: an undisposed arm under it must not
+        # slip past the per-item check while the section-wide words are met
+        record = ("### Merge and lab record (operator, 2026-09-30)\n\n"
+                  "+ ADMIN arm: induced through the real dialog.\n"
+                  "+ PORT arm: evidence pending.\n"
+                  "+ FALLBACK: not induced.\n")
+        report = _completion_report(self._story(record), self.MERGED, lab_record="required")
+        assert report.lab_record_missing == ["arm:2"] and not report.ok
+
     def test_a_negated_all_induced_statement_is_not_an_exception(self):
         from claudomater.completion import _completion_report
 

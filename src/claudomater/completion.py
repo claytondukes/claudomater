@@ -73,7 +73,7 @@ LAB_RECORD_HEADING_RE = re.compile(
 # while "no arm was exercised and induced" stays one clause: splitting
 # every conjunction would turn that negated coordination into a bare
 # positive `induced`.
-_HARD_SPLIT_RE = re.compile(r"[.;:,]|\s+[-*]\s")
+_HARD_SPLIT_RE = re.compile(r"[.;:,]|\s+[-*+]\s")
 _CONJUNCTION_RE = re.compile(r"\b(?:but|and|while|whereas|yet)\b", re.IGNORECASE)
 _ARM_WORD_RE = re.compile(r"\barms?\b", re.IGNORECASE)
 _INDUCE_WORD_RE = re.compile(r"\b(?:un-|non-)?induc(?:ed|ible)\b", re.IGNORECASE)
@@ -145,7 +145,7 @@ _NO_RUNTIME_ARM_RE = re.compile(
     r"(?: \([^()]*\))?",
     re.IGNORECASE,
 )
-_LEADING_BULLET_RE = re.compile(r"^[-*]\s+")
+_LEADING_BULLET_RE = re.compile(r"^[-*+]\s+")
 
 
 def _all_induced(text: str) -> bool:
@@ -175,7 +175,7 @@ def _has_disposition(item: str) -> bool:
     induced positively, negates an induce-word, carries STATED, or states
     a whole-record exception (every arm induced, no runtime arm)."""
     return any(_clause_dispositions(item)) or _all_induced(item)
-_BULLET_RE = re.compile(r"^\s*[-*]\s")
+_BULLET_RE = re.compile(r"^\s*[-*+]\s")
 _WS_RE = re.compile(r"\s+")
 
 
