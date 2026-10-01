@@ -688,6 +688,24 @@ class TestLabRecordBlade:
         report = _completion_report(self._story(fenced), self.MERGED, lab_record="required")
         assert report.lab_record_missing == ["section"] and not report.ok
 
+    def test_a_commented_out_record_is_not_the_record(self):
+        from claudomater.completion import _completion_report
+
+        hidden = ("<!--\n### Merge and lab record (operator, 2026-09-30)\n\n"
+                  "- ADMIN arm: induced through the real dialog.\n- PORT arm: not induced; STATED.\n-->\n")
+        report = _completion_report(self._story(hidden), self.MERGED, lab_record="required")
+        assert report.lab_record_missing == ["section"] and not report.ok
+        # an unterminated comment hides everything after it
+        hidden = ("<!-- template follows\n### Merge and lab record (operator, 2026-09-30)\n\n"
+                  "- ADMIN arm: induced.\n- PORT arm: not induced; STATED.\n")
+        report = _completion_report(self._story(hidden), self.MERGED, lab_record="required")
+        assert report.lab_record_missing == ["section"] and not report.ok
+        # a comment inside the real section hides its words from the vocabulary
+        record = ("### Merge and lab record (operator, 2026-09-30)\n\n"
+                  "<!-- - ADMIN arm: induced. -->\n- PORT arm: not induced; STATED.\n")
+        report = _completion_report(self._story(record), self.MERGED, lab_record="required")
+        assert report.lab_record_missing == ["induced"] and not report.ok
+
     def test_a_negated_all_induced_statement_is_not_an_exception(self):
         from claudomater.completion import _completion_report
 

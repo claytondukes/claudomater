@@ -409,6 +409,17 @@ def _mask_fences(text: str) -> str:
     return "".join(out)
 
 
+_HTML_COMMENT_RE = re.compile(r"<!--.*?(?:-->|\Z)", re.DOTALL)
+
+
+def _mask_hidden(text: str) -> str:
+    """The text with everything Markdown does not render blanked, line
+    for line: fenced code blocks first, then HTML comments (an
+    unterminated comment hides everything to the end of the text). A
+    record a reader cannot see is not the record."""
+    return _HTML_COMMENT_RE.sub(lambda m: "\n" * m.group(0).count("\n"), _mask_fences(text))
+
+
 def _section(text: str, heading_re: re.Pattern[str]) -> str | None:
     """The body between `heading_re`'s match and the next ##/### heading,
     or None when the heading is absent."""
@@ -604,9 +615,10 @@ def _completion_report(
         # the vocabulary: a record with no `induced` at all, or one that
         # never says what was NOT induced (or that nothing was left
         # un-induced), is a record a later reader cannot trust.
-        # fenced examples are masked first: a quoted record template is
-        # not the record, and words inside a fence are not its vocabulary
-        lab = _section(_mask_fences(story_text), LAB_RECORD_HEADING_RE)
+        # hidden text is masked first: a record quoted in a fence or
+        # commented out is not the record, and its words are not the
+        # section's vocabulary
+        lab = _section(_mask_hidden(story_text), LAB_RECORD_HEADING_RE)
         if lab is None:
             report.lab_record_missing.append("section")
             report.problems.append(
