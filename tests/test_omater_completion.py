@@ -721,6 +721,25 @@ class TestLabRecordBlade:
                   "1) No runtime arm (the merge touches docs only).\n")
         assert _completion_report(self._story(record), self.MERGED, lab_record="required").ok
 
+    def test_a_transitive_every_arm_sentence_is_not_the_exception(self):
+        from claudomater.completion import _completion_report
+
+        for line in (
+            "- Every arm induced an error in the harness.",
+            "- All arms induced a restart of the web server.",
+        ):
+            record = "### Merge and lab record (operator, 2026-09-30)\n\n" + line + "\n"
+            report = _completion_report(self._story(record), self.MERGED, lab_record="required")
+            assert report.lab_record_missing == ["not-induced"] and not report.ok, line
+        for line in (
+            "- Every arm was induced for real (12/12).",
+            "- All arms were induced and restored.",
+            "- Lab: 18/18; every arm induced.",
+        ):
+            record = "### Merge and lab record (operator, 2026-09-30)\n\n" + line + "\n"
+            report = _completion_report(self._story(record), self.MERGED, lab_record="required")
+            assert report.ok, (line, report.problems)
+
     def test_a_negated_all_induced_statement_is_not_an_exception(self):
         from claudomater.completion import _completion_report
 

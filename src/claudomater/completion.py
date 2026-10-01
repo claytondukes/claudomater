@@ -131,25 +131,25 @@ def _clause_dispositions(text: str) -> tuple[bool, bool]:
 # The whole-record statements that stand in for a negative line: nothing
 # was left un-induced, or there is no runtime arm at all. A "no
 # non-inducible arm" says every arm COULD be induced, not that it was, so
-# it is deliberately not here. "every arm induced" / "all arms induced"
-# may sit inside a clause (with no negation before them); the two "no ...
-# arm" forms must be the whole clause (below).
-_ALL_INDUCED_RE = re.compile(
-    r"\bevery arm (?:was )?induced\b|\ball arms (?:were )?induced\b",
-    re.IGNORECASE,
-)
-# The no-runtime-arm and no-not-induced-arm exceptions are whole clauses,
-# never phrases inside one: the clause says nothing but the assertion ("No
-# runtime arm.", "no runtime arm exists", "there is no runtime arm for this
-# story", "no not-induced arm remains", an optional parenthetical). A clause
-# that goes on to any other predicate ("no runtime arm was induced", "no
-# runtime arm passed validation", "no not-induced arm was exercised")
-# reports something about arms that do exist and is refused: enumerating
-# the verbs to block lost to the first verb not on the list.
-_NO_RUNTIME_ARM_RE = re.compile(
-    r"(?:there (?:is|was|are|were) )?"
-    r"(?:no runtime arms?(?: (?:exists?|existed|applies|applied))?"
-    r"|no not-induced arms?(?: (?:remains?|remained|exists?|existed|is left|was left|are left|were left))?)"
+# it is deliberately not here.
+# Every exception is a WHOLE clause, never a phrase inside one: the clause
+# says nothing but the assertion ("every arm was induced", "all arms
+# induced for real", "No runtime arm.", "no runtime arm exists", "there is
+# no runtime arm for this story", "no not-induced arm remains", an optional
+# parenthetical). A clause that goes on to any other predicate ("every arm
+# induced an error in the harness", "no runtime arm was induced", "no
+# runtime arm passed validation", "no not-induced arm was exercised") says
+# something else about arms and is refused: enumerating the verbs to block
+# lost to the first verb not on the list, and a negation before the
+# assertion ("Not every arm was induced") breaks the match by itself.
+_WHOLE_CLAUSE_EXCEPTION_RE = re.compile(
+    r"(?:"
+    r"(?:every|each) arm (?:was )?induced(?: for real)?(?: and restored)?"
+    r"|(?:all|both) arms (?:were )?induced(?: for real)?(?: and restored)?"
+    r"|(?:there (?:is|was|are|were) )?no runtime arms?(?: (?:exists?|existed|applies|applied))?"
+    r"|(?:there (?:is|was|are|were) )?no not-induced arms?"
+    r"(?: (?:remains?|remained|exists?|existed|is left|was left|are left|were left))?"
+    r")"
     r"(?: (?:in|for) this (?:story|merge|change))?"
     r"(?: \([^()]*\))?",
     re.IGNORECASE,
@@ -158,18 +158,12 @@ _LEADING_BULLET_RE = re.compile(r"^(?:[-*+]|\d+[.)])\s+")
 
 
 def _all_induced(text: str) -> bool:
-    """A whole-record exception holds in a clause with no negation token
-    before it ("Not every arm was induced" is a negative statement, not an
-    exception) or in a clause that is, entire, the no-runtime-arm or
-    no-not-induced-arm assertion."""
+    """A whole-record exception holds only in a clause (or a comma segment
+    of one: "No runtime arm exists, the merge touches docs only") that is,
+    entire, one of the assertions above."""
     for clause in _clauses(text):
-        m = _ALL_INDUCED_RE.search(clause)
-        if m and not _NEGATION_RE.search(clause[: m.start()]):
-            return True
-        # the assertion may share its clause with an aside after a comma
-        # ("No runtime arm exists, the merge touches docs only")
         for segment in clause.split(","):
-            if _NO_RUNTIME_ARM_RE.fullmatch(_LEADING_BULLET_RE.sub("", segment.strip())):
+            if _WHOLE_CLAUSE_EXCEPTION_RE.fullmatch(_LEADING_BULLET_RE.sub("", segment.strip())):
                 return True
     return False
 
