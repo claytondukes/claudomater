@@ -843,6 +843,18 @@ class TestLabRecordBlade:
             report = _completion_report(self._story(wrapped), self.MERGED, lab_record="required")
             assert report.lab_record_missing == ["section"] and not report.ok, wrapped[:12]
 
+    def test_an_indented_fence_line_inside_a_fence_is_content(self):
+        from claudomater.completion import _completion_report
+
+        body = "### Merge and lab record (operator, 2026-09-30)\n\n- ADMIN arm: induced.\n- PORT arm: not induced; STATED.\n"
+        fenced = "```\n    ```\n" + body + "```\n"
+        report = _completion_report(self._story(fenced), self.MERGED, lab_record="required")
+        assert report.lab_record_missing == ["section"] and not report.ok
+        # a fence opened inside a list item closes at its own indent, and
+        # the real record after it is visible
+        record = "- note:\n  ```\n  example\n  ```\n\n" + body
+        assert _completion_report(self._story(record), self.MERGED, lab_record="required").ok
+
     def test_a_negated_all_induced_statement_is_not_an_exception(self):
         from claudomater.completion import _completion_report
 

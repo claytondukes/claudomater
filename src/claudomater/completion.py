@@ -421,7 +421,7 @@ class CompletionReport:
         }
 
 
-_FENCE_RE = re.compile(r"^\s*(`{3,}|~{3,})")
+_FENCE_RE = re.compile(r"^(\s*)(`{3,}|~{3,})")
 
 
 def _mask_fences(text: str) -> str:
@@ -431,22 +431,27 @@ def _mask_fences(text: str) -> str:
     end of the text (masking more is the fail-closed direction)."""
     out: list[str] = []
     fence: str | None = None
+    fence_indent = 0
     for line in text.splitlines(keepends=True):
         m = _FENCE_RE.match(line)
         if fence is None and m:
-            fence = m.group(1)
+            fence = m.group(2)
+            fence_indent = len(m.group(1).expandtabs(4))
             out.append("\n" if line.endswith("\n") else "")
             continue
         if fence is not None:
             # CommonMark close: the same character, a run at least as long
-            # as the opener, and nothing but whitespace after it - so a
-            # four-backtick fence is not closed by an inner three-backtick
-            # line
+            # as the opener, nothing but whitespace after it, and indented
+            # at most three spaces past the opener's own indent (its
+            # container) - so a four-backtick fence is not closed by an
+            # inner three-backtick line, and a fence line indented four
+            # spaces inside the block is content, not the close
             if (
                 m
-                and m.group(1)[0] == fence[0]
-                and len(m.group(1)) >= len(fence)
+                and m.group(2)[0] == fence[0]
+                and len(m.group(2)) >= len(fence)
                 and not line[m.end():].strip()
+                and len(m.group(1).expandtabs(4)) <= fence_indent + 3
             ):
                 fence = None
             out.append("\n" if line.endswith("\n") else "")
