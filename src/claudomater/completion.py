@@ -8,7 +8,7 @@ bookkeeping genuinely not done - the run session narrated completion and
 nothing diffed the narration against the file. This gate reads the story
 file and the ACTUAL merged changeset; narration never satisfies it.
 
-Two blades, both fail-closed:
+Three blades, all fail-closed (the third is an opt-in):
 
 1. TASK BOXES - any unchecked `- [ ]` inside `## Tasks / Subtasks`, at
    any indent (the evidence's sub-items were indented), blocks. A story
@@ -27,6 +27,17 @@ Two blades, both fail-closed:
    all - the gate must at least SAY that, because "no list" and "list
    agrees" must never read the same. `require_file_list=False` is the
    explicit project-level opt-out for templates that do not mandate one.
+
+3. LAB RECORD VOCABULARY (`completion.lab_record: required`) - the
+   `### Merge and lab record` must say, in the literal words, what the
+   lab arms induced and what they did not: every bullet item in the
+   section that names an arm (the word `arm`) carries `induced`,
+   `not induced`, `not inducible` or `STATED`, the section as a whole
+   carries at least one positive `induced` and at least one negative
+   disposition (or says every arm was induced / no runtime arm exists),
+   and a missing or duplicated section blocks. Four epics of close reviews found the
+   line carried by discipline alone under an epic sentence promising this
+   gate. Off by default: a project opts in per `.omater.yaml`.
 """
 
 from __future__ import annotations
@@ -39,6 +50,270 @@ from typing import Sequence
 
 TASKS_HEADING_RE = re.compile(r"^##\s+Tasks(\s*/\s*Subtasks)?\s*$", re.MULTILINE)
 FILE_LIST_HEADING_RE = re.compile(r"^###\s+File List\s*$", re.MULTILINE)
+# The operator's post-merge record. Its heading carries at most one
+# parenthesized annotation ("(operator, 2026-09-30)"); anything else after
+# the words ("... instructions") is another section, never the record.
+LAB_RECORD_HEADING_RE = re.compile(
+    r"^###\s+Merge and lab record(?:\s*\([^)\n]*\))?\s*$", re.MULTILINE
+)
+# The literal disposition vocabulary a lab record must use (epic-64 retro
+# A3, epic-65 A4, epic-66 A6, epic-63 F5: four epics of records that
+# carried it by discipline alone). `induced` must appear, and the record
+# must say what was NOT induced - or that nothing was left un-induced.
+# The vocabulary is judged CLAUSE by clause (a clause ends at . ; : or a
+# line's bullet), not by adjacency: "No arm was induced", "none of the
+# arms were induced", "the port arm was not induced" and "never induced"
+# all carry a negation token somewhere before `induced` in their clause
+# and are negative; a clause whose `induced` has no negation before it is
+# positive. STATED is a negative marker on its own. Enumerating adjacent
+# modifiers was the previous approach and lost to every new phrasing.
+# A comma or a coordinating conjunction also ends a clause, but only when
+# what follows it names its own arm: "the port arm was not induced but the
+# interface arm was induced" scopes its negation to the first arm, while
+# "no arm was exercised and induced" and "no arm was exercised, induced,
+# or restored" stay one clause - splitting every comma or conjunction
+# would turn those negated predicate lists into a bare positive `induced`.
+_HARD_SPLIT_RE = re.compile(r"[.;:]|\s+(?:[-*+]|\d+[.)])\s")
+_SOFT_SPLIT_RE = re.compile(r",|\b(?:but|and|while|whereas|yet)\b", re.IGNORECASE)
+_ARM_WORD_RE = re.compile(r"\barms?\b", re.IGNORECASE)
+_INDUCE_WORD_RE = re.compile(r"\b(?:un-|non-)?induc(?:ed|ible)\b", re.IGNORECASE)
+# any negative contraction (hasn't, haven't, won't, wouldn't, shouldn't,
+# didn't ...), with a straight or curly apostrophe, is a negation token
+_NEGATION_RE = re.compile(
+    r"\b(?:not|never|no|none|neither|nor|without|cannot|zero|0)\b"
+    r"|\b\w+n['\u2019]t\b"
+    r"|\b(?:un|non)-(?=induc)",
+    re.IGNORECASE,
+)
+_STATED_RE = re.compile(r"\bSTATED\b")
+_OBJECT_NEGATION_RE = re.compile(r"\s+(?:no|none|nothing|neither|not|zero|0)\b", re.IGNORECASE)
+_QUESTION_TAIL_RE = re.compile(r"\s*\?")
+
+
+def _clauses(text: str) -> list[str]:
+    out: list[str] = []
+    for piece in _HARD_SPLIT_RE.split(text):
+        if not piece or not piece.strip():
+            continue
+        start = 0
+        for m in _SOFT_SPLIT_RE.finditer(piece):
+            rest = piece[m.end():]
+            following = _SOFT_SPLIT_RE.search(rest)
+            segment = rest[: following.start()] if following else rest
+            if _ARM_WORD_RE.search(segment):
+                out.append(piece[start: m.start()])
+                start = m.end()
+        out.append(piece[start:])
+    return [c for c in out if c.strip()]
+
+
+def _clause_dispositions(text: str) -> tuple[bool, bool]:
+    """(positive, negative): positive when some clause says `induced` with
+    no negation token before it; negative when some clause negates an
+    induce-word, uses an un-/non- form, or carries STATED with no negation
+    token before it ("not STATED because the lab was unavailable" is an
+    undisposed arm, not a negative one)."""
+    positive = negative = False
+    for clause in _clauses(text):
+        clause_positive = clause_negative = placeholder = False
+        for m in _INDUCE_WORD_RE.finditer(clause):
+            if _QUESTION_TAIL_RE.match(clause, m.end()):
+                placeholder = True
+            before = clause[: m.start()]
+            negated = (
+                bool(_NEGATION_RE.search(before))
+                or m.group(0).lower().startswith(("un-", "non-"))
+                # object-position negation: "induced no arm", "induced none"
+                or bool(_OBJECT_NEGATION_RE.match(clause, m.end()))
+            )
+            if negated or m.group(0).lower().endswith("inducible") and negated:
+                clause_negative = True
+            elif m.group(0).lower().endswith("induced"):
+                clause_positive = True
+            # a bare "inducible" without negation says nothing either way
+        if placeholder or (clause_positive and clause_negative):
+            # "induced / not induced", "induced or not induced", "induced?":
+            # an unselected alternative or a question states no outcome
+            continue
+        stated = _STATED_RE.search(clause)
+        if stated and not _NEGATION_RE.search(clause[: stated.start()]):
+            negative = True
+        positive = positive or clause_positive
+        negative = negative or clause_negative
+    return positive, negative
+# The whole-record statements that stand in for a negative line: nothing
+# was left un-induced, or there is no runtime arm at all. A "no
+# non-inducible arm" says every arm COULD be induced, not that it was, so
+# it is deliberately not here.
+# Every exception is a WHOLE clause, never a phrase inside one: the clause
+# says nothing but the assertion ("every arm was induced", "all arms
+# induced for real", "No runtime arm.", "no runtime arm exists", "there is
+# no runtime arm for this story", "no not-induced arm remains", an optional
+# parenthetical). A clause that goes on to any other predicate ("every arm
+# induced an error in the harness", "no runtime arm was induced", "no
+# runtime arm passed validation", "no not-induced arm was exercised") says
+# something else about arms and is refused: enumerating the verbs to block
+# lost to the first verb not on the list, and a negation before the
+# assertion ("Not every arm was induced") breaks the match by itself.
+_WHOLE_CLAUSE_EXCEPTION_RE = re.compile(
+    r"(?:"
+    r"(?:every|each) arm (?:was )?induced(?: for real)?(?: and restored)?"
+    r"|(?:all|both) arms (?:were )?induced(?: for real)?(?: and restored)?"
+    r"|(?:there (?:is|was|are|were) )?no runtime arms?(?: (?:exists?|existed|applies|applied))?"
+    r"|(?:there (?:is|was|are|were) )?no not-induced arms?"
+    r"(?: (?:remains?|remained|exists?|existed|is left|was left|are left|were left))?"
+    r")"
+    r"(?: (?:in|for) this (?:story|merge|change))?"
+    r"(?: \([^()]*\))?",
+    re.IGNORECASE,
+)
+_LEADING_BULLET_RE = re.compile(r"^(?:[-*+]|\d+[.)])\s+")
+
+
+def _all_induced(text: str) -> bool:
+    """A whole-record exception holds only in a clause (or a comma segment
+    of one: "No runtime arm exists, the merge touches docs only") that is,
+    entire, one of the assertions above."""
+    for clause in _clauses(text):
+        for segment in clause.split(","):
+            if _WHOLE_CLAUSE_EXCEPTION_RE.fullmatch(_LEADING_BULLET_RE.sub("", segment.strip())):
+                return True
+    return False
+
+
+def _positive_induced(text: str) -> bool:
+    return _clause_dispositions(text)[0]
+
+
+def _negative_induced(text: str) -> bool:
+    return _clause_dispositions(text)[1]
+
+
+# A quantified arm ("no arm", "every arm", "both arms", "two arms") is a
+# whole-record statement, not a specific arm awaiting its own disposition.
+_GENERIC_ARM_RE = re.compile(
+    r"\b(?:no|none of the|every|each|all|both|neither|any|either|zero|\d+|two|three|four|five|six)"
+    r" (?:\w+ )?arms?\b",
+    re.IGNORECASE,
+)
+
+
+# A statement ends at . ; or a list marker; : and , bind within one
+# ("STATED, not induced: the port arm" is one statement about one arm).
+_STATEMENT_SPLIT_RE = re.compile(r"[.;]|\s+(?:[-*+]|\d+[.)])\s")
+
+
+def _undisposed_arm_segment(item: str) -> bool:
+    """True when the item names two or more specific arms and one of them
+    has no disposition of its own: "ADMIN arm: induced; PORT arm: evidence
+    pending" is judged arm by arm, not by the one `induced` it carries. A
+    statement naming one specific arm must carry a disposition somewhere
+    in it (before or after the arm); a statement naming several must
+    carry one in each arm's own span. Quantified arms ("no arm", "both
+    arms") are whole-record statements and are not counted. An item
+    naming a single specific arm keeps the item-level rule."""
+    specific_total = 0
+    undisposed = False
+    for statement in _STATEMENT_SPLIT_RE.split(item):
+        if not statement or not statement.strip():
+            continue
+        clauses = _clauses(statement)
+        arm_at = [
+            i for i, c in enumerate(clauses)
+            if _ARM_WORD_RE.search(c) and not _GENERIC_ARM_RE.search(c)
+        ]
+        specific_total += len(arm_at)
+        if not arm_at:
+            continue
+        if len(arm_at) == 1:
+            if not _has_disposition(statement):
+                undisposed = True
+            continue
+        for k, i in enumerate(arm_at):
+            stop = arm_at[k + 1] if k + 1 < len(arm_at) else len(clauses)
+            if not _has_disposition("; ".join(clauses[i:stop])):
+                undisposed = True
+    return specific_total >= 2 and undisposed
+
+
+def _has_disposition(item: str) -> bool:
+    """A bullet item carries a disposition when one of its clauses says
+    induced positively, negates an induce-word, carries STATED, or states
+    a whole-record exception (every arm induced, no runtime arm)."""
+    return any(_clause_dispositions(item)) or _all_induced(item)
+# unordered (- * +) and ordered (1. / 1)) Markdown list markers alike
+_BULLET_RE = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s")
+_WS_RE = re.compile(r"\s+")
+
+
+def _flat(text: str) -> str:
+    """Whitespace-normalized: markdown wraps `not\n  induced` across lines,
+    and the vocabulary matchers must see the phrase, never the wrap."""
+    return _WS_RE.sub(" ", text)
+
+
+def _bullet_items(section: str) -> list[str]:
+    """The section's bullet items, each with its indented continuation
+    lines joined; prose paragraphs are not items."""
+    items: list[str] = []
+    current: list[str] | None = None
+    for line in section.splitlines():
+        if _BULLET_RE.match(line):
+            if current:
+                items.append(" ".join(current))
+            current = [line.strip()]
+        elif current is not None and line.strip() and line[:1].isspace():
+            current.append(line.strip())
+        else:
+            if current:
+                items.append(" ".join(current))
+            current = None
+    if current:
+        items.append(" ".join(current))
+    return items
+
+
+def lab_record_problems(section: str) -> tuple[list[str], list[str]]:
+    """(missing, problems) for a lab-record section under `required`:
+    every bullet item that names an arm is judged on its own and a
+    dispositionless one is named by its POSITION among the section's
+    bullet items (never by its text: the report rides into events.jsonl,
+    progress.log and the CLI unredacted, and a lab record can carry a
+    token-shaped value); then the section as a whole must carry a
+    positive `induced` and a negative disposition, unless it says every
+    arm was induced or no runtime arm exists."""
+    missing: list[str] = []
+    problems: list[str] = []
+    flat = _flat(section)
+    items = [_flat(i) for i in _bullet_items(section)]
+    undisposed = [
+        n for n, item in enumerate(items, start=1)
+        if _ARM_WORD_RE.search(item)
+        and (not _has_disposition(item) or _undisposed_arm_segment(item))
+    ]
+    for n in undisposed:
+        missing.append(f"arm:{n}")
+    if undisposed:
+        problems.append(
+            f"lab-record arm entries without an induced / not-induced disposition "
+            f"for every arm they name: bullet item(s) {', '.join(str(n) for n in undisposed)} "
+            f"of {len(items)} in the `### Merge and lab record` section (numbered from 1)"
+        )
+    all_induced = _all_induced(flat)
+    if not _positive_induced(flat) and not all_induced:
+        missing.append("induced")
+    if not _negative_induced(flat) and not all_induced:
+        missing.append("not-induced")
+    words = [m for m in missing if not m.startswith("arm:")]
+    if words:
+        problems.append(
+            "the `### Merge and lab record` lacks the literal induced / "
+            "not-induced line: missing " + ", ".join(words)
+            + " (say per failure arm `induced` or `not induced` / `not inducible` "
+            "/ `STATED`, or that every arm was induced)"
+        )
+    return missing, problems
+LAB_RECORD_MODES = ("off", "required")
 _HEADING_RE = re.compile(r"^#{2,3}\s+\S", re.MULTILINE)
 # \s* after the box, not \s+: a bare `- [ ]` with no label text is still
 # an unchecked box, and the gate's contract is ANY unchecked box blocks
@@ -53,6 +328,27 @@ _LIST_ENTRY_RE = re.compile(
 
 class CompletionError(Exception):
     """The gate cannot be evaluated honestly. Never a pass."""
+
+
+def normalize_lab_record(value: object) -> str:
+    """The `completion.lab_record` mode from config: `off` (default; the
+    record is not judged) or `required` (the finish refuses a story whose
+    `### Merge and lab record` lacks the literal induced / not-induced
+    vocabulary). Anything else is a config error, never a silent off."""
+    if value is None:
+        return "off"
+    # YAML 1.1 parses bare off/on as booleans - the documented values must
+    # work unquoted, so map them back before validating (merge.converge
+    # does the same).
+    if value is False:
+        return "off"
+    if value is True:
+        return "required"
+    if not isinstance(value, str) or value not in LAB_RECORD_MODES:
+        raise CompletionError(
+            f"completion.lab_record must be one of {LAB_RECORD_MODES}, got {value!r}"
+        )
+    return value
 
 
 def normalize_exempt(entries: object) -> tuple[str, ...]:
@@ -110,11 +406,13 @@ def normalize_exempt(entries: object) -> tuple[str, ...]:
 
 @dataclass
 class CompletionReport:
-    """The gate's verdict with its evidence. `ok` is True only when both
-    blades found nothing."""
+    """The gate's verdict with its evidence. `ok` is True only when no
+    blade found anything (the lab-record blade contributes only when the
+    project opted in)."""
 
     unchecked: list[str] = field(default_factory=list)
     missing_from_list: list[str] = field(default_factory=list)
+    lab_record_missing: list[str] = field(default_factory=list)
     phantom_in_list: list[str] = field(default_factory=list)
     problems: list[str] = field(default_factory=list)
 
@@ -128,8 +426,177 @@ class CompletionReport:
             "unchecked": self.unchecked,
             "missing_from_list": self.missing_from_list,
             "phantom_in_list": self.phantom_in_list,
+            "lab_record_missing": self.lab_record_missing,
             "problems": self.problems,
         }
+
+
+_FENCE_RE = re.compile(r"^(\s*)(`{3,}|~{3,})")
+
+
+_BLOCKQUOTE_PREFIX_RE = re.compile(r"^(?:\s{0,3}>\s?)+")
+
+
+def _mask_fences(text: str) -> str:
+    """The text with every fenced code block (``` or ~~~, any indent, also
+    inside a blockquote) blanked line for line: a heading or vocabulary
+    quoted inside a fence is an example, never the record. An unterminated
+    fence runs to the end of the text (masking more is the fail-closed
+    direction); a fence inside a blockquote ends with the blockquote, at
+    the first line without the > prefix."""
+    out: list[str] = []
+    fence: str | None = None
+    fence_indent = 0
+    fence_quoted = False
+    for line in text.splitlines(keepends=True):
+        quote = _BLOCKQUOTE_PREFIX_RE.match(line)
+        content = line[quote.end():] if quote else line
+        if fence is not None and fence_quoted and not quote:
+            fence = None
+        m = _FENCE_RE.match(content)
+        if fence is None and m:
+            fence = m.group(2)
+            fence_indent = len(m.group(1).expandtabs(4))
+            fence_quoted = bool(quote)
+            out.append("\n" if line.endswith("\n") else "")
+            continue
+        if fence is not None:
+            # CommonMark close: the same character, a run at least as long
+            # as the opener, nothing but whitespace after it, and indented
+            # at most three spaces past the opener's own indent (its
+            # container) - so a four-backtick fence is not closed by an
+            # inner three-backtick line, and a fence line indented four
+            # spaces inside the block is content, not the close
+            if (
+                m
+                and m.group(2)[0] == fence[0]
+                and len(m.group(2)) >= len(fence)
+                and not content[m.end():].strip()
+                and len(m.group(1).expandtabs(4)) <= fence_indent + 3
+            ):
+                fence = None
+            out.append("\n" if line.endswith("\n") else "")
+            continue
+        out.append(line)
+    return "".join(out)
+
+
+_HTML_COMMENT_RE = re.compile(r"<!--.*?(?:-->|\Z)", re.DOTALL)
+
+
+def _mask_indented_code(text: str) -> str:
+    """Indented code blocks blanked line for line: a run of lines indented
+    four spaces or a tab that starts after a blank line (or at the top) is
+    code per CommonMark, while an indented line right after a non-blank
+    line is a continuation of that line (a wrapped bullet item) and stays.
+    Blank lines inside a code block keep it open."""
+    out: list[str] = []
+    in_code = False
+    prev_blank = True
+    for line in text.splitlines(keepends=True):
+        if not line.strip():
+            out.append(line)
+            prev_blank = True
+            continue
+        indented = line.startswith("    ") or line.startswith("\t")
+        if indented and (prev_blank or in_code):
+            in_code = True
+            out.append("\n" if line.endswith("\n") else "")
+        else:
+            in_code = False
+            out.append(line)
+        prev_blank = False
+    return "".join(out)
+
+
+_HTML_RAW_START_RE = re.compile(r"^\s{0,3}<(pre|script|style|textarea)(?=[\s>]|$)", re.IGNORECASE)
+# CommonMark HTML block types 3, 4 and 5: a processing instruction, a
+# declaration and a CDATA section run to their own terminator
+_HTML_MARKED_START_RE = re.compile(r"^\s{0,3}<(\?|!\[CDATA\[|![A-Za-z])")
+_HTML_MARKED_END = {"?": "?>", "![CDATA[": "]]>"}
+_HTML_BLOCK_START_RE = re.compile(
+    r"^\s{0,3}</?(?:address|article|aside|base|basefont|blockquote|body|caption|center|col|colgroup"
+    r"|dd|details|dialog|dir|div|dl|dt|fieldset|figcaption|figure|footer|form|frame|frameset"
+    r"|h[1-6]|head|header|hr|html|iframe|legend|li|link|main|menu|menuitem|nav|noframes|ol"
+    r"|optgroup|option|p|param|search|section|summary|table|tbody|td|tfoot|th|thead|title|tr"
+    r"|track|ul)(?=[\s/>]|$)",
+    re.IGNORECASE,
+)
+# CommonMark type 7: a line that is one complete open tag (attributes per
+# the spec grammar, so a quoted value may hold > or <) or one closing tag
+_HTML_TAG_LINE_RE = re.compile(
+    r"^\s{0,3}(?:"
+    r"<[A-Za-z][A-Za-z0-9-]*"
+    r"(?:\s+[A-Za-z_:][A-Za-z0-9_.:-]*(?:\s*=\s*(?:[^\s\"'=<>`]+|'[^']*'|\"[^\"]*\"))?)*"
+    r"\s*/?>"
+    r"|</[A-Za-z][A-Za-z0-9-]*\s*>"
+    r")\s*$"
+)
+
+
+def _mask_html_blocks(text: str) -> str:
+    """CommonMark HTML blocks blanked line for line: a `<pre>`, `<script>`,
+    `<style>` or `<textarea>` block runs to the line holding its closing
+    tag, a processing instruction to `?>`, a declaration to `>` and a
+    CDATA section to `]]>` (unterminated: to the end of the text); a
+    block-level tag line, or a line that is one complete tag after a blank
+    line, runs to the next blank line. Their contents are raw HTML to a
+    reader, never a Markdown heading or bullet."""
+    out: list[str] = []
+    end_tag: str | None = None
+    until_blank = False
+    prev_blank = True
+    for line in text.splitlines(keepends=True):
+        blank = not line.strip()
+        if end_tag is not None:
+            out.append("\n" if line.endswith("\n") else "")
+            if end_tag in line.lower():
+                end_tag = None
+            prev_blank = blank
+            continue
+        if until_blank:
+            if blank:
+                until_blank = False
+                out.append(line)
+            else:
+                out.append("\n" if line.endswith("\n") else "")
+            prev_blank = blank
+            continue
+        m = _HTML_RAW_START_RE.match(line)
+        if m:
+            end_tag = f"</{m.group(1).lower()}>"
+            out.append("\n" if line.endswith("\n") else "")
+            if end_tag in line.lower()[m.end():]:
+                end_tag = None
+            prev_blank = False
+            continue
+        m = _HTML_MARKED_START_RE.match(line)
+        if m:
+            end_tag = _HTML_MARKED_END.get(m.group(1), ">")
+            out.append("\n" if line.endswith("\n") else "")
+            if end_tag in line[m.end():]:
+                end_tag = None
+            prev_blank = False
+            continue
+        if _HTML_BLOCK_START_RE.match(line) or (prev_blank and _HTML_TAG_LINE_RE.match(line)):
+            until_blank = True
+            out.append("\n" if line.endswith("\n") else "")
+            prev_blank = False
+            continue
+        out.append(line)
+        prev_blank = blank
+    return "".join(out)
+
+
+def _mask_hidden(text: str) -> str:
+    """The text with everything Markdown renders as something other than
+    prose blanked, line for line: fenced code blocks first, then HTML
+    comments (an unterminated comment hides everything to the end of the
+    text), then raw HTML blocks, then indented code blocks. A record a
+    reader cannot see, or sees only as a quoted example, is not the
+    record."""
+    masked = _HTML_COMMENT_RE.sub(lambda m: "\n" * m.group(0).count("\n"), _mask_fences(text))
+    return _mask_indented_code(_mask_html_blocks(masked))
 
 
 def _section(text: str, heading_re: re.Pattern[str]) -> str | None:
@@ -140,6 +607,15 @@ def _section(text: str, heading_re: re.Pattern[str]) -> str | None:
         return None
     nxt = _HEADING_RE.search(text, m.end())
     return text[m.end() : nxt.start() if nxt else len(text)]
+
+
+def _sections(text: str, heading_re: re.Pattern[str]) -> list[str]:
+    """Every body under a `heading_re` heading, in order."""
+    bodies: list[str] = []
+    for m in heading_re.finditer(text):
+        nxt = _HEADING_RE.search(text, m.end())
+        bodies.append(text[m.end() : nxt.start() if nxt else len(text)])
+    return bodies
 
 
 def _exempt(path: str, prefixes: Sequence[str]) -> bool:
@@ -204,13 +680,16 @@ def run_completion_gate(
     root = Path(project_root)
     try:
         raw_exempt = cfg.completion_exempt
+        lab_record = cfg.completion_lab_record
     except AttributeError as exc:
         # typed, not defaulted: a cfg without the field is a wrong OBJECT
         # (not a project that declared no exemptions), and silently running
         # the strict gate against it would hide the caller's bug
         raise CompletionError(
-            "cfg has no completion_exempt - pass a loaded ProjectConfig"
+            "cfg has no completion_exempt / completion_lab_record - pass a "
+            "loaded ProjectConfig"
         ) from exc
+    lab_record = normalize_lab_record(lab_record)
     if not isinstance(raw_exempt, (list, tuple)) or not all(
         isinstance(e, str) for e in raw_exempt
     ):
@@ -227,7 +706,11 @@ def run_completion_gate(
         raise CompletionError(f"cannot read story file {story_path}: {exc}") from exc
     merged = merged_files_of(root, merge_sha)
     report = _completion_report(
-        story_text, merged, exempt=exempt, require_file_list=require_file_list
+        story_text,
+        merged,
+        exempt=exempt,
+        require_file_list=require_file_list,
+        lab_record=lab_record,
     )
     # One event carrying the inputs, the exempt list USED (not the
     # config's state at some later read), and the verdict.
@@ -240,6 +723,7 @@ def run_completion_gate(
             "exempt": list(exempt),
             "merged_files": len(merged),
             "require_file_list": require_file_list,
+            "lab_record": lab_record,
             **report.as_dict(),
         },
     )
@@ -252,8 +736,9 @@ def _completion_report(
     *,
     exempt: Sequence[str] = (),
     require_file_list: bool = True,
+    lab_record: str = "off",
 ) -> CompletionReport:
-    """Evaluate both blades against the story file's text and the ACTUAL
+    """Evaluate the blades against the story file's text and the ACTUAL
     merged file set (use `merged_files_of` to read it from git). Module
     private: `exempt` is config-owned state, reachable in production only
     through `run_completion_gate`."""
@@ -310,6 +795,36 @@ def _completion_report(
                 "in the File List but not in the merge: "
                 + ", ".join(report.phantom_in_list)
             )
+
+    if normalize_lab_record(lab_record) == "required":
+        # The third blade: the post-merge record must say, in the literal
+        # words, what the lab arms induced and what they did not. The
+        # engine cannot enumerate the arms (they are prose), so it holds
+        # the vocabulary: a record with no `induced` at all, or one that
+        # never says what was NOT induced (or that nothing was left
+        # un-induced), is a record a later reader cannot trust.
+        # hidden text is masked first: a record quoted in a fence or
+        # commented out is not the record, and its words are not the
+        # section's vocabulary
+        labs = _sections(_mask_hidden(story_text), LAB_RECORD_HEADING_RE)
+        if not labs:
+            report.lab_record_missing.append("section")
+            report.problems.append(
+                "no `### Merge and lab record` section found - the finish "
+                "cannot judge a lab record it cannot see"
+            )
+        elif len(labs) > 1:
+            # two visible records: judging the first would let an
+            # undisposed arm in the second ship, so neither is THE record
+            report.lab_record_missing.append("section:duplicate")
+            report.problems.append(
+                f"{len(labs)} `### Merge and lab record` sections found - the "
+                "finish cannot tell which is the record; keep exactly one"
+            )
+        else:
+            missing, problems = lab_record_problems(labs[0])
+            report.lab_record_missing.extend(missing)
+            report.problems.extend(problems)
     return report
 
 

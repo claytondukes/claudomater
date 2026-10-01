@@ -74,6 +74,9 @@ learning:
 #   exempt: [artifacts/]    #   that legitimately ride outside the merge
 #                           #   (driver-owned artifacts in a separate repo).
 #                           #   Config is the ONLY source of exemptions.
+#   lab_record: off         #   `required`: the story's Merge and lab record
+#                           #   must carry the literal induced / not-induced
+#                           #   vocabulary per arm (bare off/on work unquoted).
 
 ci:
   tier_on_push: fast       # fast | full

@@ -48,7 +48,7 @@ rather than guess - a wrong guess silently keys rows under the wrong project.
 
 | Command | What it does |
 |---|---|
-| `omater gate completion --story-file P --merge-sha S [ROOT]` | Completion-integrity gate: tasks + File List vs the merge commit, exempt list from config only, invocation logged to the live run |
+| `omater gate completion --story-file P --merge-sha S [ROOT]` | Completion-integrity gate: tasks + File List vs the merge commit (+ the lab record's induced / not-induced vocabulary when `completion.lab_record: required`), exempt list from config only, invocation logged to the live run |
 | `omater gate close-epic EPIC --sprint PATH [ROOT]` | Epic close: artifact-repo pushed precheck, board gate, matrix audited-count vs the sprint file's story count (mismatch fails loudly) |
 | `omater sweep --range A..B [--repo R]` | Conventions sweep over a diff's ADDED lines (em-dashes outside code spans, attribution footers); exit 0 clean, 2 on findings |
 | `omater report --metrics PATH [--epic N]` | Per-epic table or cross-epic trends from the run-metrics JSONL the finish flow writes |

@@ -207,6 +207,7 @@ class ProjectConfig:
     # so every verdict is reproducible from the repo; an absent block
     # means the strict gate, never a call-site widening.
     completion_exempt: tuple[str, ...] = ()
+    completion_lab_record: str = "off"
     # Standing style/policy rules injected verbatim into every phase
     # prompt (epic-47 close follow-up): config-carried so the GO prompt
     # stops being the load-bearing carrier of policy.
@@ -410,7 +411,11 @@ def load_project_config(root: Path | str) -> ProjectConfig:
     # completion.exempt validates through the gate's own loader (one
     # grammar, owned where it is matched), failing at LOAD. Lazy import
     # like the siblings above.
-    from claudomater.completion import CompletionError, normalize_exempt
+    from claudomater.completion import (
+        CompletionError,
+        normalize_exempt,
+        normalize_lab_record,
+    )
 
     from claudomater.conventions import ConventionsError, normalize_conventions
 
@@ -420,14 +425,16 @@ def load_project_config(root: Path | str) -> ProjectConfig:
         raise ConfigError(f"{PROJECT_CONFIG_NAME}: {exc}") from exc
 
     completion_raw = _require_mapping("completion", data.get("completion"))
-    unknown_completion = set(completion_raw) - {"exempt"}
+    unknown_completion = set(completion_raw) - {"exempt", "lab_record"}
     if unknown_completion:
         raise ConfigError(
             f"{PROJECT_CONFIG_NAME}: completion has unknown key(s): "
-            f"{sorted(unknown_completion)} (only 'exempt' is defined)"
+            f"{sorted(unknown_completion)} (only 'exempt' and 'lab_record' "
+            "are defined)"
         )
     try:
         completion_exempt = normalize_exempt(completion_raw.get("exempt"))
+        completion_lab_record = normalize_lab_record(completion_raw.get("lab_record"))
     except CompletionError as exc:
         raise ConfigError(f"{PROJECT_CONFIG_NAME}: {exc}") from exc
 
@@ -475,6 +482,7 @@ def load_project_config(root: Path | str) -> ProjectConfig:
         commit_scope=commit_scope,
         surface_rules=surface_rules,
         completion_exempt=completion_exempt,
+        completion_lab_record=completion_lab_record,
         conventions=conventions,
         ci_tier_on_push=ci_raw.get("tier_on_push"),
         ci_tier_on_merge=ci_raw.get("tier_on_merge", "full"),

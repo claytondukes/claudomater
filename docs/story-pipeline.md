@@ -44,7 +44,7 @@ is not a marker). None or multiple markers refuse.
 ## Completion-integrity gate (`omater gate completion`)
 
 A story cannot flip `done` while its own paperwork disagrees with reality.
-Two fail-closed blades, run against the MERGE COMMIT:
+Three fail-closed blades, run against the MERGE COMMIT (the third is an opt-in):
 
 1. Any unchecked `- [ ]` box inside `## Tasks / Subtasks` blocks.
 2. `### File List` is compared as a SET against `git show --name-only` on
@@ -54,6 +54,15 @@ Two fail-closed blades, run against the MERGE COMMIT:
    `- \`path\`` with at most one flat parenthetical note (nested parens are
    a malformed entry and refuse - an unreadable entry must not silently
    thin the list).
+
+3. LAB RECORD VOCABULARY, when `completion.lab_record` is `required` in
+   `.omater.yaml` (`completion:` mapping, `lab_record:` key) - the
+   `### Merge and lab record` must say in the literal words what the lab
+   arms induced and what they did not: every bullet item naming an arm
+   carries `induced`, `not induced`, `not inducible` or `STATED`; the section
+   carries at least one positive `induced` and one negative disposition (or
+   says every arm was induced / no runtime arm exists); a missing section
+   blocks, and so does a duplicated one. Off by default.
 
 Exemptions (File List prefixes that legitimately ride outside the merge -
 driver-owned artifacts in a separate repo) come from `.omater.yaml`
