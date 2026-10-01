@@ -78,12 +78,13 @@ _SOFT_SPLIT_RE = re.compile(r",|\b(?:but|and|while|whereas|yet)\b", re.IGNORECAS
 _ARM_WORD_RE = re.compile(r"\barms?\b", re.IGNORECASE)
 _INDUCE_WORD_RE = re.compile(r"\b(?:un-|non-)?induc(?:ed|ible)\b", re.IGNORECASE)
 _NEGATION_RE = re.compile(
-    r"\b(?:not|never|no|none|neither|nor|without|cannot|can't|couldn't|wasn't|weren't|isn't|aren't|didn't)\b"
+    r"\b(?:not|never|no|none|neither|nor|without|cannot|can't|couldn't|wasn't|weren't|isn't|aren't|didn't"
+    r"|zero|0)\b"
     r"|\b(?:un|non)-(?=induc)",
     re.IGNORECASE,
 )
 _STATED_RE = re.compile(r"\bSTATED\b")
-_OBJECT_NEGATION_RE = re.compile(r"\s+(?:no|none|nothing|neither|not)\b", re.IGNORECASE)
+_OBJECT_NEGATION_RE = re.compile(r"\s+(?:no|none|nothing|neither|not|zero|0)\b", re.IGNORECASE)
 
 
 def _clauses(text: str) -> list[str]:
@@ -407,12 +408,39 @@ def _mask_fences(text: str) -> str:
 _HTML_COMMENT_RE = re.compile(r"<!--.*?(?:-->|\Z)", re.DOTALL)
 
 
+def _mask_indented_code(text: str) -> str:
+    """Indented code blocks blanked line for line: a run of lines indented
+    four spaces or a tab that starts after a blank line (or at the top) is
+    code per CommonMark, while an indented line right after a non-blank
+    line is a continuation of that line (a wrapped bullet item) and stays.
+    Blank lines inside a code block keep it open."""
+    out: list[str] = []
+    in_code = False
+    prev_blank = True
+    for line in text.splitlines(keepends=True):
+        if not line.strip():
+            out.append(line)
+            prev_blank = True
+            continue
+        indented = line.startswith("    ") or line.startswith("\t")
+        if indented and (prev_blank or in_code):
+            in_code = True
+            out.append("\n" if line.endswith("\n") else "")
+        else:
+            in_code = False
+            out.append(line)
+        prev_blank = False
+    return "".join(out)
+
+
 def _mask_hidden(text: str) -> str:
-    """The text with everything Markdown does not render blanked, line
-    for line: fenced code blocks first, then HTML comments (an
-    unterminated comment hides everything to the end of the text). A
-    record a reader cannot see is not the record."""
-    return _HTML_COMMENT_RE.sub(lambda m: "\n" * m.group(0).count("\n"), _mask_fences(text))
+    """The text with everything Markdown renders as something other than
+    prose blanked, line for line: fenced code blocks first, then HTML
+    comments (an unterminated comment hides everything to the end of the
+    text), then indented code blocks. A record a reader cannot see, or
+    sees only as a quoted example, is not the record."""
+    masked = _HTML_COMMENT_RE.sub(lambda m: "\n" * m.group(0).count("\n"), _mask_fences(text))
+    return _mask_indented_code(masked)
 
 
 def _section(text: str, heading_re: re.Pattern[str]) -> str | None:

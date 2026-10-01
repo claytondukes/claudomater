@@ -740,6 +740,41 @@ class TestLabRecordBlade:
             report = _completion_report(self._story(record), self.MERGED, lab_record="required")
             assert report.ok, (line, report.problems)
 
+    def test_zero_is_a_negation(self):
+        from claudomater.completion import _completion_report
+
+        for line in (
+            "- Zero arms were induced; STATED.",
+            "- 0 arms were induced; STATED.",
+            "- The probe induced zero arms; STATED.",
+            "- The probe induced 0 of the arms; STATED.",
+        ):
+            record = "### Merge and lab record (operator, 2026-09-30)\n\n" + line + "\n"
+            report = _completion_report(self._story(record), self.MERGED, lab_record="required")
+            assert report.lab_record_missing == ["induced"] and not report.ok, line
+        # a count elsewhere in the item does not negate its own clause
+        record = ("### Merge and lab record (operator, 2026-09-30)\n\n"
+                  "- Lab 12/12, 0 drift; ADMIN arm: induced; PORT arm: not induced.\n")
+        assert _completion_report(self._story(record), self.MERGED, lab_record="required").ok
+
+    def test_an_indented_code_block_is_not_the_record(self):
+        from claudomater.completion import _completion_report
+
+        record = ("### Merge and lab record (operator, 2026-09-30)\n\n"
+                  "    - ADMIN arm: induced through the real dialog.\n"
+                  "    - PORT arm: not induced; STATED.\n")
+        report = _completion_report(self._story(record), self.MERGED, lab_record="required")
+        assert report.lab_record_missing == ["induced", "not-induced"] and not report.ok
+        # a code block may hold blank lines and still be code
+        record = ("### Merge and lab record (operator, 2026-09-30)\n\n"
+                  "    - ADMIN arm: induced.\n\n    - PORT arm: not induced; STATED.\n")
+        report = _completion_report(self._story(record), self.MERGED, lab_record="required")
+        assert report.lab_record_missing == ["induced", "not-induced"] and not report.ok
+        # a wrapped bullet continued on a four-space-indented line is prose
+        record = ("### Merge and lab record (operator, 2026-09-30)\n\n"
+                  "- The port arm was not\n    induced; STATED.\n- ADMIN arm: induced.\n")
+        assert _completion_report(self._story(record), self.MERGED, lab_record="required").ok
+
     def test_a_negated_all_induced_statement_is_not_an_exception(self):
         from claudomater.completion import _completion_report
 
