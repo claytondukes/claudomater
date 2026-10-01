@@ -43,7 +43,7 @@ class TestUsageCommand:
         assert main(["usage", "--user-config", no_user_config]) == EXIT_PAUSE
 
     def test_degrade_exit_code(self, tmp_path, monkeypatch, no_user_config):
-        write_fake_usage(tmp_path, monkeypatch, {"five_hour": 10, "seven_day": 10, "scoped": 85})
+        write_fake_usage(tmp_path, monkeypatch, {"five_hour": 10, "seven_day": 10, "scoped": 96})
         assert main(["usage", "--user-config", no_user_config]) == EXIT_DEGRADE
 
     def test_stale_near_limit_fake_pauses_fail_closed(
