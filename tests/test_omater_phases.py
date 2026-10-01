@@ -106,7 +106,7 @@ class TestClaudeCliExecutor:
         from claudomater.phases import ClaudeCliExecutor
 
         ex = ClaudeCliExecutor(cwd=tmp_path)
-        argv = ex.build_argv(PhaseSpec("dev", "m", "do the thing"), "claude-opus-5")
+        argv = ex.build_argv(PhaseSpec("dev", "m", "do the thing"), "claude-opus-5-5")
         assert argv[:3] == ["claude", "-p", "do the thing"]
         assert "--permission-mode" in argv
         assert argv[argv.index("--permission-mode") + 1] == "bypassPermissions"
@@ -160,7 +160,7 @@ class TestRunPhase:
     def test_success_path(self, tmp_path):
         runner, log, executor, notifier = make_runner(tmp_path, [GOOD])
         outcome = runner.run_phase(
-            PhaseSpec("create", "claude-fable-5", "do it", required_fields=("status",))
+            PhaseSpec("create", "claude-fable-5-1", "do it", required_fields=("status",))
         )
         assert outcome.status == "verified"
         assert outcome.result["status"] == "complete"
@@ -359,7 +359,7 @@ class TestGuardrailGate:
         runner, log, executor, notifier = make_runner(
             tmp_path, [NO_JSON, GOOD], guardrail_check=lambda: next(decisions)
         )
-        outcome = runner.run_phase(PhaseSpec("dev", "claude-opus-5", "p"))
+        outcome = runner.run_phase(PhaseSpec("dev", "claude-opus-5-5", "p"))
         assert outcome.status == "paused"
         assert len(executor.calls) == 1  # attempt 2 never spawned
         assert notifier.sent[0][0] == "PAUSED-QUOTA"
@@ -371,9 +371,9 @@ class TestGuardrailGate:
         runner, log, executor, _ = make_runner(
             tmp_path, [NO_JSON, GOOD], guardrail_check=lambda: next(decisions)
         )
-        outcome = runner.run_phase(PhaseSpec("dev", "claude-fable-5", "p"))
+        outcome = runner.run_phase(PhaseSpec("dev", "claude-fable-5-1", "p"))
         assert outcome.status == "verified"
-        assert executor.calls == ["claude-fable-5", "claude-opus-5"]
+        assert executor.calls == ["claude-fable-5-1", "claude-opus-5-5"]
 
     def test_pause_blocks_spawn_and_notifies(self, tmp_path):
         runner, log, executor, notifier = make_runner(
@@ -381,7 +381,7 @@ class TestGuardrailGate:
             [GOOD],
             guardrail_check=lambda: Decision(action="pause", reasons=["5h at 97%"]),
         )
-        outcome = runner.run_phase(PhaseSpec("dev", "claude-opus-5", "p"))
+        outcome = runner.run_phase(PhaseSpec("dev", "claude-opus-5-5", "p"))
         assert outcome.status == "paused"
         assert executor.calls == []  # no NEW phase spawns after the threshold trips
         assert notifier.sent[0][0] == "PAUSED-QUOTA"
@@ -394,9 +394,9 @@ class TestGuardrailGate:
             user_config=UserConfig(),
             guardrail_check=lambda: Decision(action="degrade", reasons=["scoped at 85%"]),
         )
-        outcome = runner.run_phase(PhaseSpec("dev", "claude-fable-5", "p"))
+        outcome = runner.run_phase(PhaseSpec("dev", "claude-fable-5-1", "p"))
         assert outcome.status == "verified"
-        assert executor.calls == ["claude-opus-5"]  # degraded, visibly
+        assert executor.calls == ["claude-opus-5-5"]  # degraded, visibly
         assert notifier.sent[0][0] == "DEGRADED"
         assert "phase-degraded" in [e["event"] for e in log.events()]
 
@@ -407,7 +407,7 @@ class TestGuardrailGate:
             guardrail_check=lambda: Decision(action="degrade", reasons=["scoped"]),
         )
         outcome = runner.run_phase(
-            PhaseSpec("dev", "claude-fable-5", "p", escalated=True)
+            PhaseSpec("dev", "claude-fable-5-1", "p", escalated=True)
         )
         assert outcome.status == "paused"
         assert executor.calls == []
@@ -428,7 +428,7 @@ class TestGuardrailGate:
                 reasons=["usage unknown, failing closed: stale-cache: 429"],
             ),
         )
-        outcome = runner.run_phase(PhaseSpec("lessons", "claude-opus-5", "p"))
+        outcome = runner.run_phase(PhaseSpec("lessons", "claude-opus-5-5", "p"))
         assert outcome.status == "paused"
         (reason,) = outcome.failure_reasons
         assert "paused" in reason and "'lessons'" in reason
@@ -674,7 +674,7 @@ RESULT_EVENT = json.dumps(
         "result": 'done\n```json\n{"status": "ok"}\n```',
         "usage": {"output_tokens": 7},
         "total_cost_usd": 0.1234,
-        "modelUsage": {"claude-sonnet-5": {"outputTokens": 7}},
+        "modelUsage": {"claude-sonnet-5-5": {"outputTokens": 7}},
         "permission_denials": [{"tool_name": "Bash", "tool_input": {}}],
     }
 )
@@ -726,7 +726,7 @@ class TestFullSessionCapture:
         assert '"tool_use"' in result.transcript
         assert result.token_usage == {"output_tokens": 7}
         assert result.cost_usd == 0.1234
-        assert result.model_usage == {"claude-sonnet-5": {"outputTokens": 7}}
+        assert result.model_usage == {"claude-sonnet-5-5": {"outputTokens": 7}}
         assert result.permission_denials == [{"tool_name": "Bash", "tool_input": {}}]
 
     def test_stream_without_result_event_is_not_a_result(self, tmp_path):
@@ -791,7 +791,7 @@ class TestFullSessionCapture:
                 "type": "result",
                 "result": "done",
                 "modelUsage": {
-                    "claude-sonnet-5": {  # configured, never used
+                    "claude-sonnet-5-5": {  # configured, never used
                         "inputTokens": 0,
                         "outputTokens": 0,
                         "cacheReadInputTokens": 0,
@@ -898,7 +898,7 @@ class TestFullSessionCapture:
                     text=GOOD,
                     token_usage={"output_tokens": 5},
                     cost_usd=0.42,
-                    model_usage={"claude-sonnet-5": {"outputTokens": 5}},
+                    model_usage={"claude-sonnet-5-5": {"outputTokens": 5}},
                     permission_denials=[],
                 )
 
@@ -908,7 +908,7 @@ class TestFullSessionCapture:
         )
         detail = [e for e in log.events() if e["event"] == "phase-verified"][0]["detail"]
         assert detail["cost_usd"] == 0.42
-        assert detail["model_usage"] == {"claude-sonnet-5": {"outputTokens": 5}}
+        assert detail["model_usage"] == {"claude-sonnet-5-5": {"outputTokens": 5}}
         assert detail["permission_denials"] == []
 
 
@@ -1035,13 +1035,13 @@ class TestEscalationSeam:
     + prompt amendment. The seam makes the re-drive one recorded call."""
 
     def test_escalation_spec_is_a_marked_amended_copy(self):
-        spec = PhaseSpec("dev", "claude-sonnet-5", "build it", story_key="OM-5")
-        new = escalation_spec(spec, "claude-fable-5", ["verifier-failed: files_exist"])
-        assert new.model == "claude-fable-5"
+        spec = PhaseSpec("dev", "claude-sonnet-5-5", "build it", story_key="OM-5")
+        new = escalation_spec(spec, "claude-fable-5-1", ["verifier-failed: files_exist"])
+        assert new.model == "claude-fable-5-1"
         assert new.escalated is True
         assert "verifier-failed: files_exist" in new.prompt
         # the original is untouched (a re-drive must not rewrite history)
-        assert spec.model == "claude-sonnet-5" and spec.escalated is False
+        assert spec.model == "claude-sonnet-5-5" and spec.escalated is False
 
     def test_run_escalated_scrubs_reasons_in_prompt_too(self, tmp_path, monkeypatch):
         """The prompt is a leak surface (it appears in the CLI's argv):
@@ -1061,7 +1061,7 @@ class TestEscalationSeam:
         )
         runner.run_escalated(
             PhaseSpec("dev", "m", "p"),
-            "claude-fable-5",
+            "claude-fable-5-1",
             ["stderr said: MY_SECRET=hunter2secret"],
         )
         assert "hunter2secret" not in prompts[0]
@@ -1069,16 +1069,16 @@ class TestEscalationSeam:
 
     def test_run_escalated_logs_the_redrive_before_spawning(self, tmp_path):
         runner, log, executor, _ = make_runner(tmp_path, [GOOD])
-        spec = PhaseSpec("dev", "claude-sonnet-5", "build it", story_key="OM-5")
+        spec = PhaseSpec("dev", "claude-sonnet-5-5", "build it", story_key="OM-5")
         outcome = runner.run_escalated(
-            spec, "claude-fable-5", ["attempt 1: files_exist missing"]
+            spec, "claude-fable-5-1", ["attempt 1: files_exist missing"]
         )
         assert outcome.status == "verified"
-        assert executor.calls == ["claude-fable-5"]
+        assert executor.calls == ["claude-fable-5-1"]
         events = [e["event"] for e in log.events()]
         assert events.index("phase-escalation-redrive") < events.index("phase-spawn")
         redrive = [e for e in log.events() if e["event"] == "phase-escalation-redrive"][0]
-        assert redrive["detail"]["model"] == "claude-fable-5"
+        assert redrive["detail"]["model"] == "claude-fable-5-1"
         assert redrive["story_key"] == "OM-5"
 
 

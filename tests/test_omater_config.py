@@ -219,10 +219,10 @@ class TestProjectConfig:
             write_project(
                 tmp_path,
                 "project: x\ndeployment_type: internal\n"
-                "models:\n  lessons: claude-sonnet-5\n",
+                "models:\n  lessons: claude-sonnet-5-5\n",
             )
         )
-        assert override.model_for("lessons") == "claude-sonnet-5"
+        assert override.model_for("lessons") == "claude-sonnet-5-5"
 
     def test_non_mapping_sections_are_config_errors(self, tmp_path):
         """merge: off (a string) must be a ConfigError at load, never an
@@ -274,7 +274,7 @@ class TestUserConfig:
             "  pause_at: { five_hour: 90, seven_day: 85 }\n"
             "  on_threshold: { five_hour: pause, seven_day: degrade }\n"
             "  degrade_scoped_at: 75\n"
-            "  degrade_path: [claude-opus-5, claude-sonnet-5]\n"
+            "  degrade_path: [claude-opus-5-5, claude-sonnet-5-5]\n"
             "notify:\n"
             "  slack_webhook: ${TEST_WEBHOOK}\n"
             "learning:\n"
@@ -284,7 +284,7 @@ class TestUserConfig:
         cfg = load_user_config(path)
         assert cfg.usage.pause_at == {"five_hour": 90, "seven_day": 85}
         assert cfg.usage.on_threshold["seven_day"] == "degrade"
-        assert cfg.usage.degrade_path == ["claude-opus-5", "claude-sonnet-5"]
+        assert cfg.usage.degrade_path == ["claude-opus-5-5", "claude-sonnet-5-5"]
         assert cfg.slack_webhook == "https://hooks.example/abc"
         assert cfg.notify_enabled
 
@@ -337,7 +337,7 @@ class TestUserConfig:
     def test_pause_must_be_last_in_degrade_path(self, tmp_path):
         path = tmp_path / "config.yaml"
         path.write_text(
-            "usage:\n  degrade_path: [claude-opus-5, pause, claude-sonnet-5]\n",
+            "usage:\n  degrade_path: [claude-opus-5-5, pause, claude-sonnet-5-5]\n",
             encoding="utf-8",
         )
         with pytest.raises(ConfigError, match="last entry"):
@@ -355,7 +355,7 @@ class TestUserConfig:
     def test_degrade_path_must_step_down(self, tmp_path):
         path = tmp_path / "config.yaml"
         path.write_text(
-            "usage:\n  degrade_path: [claude-sonnet-5, claude-opus-5]\n",
+            "usage:\n  degrade_path: [claude-sonnet-5-5, claude-opus-5-5]\n",
             encoding="utf-8",
         )
         with pytest.raises(ConfigError, match="strictly DOWN"):
@@ -409,7 +409,7 @@ class TestUserConfig:
 
     def test_non_list_degrade_path_is_a_config_error(self, tmp_path):
         path = tmp_path / "config.yaml"
-        path.write_text("usage:\n  degrade_path: claude-opus-5\n", encoding="utf-8")
+        path.write_text("usage:\n  degrade_path: claude-opus-5-5\n", encoding="utf-8")
         with pytest.raises(ConfigError, match="must be a list"):
             load_user_config(path)
 

@@ -86,7 +86,7 @@ class TestPolicyCommand:
         assert main(["policy", str(tmp_path), "--json"]) == EXIT_OK
         policy = json.loads(capsys.readouterr().out)
         assert policy["deployment_type"] == "production"
-        assert policy["models"]["sr_review"] == "claude-fable-5"
+        assert policy["models"]["sr_review"] == "claude-fable-5-1"
         assert policy["review_floor"] == "SHOULD-FIX"
 
     def test_policy_without_config_errors(self, tmp_path, capsys):
@@ -248,11 +248,11 @@ class TestStartCommand:
         assert len(policy_events) == 1
         policy = policy_events[0]["detail"]
         assert policy["deployment_type"] == "mission-critical"
-        assert policy["models"]["sr_review"] == "claude-fable-5"
+        assert policy["models"]["sr_review"] == "claude-fable-5-1"
         assert policy["review_floor"] == "NOTE"
         assert policy["ci_on_push"] == "fast+smoke"
         progress = (log.run_dir / "progress.log").read_text()
-        assert "claude-fable-5" in progress and "NOTE" in progress
+        assert "claude-fable-5-1" in progress and "NOTE" in progress
 
     def test_start_records_the_worktree_baseline(self, tmp_path, omater_on_path):
         """Parity finding F2: paths dirty at run START are the operator's
