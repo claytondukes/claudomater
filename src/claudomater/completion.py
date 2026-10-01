@@ -496,8 +496,15 @@ _HTML_BLOCK_START_RE = re.compile(
     r"|track|ul)(?=[\s/>]|$)",
     re.IGNORECASE,
 )
+# CommonMark type 7: a line that is one complete open tag (attributes per
+# the spec grammar, so a quoted value may hold > or <) or one closing tag
 _HTML_TAG_LINE_RE = re.compile(
-    r"^\s{0,3}(?:<[A-Za-z][A-Za-z0-9-]*(?:\s+[^<>]*?)?\s*/?>|</[A-Za-z][A-Za-z0-9-]*\s*>)\s*$"
+    r"^\s{0,3}(?:"
+    r"<[A-Za-z][A-Za-z0-9-]*"
+    r"(?:\s+[A-Za-z_:][A-Za-z0-9_.:-]*(?:\s*=\s*(?:[^\s\"'=<>`]+|'[^']*'|\"[^\"]*\"))?)*"
+    r"\s*/?>"
+    r"|</[A-Za-z][A-Za-z0-9-]*\s*>"
+    r")\s*$"
 )
 
 

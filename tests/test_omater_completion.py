@@ -836,6 +836,9 @@ class TestLabRecordBlade:
             "<![CDATA[\n" + body + "]]>\n",
             "<!RECORD\n" + body + ">\n",
             "<?template\n" + body,
+            # a complete open tag whose quoted attribute holds > (type 7)
+            "<span title=\">\">\n" + body.rstrip("\n") + "\n</span>\n",
+            "<span data-x='<' class=\"a b\">\n" + body.rstrip("\n") + "\n</span>\n",
         ):
             report = _completion_report(self._story(wrapped), self.MERGED, lab_record="required")
             assert report.lab_record_missing == ["section"] and not report.ok, wrapped[:12]
