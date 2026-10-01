@@ -499,13 +499,13 @@ class UsageConfig:
     on_threshold: dict[str, str] = field(
         default_factory=lambda: {"five_hour": "pause", "seven_day": "pause"}
     )
-    degrade_scoped_at: int = 80
+    degrade_scoped_at: int = 95
     degrade_path: list[str] = field(default_factory=lambda: [MODEL_OPUS, "pause"])
     # epic-61 retro A10: the run's FIRST spawn needs every window below these
     # (percent); 100 disables a window's start gate. Judged in addition to
     # pause_at / degrade_scoped_at, which keep gating every later spawn.
     start_below: dict[str, int] = field(
-        default_factory=lambda: {"five_hour": 80, "seven_day": 95, "scoped": 80}
+        default_factory=lambda: {"five_hour": 80, "seven_day": 95, "scoped": 95}
     )
     # epic-61 retro A10: account e-mail globs (case-insensitive) that pause
     # every spawn - operator identities stay out of automation phases.
@@ -591,7 +591,7 @@ def load_user_config(path: Path | str | None = None) -> UserConfig:
             _require_mapping("usage.on_threshold", usage_raw["on_threshold"])
         )
     usage.degrade_scoped_at = _require_int(
-        "usage.degrade_scoped_at", usage_raw.get("degrade_scoped_at", 80)
+        "usage.degrade_scoped_at", usage_raw.get("degrade_scoped_at", 95)
     )
     if "degrade_path" in usage_raw:
         raw_path = usage_raw["degrade_path"]

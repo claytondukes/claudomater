@@ -261,7 +261,7 @@ class TestUserConfig:
         cfg = load_user_config(tmp_path / "nope.yaml")
         assert cfg.usage.pause_at == {"five_hour": 95, "seven_day": 95}
         assert cfg.usage.on_threshold == {"five_hour": "pause", "seven_day": "pause"}
-        assert cfg.usage.degrade_scoped_at == 80
+        assert cfg.usage.degrade_scoped_at == 95
         assert cfg.usage.degrade_path == [MODEL_OPUS, "pause"]
         assert cfg.slack_webhook is None
         assert not cfg.notify_enabled
@@ -662,7 +662,7 @@ class TestStartHeadroomAndDenyAccountsConfig:
 
     def test_defaults(self, tmp_path):
         cfg = load_user_config(tmp_path / "nope.yaml")
-        assert cfg.usage.start_below == {"five_hour": 80, "seven_day": 95, "scoped": 80}
+        assert cfg.usage.start_below == {"five_hour": 80, "seven_day": 95, "scoped": 95}
         assert cfg.usage.deny_accounts == []
 
     def test_partial_start_below_merges_over_the_defaults(self, tmp_path):
@@ -672,7 +672,7 @@ class TestStartHeadroomAndDenyAccountsConfig:
             encoding="utf-8",
         )
         cfg = load_user_config(path)
-        assert cfg.usage.start_below == {"five_hour": 70, "seven_day": 95, "scoped": 80}
+        assert cfg.usage.start_below == {"five_hour": 70, "seven_day": 95, "scoped": 95}
         assert cfg.usage.deny_accounts == ["cdukes@*", "tom@*"]
 
     @pytest.mark.parametrize(

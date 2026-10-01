@@ -93,7 +93,7 @@ class TestEvaluate:
         assert d.action == "pause"
 
     def test_scoped_quota_triggers_degrade(self):
-        d = evaluate(snapshot(scoped=80), UserConfig())
+        d = evaluate(snapshot(scoped=95), UserConfig())
         assert d.action == "degrade"
         assert d.window == "scoped"
 
@@ -897,7 +897,7 @@ class TestRealPathFailClosed:
         write_fake(
             tmp_path,
             monkeypatch,
-            {"five_hour": 1, "seven_day": 1, "scoped": 85, "scoped_model": 42},
+            {"five_hour": 1, "seven_day": 1, "scoped": 96, "scoped_model": 42},
         )
         snap = read_usage()
         assert snap.scoped_model is None
@@ -1360,7 +1360,7 @@ class TestStartHeadroom:
         assert evaluate(snapshot(five=85), UserConfig()).action == "ok"
 
     def test_the_scoped_start_gate_beats_the_degrade(self):
-        d = evaluate(snapshot(scoped=80), UserConfig(), first_spawn=True)
+        d = evaluate(snapshot(scoped=95), UserConfig(), first_spawn=True)
         assert d.action == "pause" and d.window == "scoped"
         assert any("first spawn" in r for r in d.reasons)
 
