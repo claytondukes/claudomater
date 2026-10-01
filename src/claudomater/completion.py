@@ -35,7 +35,7 @@ Three blades, all fail-closed (the third is an opt-in):
    `not induced`, `not inducible` or `STATED`, the section as a whole
    carries at least one positive `induced` and at least one negative
    disposition (or says every arm was induced / no runtime arm exists),
-   and a missing section blocks. Four epics of close reviews found the
+   and a missing or duplicated section blocks. Four epics of close reviews found the
    line carried by discipline alone under an epic sentence promising this
    gate. Off by default: a project opts in per `.omater.yaml`.
 """
@@ -87,6 +87,7 @@ _NEGATION_RE = re.compile(
 )
 _STATED_RE = re.compile(r"\bSTATED\b")
 _OBJECT_NEGATION_RE = re.compile(r"\s+(?:no|none|nothing|neither|not|zero|0)\b", re.IGNORECASE)
+_QUESTION_TAIL_RE = re.compile(r"\s*\?")
 
 
 def _clauses(text: str) -> list[str]:
@@ -114,10 +115,10 @@ def _clause_dispositions(text: str) -> tuple[bool, bool]:
     undisposed arm, not a negative one)."""
     positive = negative = False
     for clause in _clauses(text):
-        stated = _STATED_RE.search(clause)
-        if stated and not _NEGATION_RE.search(clause[: stated.start()]):
-            negative = True
+        clause_positive = clause_negative = placeholder = False
         for m in _INDUCE_WORD_RE.finditer(clause):
+            if _QUESTION_TAIL_RE.match(clause, m.end()):
+                placeholder = True
             before = clause[: m.start()]
             negated = (
                 bool(_NEGATION_RE.search(before))
@@ -126,10 +127,19 @@ def _clause_dispositions(text: str) -> tuple[bool, bool]:
                 or bool(_OBJECT_NEGATION_RE.match(clause, m.end()))
             )
             if negated or m.group(0).lower().endswith("inducible") and negated:
-                negative = True
+                clause_negative = True
             elif m.group(0).lower().endswith("induced"):
-                positive = True
+                clause_positive = True
             # a bare "inducible" without negation says nothing either way
+        if placeholder or (clause_positive and clause_negative):
+            # "induced / not induced", "induced or not induced", "induced?":
+            # an unselected alternative or a question states no outcome
+            continue
+        stated = _STATED_RE.search(clause)
+        if stated and not _NEGATION_RE.search(clause[: stated.start()]):
+            negative = True
+        positive = positive or clause_positive
+        negative = negative or clause_negative
     return positive, negative
 # The whole-record statements that stand in for a negative line: nothing
 # was left un-induced, or there is no runtime arm at all. A "no
@@ -424,19 +434,30 @@ class CompletionReport:
 _FENCE_RE = re.compile(r"^(\s*)(`{3,}|~{3,})")
 
 
+_BLOCKQUOTE_PREFIX_RE = re.compile(r"^(?:\s{0,3}>\s?)+")
+
+
 def _mask_fences(text: str) -> str:
-    """The text with every fenced code block (``` or ~~~, any indent)
-    blanked line for line: a heading or vocabulary quoted inside a fence
-    is an example, never the record. An unterminated fence runs to the
-    end of the text (masking more is the fail-closed direction)."""
+    """The text with every fenced code block (``` or ~~~, any indent, also
+    inside a blockquote) blanked line for line: a heading or vocabulary
+    quoted inside a fence is an example, never the record. An unterminated
+    fence runs to the end of the text (masking more is the fail-closed
+    direction); a fence inside a blockquote ends with the blockquote, at
+    the first line without the > prefix."""
     out: list[str] = []
     fence: str | None = None
     fence_indent = 0
+    fence_quoted = False
     for line in text.splitlines(keepends=True):
-        m = _FENCE_RE.match(line)
+        quote = _BLOCKQUOTE_PREFIX_RE.match(line)
+        content = line[quote.end():] if quote else line
+        if fence is not None and fence_quoted and not quote:
+            fence = None
+        m = _FENCE_RE.match(content)
         if fence is None and m:
             fence = m.group(2)
             fence_indent = len(m.group(1).expandtabs(4))
+            fence_quoted = bool(quote)
             out.append("\n" if line.endswith("\n") else "")
             continue
         if fence is not None:
@@ -450,7 +471,7 @@ def _mask_fences(text: str) -> str:
                 m
                 and m.group(2)[0] == fence[0]
                 and len(m.group(2)) >= len(fence)
-                and not line[m.end():].strip()
+                and not content[m.end():].strip()
                 and len(m.group(1).expandtabs(4)) <= fence_indent + 3
             ):
                 fence = None
@@ -586,6 +607,15 @@ def _section(text: str, heading_re: re.Pattern[str]) -> str | None:
         return None
     nxt = _HEADING_RE.search(text, m.end())
     return text[m.end() : nxt.start() if nxt else len(text)]
+
+
+def _sections(text: str, heading_re: re.Pattern[str]) -> list[str]:
+    """Every body under a `heading_re` heading, in order."""
+    bodies: list[str] = []
+    for m in heading_re.finditer(text):
+        nxt = _HEADING_RE.search(text, m.end())
+        bodies.append(text[m.end() : nxt.start() if nxt else len(text)])
+    return bodies
 
 
 def _exempt(path: str, prefixes: Sequence[str]) -> bool:
@@ -776,15 +806,23 @@ def _completion_report(
         # hidden text is masked first: a record quoted in a fence or
         # commented out is not the record, and its words are not the
         # section's vocabulary
-        lab = _section(_mask_hidden(story_text), LAB_RECORD_HEADING_RE)
-        if lab is None:
+        labs = _sections(_mask_hidden(story_text), LAB_RECORD_HEADING_RE)
+        if not labs:
             report.lab_record_missing.append("section")
             report.problems.append(
                 "no `### Merge and lab record` section found - the finish "
                 "cannot judge a lab record it cannot see"
             )
+        elif len(labs) > 1:
+            # two visible records: judging the first would let an
+            # undisposed arm in the second ship, so neither is THE record
+            report.lab_record_missing.append("section:duplicate")
+            report.problems.append(
+                f"{len(labs)} `### Merge and lab record` sections found - the "
+                "finish cannot tell which is the record; keep exactly one"
+            )
         else:
-            missing, problems = lab_record_problems(lab)
+            missing, problems = lab_record_problems(labs[0])
             report.lab_record_missing.extend(missing)
             report.problems.extend(problems)
     return report

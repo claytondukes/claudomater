@@ -62,7 +62,7 @@ Three fail-closed blades, run against the MERGE COMMIT (the third is an opt-in):
    carries `induced`, `not induced`, `not inducible` or `STATED`; the section
    carries at least one positive `induced` and one negative disposition (or
    says every arm was induced / no runtime arm exists); a missing section
-   blocks. Off by default.
+   blocks, and so does a duplicated one. Off by default.
 
 Exemptions (File List prefixes that legitimately ride outside the merge -
 driver-owned artifacts in a separate repo) come from `.omater.yaml`

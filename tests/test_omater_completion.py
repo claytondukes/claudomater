@@ -855,6 +855,42 @@ class TestLabRecordBlade:
         record = "- note:\n  ```\n  example\n  ```\n\n" + body
         assert _completion_report(self._story(record), self.MERGED, lab_record="required").ok
 
+    def test_an_unselected_alternative_is_no_disposition(self):
+        from claudomater.completion import _completion_report
+
+        for line in (
+            "- ADMIN arm: induced / not induced.",
+            "- ADMIN arm: induced or not induced.",
+            "- ADMIN arm: induced?",
+        ):
+            record = ("### Merge and lab record (operator, 2026-09-30)\n\n" + line
+                      + "\n- PORT arm: not induced; STATED.\n")
+            report = _completion_report(self._story(record), self.MERGED, lab_record="required")
+            assert report.lab_record_missing == ["arm:1", "induced"] and not report.ok, line
+
+    def test_a_blockquoted_fence_is_masked(self):
+        from claudomater.completion import _completion_report
+
+        record = ("### Merge and lab record (operator, 2026-09-30)\n\n"
+                  "> ```\n> - ADMIN arm: induced.\n> - PORT arm: not induced; STATED.\n> ```\n")
+        report = _completion_report(self._story(record), self.MERGED, lab_record="required")
+        assert report.lab_record_missing == ["induced", "not-induced"] and not report.ok
+        # a quoted fence ends with its blockquote; the real record after it is visible
+        record = ("> ```\n> example\n\n### Merge and lab record (operator, 2026-09-30)\n\n"
+                  "- ADMIN arm: induced.\n- PORT arm: not induced; STATED.\n")
+        assert _completion_report(self._story(record), self.MERGED, lab_record="required").ok
+
+    def test_duplicate_record_sections_fail_closed(self):
+        from claudomater.completion import _completion_report
+
+        record = ("### Merge and lab record (operator, 2026-09-30)\n\n"
+                  "- ADMIN arm: induced.\n- PORT arm: not induced; STATED.\n\n"
+                  "### Merge and lab record (operator, 2026-10-01, re-run)\n\n"
+                  "- FALLBACK arm: evidence pending.\n")
+        report = _completion_report(self._story(record), self.MERGED, lab_record="required")
+        assert report.lab_record_missing == ["section:duplicate"] and not report.ok
+        assert any("keep exactly one" in p for p in report.problems)
+
     def test_a_negated_all_induced_statement_is_not_an_exception(self):
         from claudomater.completion import _completion_report
 
