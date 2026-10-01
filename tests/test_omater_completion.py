@@ -814,6 +814,32 @@ class TestLabRecordBlade:
                   "<details>\n<summary>probe output</summary>\n- FALLBACK arm: evidence pending\n</details>\n")
         assert _completion_report(self._story(record), self.MERGED, lab_record="required").ok
 
+    def test_negative_contractions_are_negations(self):
+        from claudomater.completion import _completion_report
+
+        for line in (
+            "- ADMIN arm hasn't been induced; STATED.",
+            "- PORT arm won't be induced on the shared lab; STATED.",
+            "- The TLS arm wasn\u2019t induced (curly apostrophe); STATED.",
+            "- Both arms haven't been induced and shouldn't be; STATED.",
+        ):
+            record = "### Merge and lab record (operator, 2026-09-30)\n\n" + line + "\n"
+            report = _completion_report(self._story(record), self.MERGED, lab_record="required")
+            assert report.lab_record_missing == ["induced"] and not report.ok, line
+
+    def test_other_raw_html_block_forms_are_hidden(self):
+        from claudomater.completion import _completion_report
+
+        body = "### Merge and lab record (operator, 2026-09-30)\n\n- ADMIN arm: induced.\n- PORT arm: not induced; STATED.\n"
+        for wrapped in (
+            "<?template\n" + body + "?>\n",
+            "<![CDATA[\n" + body + "]]>\n",
+            "<!RECORD\n" + body + ">\n",
+            "<?template\n" + body,
+        ):
+            report = _completion_report(self._story(wrapped), self.MERGED, lab_record="required")
+            assert report.lab_record_missing == ["section"] and not report.ok, wrapped[:12]
+
     def test_a_negated_all_induced_statement_is_not_an_exception(self):
         from claudomater.completion import _completion_report
 

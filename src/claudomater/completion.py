@@ -77,9 +77,11 @@ _HARD_SPLIT_RE = re.compile(r"[.;:]|\s+(?:[-*+]|\d+[.)])\s")
 _SOFT_SPLIT_RE = re.compile(r",|\b(?:but|and|while|whereas|yet)\b", re.IGNORECASE)
 _ARM_WORD_RE = re.compile(r"\barms?\b", re.IGNORECASE)
 _INDUCE_WORD_RE = re.compile(r"\b(?:un-|non-)?induc(?:ed|ible)\b", re.IGNORECASE)
+# any negative contraction (hasn't, haven't, won't, wouldn't, shouldn't,
+# didn't ...), with a straight or curly apostrophe, is a negation token
 _NEGATION_RE = re.compile(
-    r"\b(?:not|never|no|none|neither|nor|without|cannot|can't|couldn't|wasn't|weren't|isn't|aren't|didn't"
-    r"|zero|0)\b"
+    r"\b(?:not|never|no|none|neither|nor|without|cannot|zero|0)\b"
+    r"|\b\w+n['\u2019]t\b"
     r"|\b(?:un|non)-(?=induc)",
     re.IGNORECASE,
 )
@@ -482,6 +484,10 @@ def _mask_indented_code(text: str) -> str:
 
 
 _HTML_RAW_START_RE = re.compile(r"^\s{0,3}<(pre|script|style|textarea)(?=[\s>]|$)", re.IGNORECASE)
+# CommonMark HTML block types 3, 4 and 5: a processing instruction, a
+# declaration and a CDATA section run to their own terminator
+_HTML_MARKED_START_RE = re.compile(r"^\s{0,3}<(\?|!\[CDATA\[|![A-Za-z])")
+_HTML_MARKED_END = {"?": "?>", "![CDATA[": "]]>"}
 _HTML_BLOCK_START_RE = re.compile(
     r"^\s{0,3}</?(?:address|article|aside|base|basefont|blockquote|body|caption|center|col|colgroup"
     r"|dd|details|dialog|dir|div|dl|dt|fieldset|figcaption|figure|footer|form|frame|frameset"
@@ -498,10 +504,11 @@ _HTML_TAG_LINE_RE = re.compile(
 def _mask_html_blocks(text: str) -> str:
     """CommonMark HTML blocks blanked line for line: a `<pre>`, `<script>`,
     `<style>` or `<textarea>` block runs to the line holding its closing
-    tag (unterminated: to the end of the text); a block-level tag line, or
-    a line that is one complete tag after a blank line, runs to the next
-    blank line. Their contents are raw HTML to a reader, never a Markdown
-    heading or bullet."""
+    tag, a processing instruction to `?>`, a declaration to `>` and a
+    CDATA section to `]]>` (unterminated: to the end of the text); a
+    block-level tag line, or a line that is one complete tag after a blank
+    line, runs to the next blank line. Their contents are raw HTML to a
+    reader, never a Markdown heading or bullet."""
     out: list[str] = []
     end_tag: str | None = None
     until_blank = False
@@ -527,6 +534,14 @@ def _mask_html_blocks(text: str) -> str:
             end_tag = f"</{m.group(1).lower()}>"
             out.append("\n" if line.endswith("\n") else "")
             if end_tag in line.lower()[m.end():]:
+                end_tag = None
+            prev_blank = False
+            continue
+        m = _HTML_MARKED_START_RE.match(line)
+        if m:
+            end_tag = _HTML_MARKED_END.get(m.group(1), ">")
+            out.append("\n" if line.endswith("\n") else "")
+            if end_tag in line[m.end():]:
                 end_tag = None
             prev_blank = False
             continue
