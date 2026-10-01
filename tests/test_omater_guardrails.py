@@ -127,55 +127,55 @@ class TestEvaluate:
 
 class TestDegradePath:
     def test_walks_the_chain(self):
-        path = ["claude-opus-5", "claude-sonnet-5"]
-        assert next_model("claude-fable-5", path) == "claude-opus-5"
-        assert next_model("claude-opus-5", path) == "claude-sonnet-5"
-        assert next_model("claude-sonnet-5", path) == "pause"
+        path = ["claude-opus-5-5", "claude-sonnet-5-5"]
+        assert next_model("claude-fable-5-1", path) == "claude-opus-5-5"
+        assert next_model("claude-opus-5-5", path) == "claude-sonnet-5-5"
+        assert next_model("claude-sonnet-5-5", path) == "pause"
 
     def test_default_path_steps_down_once_then_pauses(self):
         path = UserConfig().usage.degrade_path
-        assert next_model("claude-fable-5", path) == "claude-opus-5"
-        assert next_model("claude-opus-5", path) == "pause"
+        assert next_model("claude-fable-5-1", path) == "claude-opus-5-5"
+        assert next_model("claude-opus-5-5", path) == "pause"
 
     def test_never_steps_a_model_up_the_chain(self):
         # sonnet with path [opus, pause]: opus would be an UPGRADE — degrading
         # must leave it alone, not burn more quota
-        assert next_model("claude-sonnet-5", ["claude-opus-5", "pause"]) == "claude-sonnet-5"
+        assert next_model("claude-sonnet-5-5", ["claude-opus-5-5", "pause"]) == "claude-sonnet-5-5"
 
     def test_unknown_model_is_left_alone(self):
-        assert next_model("some-local-model", ["claude-opus-5", "pause"]) == "some-local-model"
+        assert next_model("some-local-model", ["claude-opus-5-5", "pause"]) == "some-local-model"
 
 
 class TestScopeApplies:
     def test_scoped_model_name_matches_family(self):
-        path = ["claude-opus-5", "pause"]
-        assert scope_applies("claude-fable-5", "Fable", path)
-        assert not scope_applies("claude-opus-5", "Fable", path)
-        assert not scope_applies("claude-sonnet-5", "Fable", path)
+        path = ["claude-opus-5-5", "pause"]
+        assert scope_applies("claude-fable-5-1", "Fable", path)
+        assert not scope_applies("claude-opus-5-5", "Fable", path)
+        assert not scope_applies("claude-sonnet-5-5", "Fable", path)
 
     def test_unknown_scope_falls_back_to_rank(self):
-        path = ["claude-opus-5", "pause"]
-        assert scope_applies("claude-fable-5", None, path)  # above the chain start
-        assert not scope_applies("claude-opus-5", None, path)
+        path = ["claude-opus-5-5", "pause"]
+        assert scope_applies("claude-fable-5-1", None, path)  # above the chain start
+        assert not scope_applies("claude-opus-5-5", None, path)
 
     def test_renamed_display_name_cannot_disarm_the_scope(self):
         """'Fable' -> 'Fable 5' must still match the fable family by rank —
         a display-name change must not silently disable the scoped guardrail."""
-        path = ["claude-opus-5", "pause"]
-        assert scope_applies("claude-fable-5", "Fable 5", path)
-        assert not scope_applies("claude-opus-5", "Fable 5", path)
+        path = ["claude-opus-5-5", "pause"]
+        assert scope_applies("claude-fable-5-1", "Fable 5", path)
+        assert not scope_applies("claude-opus-5-5", "Fable 5", path)
 
 
 class TestModelForPhase:
     def test_ok_returns_required_model(self):
         model, reason = model_for_phase(
-            "claude-fable-5", Decision(action="ok"), UserConfig()
+            "claude-fable-5-1", Decision(action="ok"), UserConfig()
         )
-        assert model == "claude-fable-5" and reason is None
+        assert model == "claude-fable-5-1" and reason is None
 
     def test_pause_returns_none(self):
         model, reason = model_for_phase(
-            "claude-fable-5",
+            "claude-fable-5-1",
             Decision(action="pause", reasons=["5h window at 96%"]),
             UserConfig(),
         )
@@ -184,25 +184,25 @@ class TestModelForPhase:
 
     def test_window_degrade_steps_down(self):
         model, reason = model_for_phase(
-            "claude-fable-5",
+            "claude-fable-5-1",
             Decision(action="degrade", window="seven_day", reasons=["7d at 96%"]),
             UserConfig(),
         )
-        assert model == "claude-opus-5"
+        assert model == "claude-opus-5-5"
 
     def test_window_degrade_path_exhaustion_pauses(self):
         # the operator configured [opus, pause]: one step down, then pause
         model, reason = model_for_phase(
-            "claude-opus-5", Decision(action="degrade", window="seven_day"), UserConfig()
+            "claude-opus-5-5", Decision(action="degrade", window="seven_day"), UserConfig()
         )
         assert model is None
         assert "pausing for the user" in reason
 
     def test_window_degrade_never_upgrades_a_lower_tier(self):
         model, reason = model_for_phase(
-            "claude-sonnet-5", Decision(action="degrade", window="seven_day"), UserConfig()
+            "claude-sonnet-5-5", Decision(action="degrade", window="seven_day"), UserConfig()
         )
-        assert model == "claude-sonnet-5"
+        assert model == "claude-sonnet-5-5"
 
     def test_scoped_degrade_only_touches_the_scoped_tier(self):
         """A Fable-scoped trip must not pause opus dev phases whose quota is
@@ -210,10 +210,10 @@ class TestModelForPhase:
         decision = Decision(
             action="degrade", window="scoped", reasons=["scoped at 85%"], snapshot=snapshot()
         )
-        model, reason = model_for_phase("claude-opus-5", decision, UserConfig())
-        assert (model, reason) == ("claude-opus-5", None)
-        model, _ = model_for_phase("claude-fable-5", decision, UserConfig())
-        assert model == "claude-opus-5"
+        model, reason = model_for_phase("claude-opus-5-5", decision, UserConfig())
+        assert (model, reason) == ("claude-opus-5-5", None)
+        model, _ = model_for_phase("claude-fable-5-1", decision, UserConfig())
+        assert model == "claude-opus-5-5"
 
     def test_skip_sentinel_passes_through_degrade(self):
         model, reason = model_for_phase(
@@ -223,7 +223,7 @@ class TestModelForPhase:
 
     def test_escalated_story_never_runs_degraded(self):
         model, reason = model_for_phase(
-            "claude-fable-5",
+            "claude-fable-5-1",
             Decision(action="degrade", reasons=["scoped at 85%"]),
             UserConfig(),
             escalated=True,
@@ -240,20 +240,20 @@ class TestModelForPhase:
             action="degrade", window="scoped", reasons=["scoped at 85%"], snapshot=snapshot()
         )
         model, reason = model_for_phase(
-            "claude-opus-5", decision, UserConfig(), escalated=True
+            "claude-opus-5-5", decision, UserConfig(), escalated=True
         )
-        assert (model, reason) == ("claude-opus-5", None)
+        assert (model, reason) == ("claude-opus-5-5", None)
 
     def test_escalated_story_below_the_degrade_path_keeps_running(self):
         # window degrade, but sonnet has nothing lower on [opus, pause]:
         # its tier is available, escalation does not pause it
         model, reason = model_for_phase(
-            "claude-sonnet-5",
+            "claude-sonnet-5-5",
             Decision(action="degrade", window="seven_day"),
             UserConfig(),
             escalated=True,
         )
-        assert (model, reason) == ("claude-sonnet-5", None)
+        assert (model, reason) == ("claude-sonnet-5-5", None)
 
 
 class TestFakeUsageInjection:

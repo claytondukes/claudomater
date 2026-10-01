@@ -37,9 +37,9 @@ MODEL_ROLES = (
     "lessons",  # the close pass (rev: Phase 0.5 rough edge #3 — it had no knob)
 )
 
-MODEL_FABLE = "claude-fable-5"
-MODEL_OPUS = "claude-opus-5"
-MODEL_SONNET = "claude-sonnet-5"
+MODEL_FABLE = "claude-fable-5-1"
+MODEL_OPUS = "claude-opus-5-5"
+MODEL_SONNET = "claude-sonnet-5-5"
 SKIP = "skip"  # sentinel model value: the phase does not run at this deployment type
 
 # Model families ranked by tier; degrading must move strictly DOWN this order.
@@ -545,7 +545,7 @@ def _validate_degrade_path(path: list[str]) -> None:
     if ranks != sorted(ranks, reverse=True) or len(set(ranks)) != len(ranks):
         raise ConfigError(
             "usage.degrade_path must step strictly DOWN the tiers "
-            "(e.g. [claude-opus-5, claude-sonnet-5])"
+            "(e.g. [claude-opus-5-5, claude-sonnet-5-5])"
         )
 
 

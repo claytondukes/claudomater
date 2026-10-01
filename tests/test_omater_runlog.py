@@ -127,9 +127,9 @@ class TestEvents:
 
     def test_progress_log_is_human_readable(self, tmp_path):
         log = RunLog.create(tmp_path)
-        log.event("dev", "phase-spawn", {"model": "claude-opus-5"})
+        log.event("dev", "phase-spawn", {"model": "claude-opus-5-5"})
         lines = (log.run_dir / "progress.log").read_text().splitlines()
-        assert any("[dev] phase-spawn" in line and "claude-opus-5" in line for line in lines)
+        assert any("[dev] phase-spawn" in line and "claude-opus-5-5" in line for line in lines)
 
     def test_events_jsonl_is_one_json_object_per_line(self, tmp_path):
         log = RunLog.create(tmp_path)
