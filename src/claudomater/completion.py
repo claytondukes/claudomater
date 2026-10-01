@@ -67,14 +67,14 @@ LAB_RECORD_HEADING_RE = re.compile(
 # and are negative; a clause whose `induced` has no negation before it is
 # positive. STATED is a negative marker on its own. Enumerating adjacent
 # modifiers was the previous approach and lost to every new phrasing.
-# A clause also ends at a coordinating conjunction when what follows the
-# conjunction names its own arm, so "the port arm was not induced but the
-# interface arm was induced" scopes its negation to the first arm only,
-# while "no arm was exercised and induced" stays one clause: splitting
-# every conjunction would turn that negated coordination into a bare
-# positive `induced`.
-_HARD_SPLIT_RE = re.compile(r"[.;:,]|\s+[-*+]\s")
-_CONJUNCTION_RE = re.compile(r"\b(?:but|and|while|whereas|yet)\b", re.IGNORECASE)
+# A comma or a coordinating conjunction also ends a clause, but only when
+# what follows it names its own arm: "the port arm was not induced but the
+# interface arm was induced" scopes its negation to the first arm, while
+# "no arm was exercised and induced" and "no arm was exercised, induced,
+# or restored" stay one clause - splitting every comma or conjunction
+# would turn those negated predicate lists into a bare positive `induced`.
+_HARD_SPLIT_RE = re.compile(r"[.;:]|\s+[-*+]\s")
+_SOFT_SPLIT_RE = re.compile(r",|\b(?:but|and|while|whereas|yet)\b", re.IGNORECASE)
 _ARM_WORD_RE = re.compile(r"\barms?\b", re.IGNORECASE)
 _INDUCE_WORD_RE = re.compile(r"\b(?:un-|non-)?induc(?:ed|ible)\b", re.IGNORECASE)
 _NEGATION_RE = re.compile(
@@ -91,9 +91,9 @@ def _clauses(text: str) -> list[str]:
         if not piece or not piece.strip():
             continue
         start = 0
-        for m in _CONJUNCTION_RE.finditer(piece):
+        for m in _SOFT_SPLIT_RE.finditer(piece):
             rest = piece[m.end():]
-            following = _CONJUNCTION_RE.search(rest)
+            following = _SOFT_SPLIT_RE.search(rest)
             segment = rest[: following.start()] if following else rest
             if _ARM_WORD_RE.search(segment):
                 out.append(piece[start: m.start()])
@@ -157,8 +157,11 @@ def _all_induced(text: str) -> bool:
         m = _ALL_INDUCED_RE.search(clause)
         if m and not _NEGATION_RE.search(clause[: m.start()]):
             return True
-        if _NO_RUNTIME_ARM_RE.fullmatch(_LEADING_BULLET_RE.sub("", clause.strip())):
-            return True
+        # the assertion may share its clause with an aside after a comma
+        # ("No runtime arm exists, the merge touches docs only")
+        for segment in clause.split(","):
+            if _NO_RUNTIME_ARM_RE.fullmatch(_LEADING_BULLET_RE.sub("", segment.strip())):
+                return True
     return False
 
 
@@ -363,6 +366,28 @@ class CompletionReport:
         }
 
 
+def _mask_fences(text: str) -> str:
+    """The text with every fenced code block (``` or ~~~, any indent)
+    blanked line for line: a heading or vocabulary quoted inside a fence
+    is an example, never the record. An unterminated fence runs to the
+    end of the text (masking more is the fail-closed direction)."""
+    out: list[str] = []
+    fence: str | None = None
+    for line in text.splitlines(keepends=True):
+        stripped = line.lstrip()
+        if fence is None and (stripped.startswith("```") or stripped.startswith("~~~")):
+            fence = stripped[:3]
+            out.append("\n" if line.endswith("\n") else "")
+            continue
+        if fence is not None:
+            if stripped.startswith(fence):
+                fence = None
+            out.append("\n" if line.endswith("\n") else "")
+            continue
+        out.append(line)
+    return "".join(out)
+
+
 def _section(text: str, heading_re: re.Pattern[str]) -> str | None:
     """The body between `heading_re`'s match and the next ##/### heading,
     or None when the heading is absent."""
@@ -558,7 +583,9 @@ def _completion_report(
         # the vocabulary: a record with no `induced` at all, or one that
         # never says what was NOT induced (or that nothing was left
         # un-induced), is a record a later reader cannot trust.
-        lab = _section(story_text, LAB_RECORD_HEADING_RE)
+        # fenced examples are masked first: a quoted record template is
+        # not the record, and words inside a fence are not its vocabulary
+        lab = _section(_mask_fences(story_text), LAB_RECORD_HEADING_RE)
         if lab is None:
             report.lab_record_missing.append("section")
             report.problems.append(
