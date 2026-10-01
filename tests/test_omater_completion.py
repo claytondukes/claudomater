@@ -648,6 +648,46 @@ class TestLabRecordBlade:
         report = _completion_report(self._story(record), self.MERGED, lab_record="required")
         assert "induced" in report.lab_record_missing and not report.ok
 
+    def test_object_position_negation_is_negative(self):
+        from claudomater.completion import _completion_report
+
+        for line in (
+            "- The probe induced no arm; STATED.",
+            "- The lab induced none of the arms; STATED.",
+            "- The operator induced neither arm (shared lab); STATED.",
+        ):
+            record = "### Merge and lab record (operator, 2026-09-30)\n\n" + line + "\n"
+            report = _completion_report(self._story(record), self.MERGED, lab_record="required")
+            assert report.lab_record_missing == ["induced"] and not report.ok, line
+        record = ("### Merge and lab record (operator, 2026-09-30)\n\n"
+                  "- The probe induced the port arm for real; the TLS arm was not induced.\n")
+        assert _completion_report(self._story(record), self.MERGED, lab_record="required").ok
+
+    def test_no_not_induced_arm_as_a_subject_is_not_the_exception(self):
+        from claudomater.completion import _completion_report
+
+        record = "### Merge and lab record (operator, 2026-09-30)\n\n- No not-induced arm was exercised.\n"
+        report = _completion_report(self._story(record), self.MERGED, lab_record="required")
+        assert "induced" in report.lab_record_missing and not report.ok
+        for line in ("- No not-induced arm remains.", "- Lab 12/12: no not-induced arm (every arm ran for real)."):
+            record = "### Merge and lab record (operator, 2026-09-30)\n\n" + line + "\n"
+            report = _completion_report(self._story(record), self.MERGED, lab_record="required")
+            assert report.ok, (line, report.problems)
+
+    def test_a_longer_fence_closes_only_on_its_own_length(self):
+        from claudomater.completion import _completion_report
+
+        fenced = ("````markdown\n### Merge and lab record (operator, 2026-09-30)\n\n"
+                  "```\n- ADMIN arm: induced through the real dialog.\n- PORT arm: not induced; STATED.\n"
+                  "````\n")
+        report = _completion_report(self._story(fenced), self.MERGED, lab_record="required")
+        assert report.lab_record_missing == ["section"] and not report.ok
+        # a closing fence with trailing text does not close either
+        fenced = ("```\n```markdown\n### Merge and lab record (operator, 2026-09-30)\n\n"
+                  "- ADMIN arm: induced.\n- PORT arm: not induced; STATED.\n```\n")
+        report = _completion_report(self._story(fenced), self.MERGED, lab_record="required")
+        assert report.lab_record_missing == ["section"] and not report.ok
+
     def test_a_negated_all_induced_statement_is_not_an_exception(self):
         from claudomater.completion import _completion_report
 

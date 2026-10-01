@@ -83,6 +83,7 @@ _NEGATION_RE = re.compile(
     re.IGNORECASE,
 )
 _STATED_RE = re.compile(r"\bSTATED\b")
+_OBJECT_NEGATION_RE = re.compile(r"\s+(?:no|none|nothing|neither|not)\b", re.IGNORECASE)
 
 
 def _clauses(text: str) -> list[str]:
@@ -115,7 +116,12 @@ def _clause_dispositions(text: str) -> tuple[bool, bool]:
             negative = True
         for m in _INDUCE_WORD_RE.finditer(clause):
             before = clause[: m.start()]
-            negated = bool(_NEGATION_RE.search(before)) or m.group(0).lower().startswith(("un-", "non-"))
+            negated = (
+                bool(_NEGATION_RE.search(before))
+                or m.group(0).lower().startswith(("un-", "non-"))
+                # object-position negation: "induced no arm", "induced none"
+                or bool(_OBJECT_NEGATION_RE.match(clause, m.end()))
+            )
             if negated or m.group(0).lower().endswith("inducible") and negated:
                 negative = True
             elif m.group(0).lower().endswith("induced"):
@@ -125,22 +131,25 @@ def _clause_dispositions(text: str) -> tuple[bool, bool]:
 # The whole-record statements that stand in for a negative line: nothing
 # was left un-induced, or there is no runtime arm at all. A "no
 # non-inducible arm" says every arm COULD be induced, not that it was, so
-# it is deliberately not here.
+# it is deliberately not here. "every arm induced" / "all arms induced"
+# may sit inside a clause (with no negation before them); the two "no ...
+# arm" forms must be the whole clause (below).
 _ALL_INDUCED_RE = re.compile(
-    r"\bevery arm (?:was )?induced\b|\ball arms (?:were )?induced\b"
-    r"|\bno not-induced arm\b",
+    r"\bevery arm (?:was )?induced\b|\ball arms (?:were )?induced\b",
     re.IGNORECASE,
 )
-# The no-runtime-arm exception is a whole clause, never a phrase inside
-# one: the clause says nothing but that no runtime arm exists ("No runtime
-# arm.", "no runtime arm exists", "there is no runtime arm for this story",
-# an optional parenthetical). A clause that goes on to any predicate ("no
-# runtime arm was induced", "no runtime arm passed validation") reports
-# something about arms that do exist and is refused: enumerating the verbs
-# to block lost to the first verb not on the list.
+# The no-runtime-arm and no-not-induced-arm exceptions are whole clauses,
+# never phrases inside one: the clause says nothing but the assertion ("No
+# runtime arm.", "no runtime arm exists", "there is no runtime arm for this
+# story", "no not-induced arm remains", an optional parenthetical). A clause
+# that goes on to any other predicate ("no runtime arm was induced", "no
+# runtime arm passed validation", "no not-induced arm was exercised")
+# reports something about arms that do exist and is refused: enumerating
+# the verbs to block lost to the first verb not on the list.
 _NO_RUNTIME_ARM_RE = re.compile(
-    r"(?:there (?:is|was|are|were) )?no runtime arms?"
-    r"(?: (?:exists?|existed|applies|applied))?"
+    r"(?:there (?:is|was|are|were) )?"
+    r"(?:no runtime arms?(?: (?:exists?|existed|applies|applied))?"
+    r"|no not-induced arms?(?: (?:remains?|remained|exists?|existed|is left|was left|are left|were left))?)"
     r"(?: (?:in|for) this (?:story|merge|change))?"
     r"(?: \([^()]*\))?",
     re.IGNORECASE,
@@ -151,8 +160,8 @@ _LEADING_BULLET_RE = re.compile(r"^[-*+]\s+")
 def _all_induced(text: str) -> bool:
     """A whole-record exception holds in a clause with no negation token
     before it ("Not every arm was induced" is a negative statement, not an
-    exception) or in a clause that is, entire, the no-runtime-arm
-    assertion."""
+    exception) or in a clause that is, entire, the no-runtime-arm or
+    no-not-induced-arm assertion."""
     for clause in _clauses(text):
         m = _ALL_INDUCED_RE.search(clause)
         if m and not _NEGATION_RE.search(clause[: m.start()]):
@@ -366,6 +375,9 @@ class CompletionReport:
         }
 
 
+_FENCE_RE = re.compile(r"^\s*(`{3,}|~{3,})")
+
+
 def _mask_fences(text: str) -> str:
     """The text with every fenced code block (``` or ~~~, any indent)
     blanked line for line: a heading or vocabulary quoted inside a fence
@@ -374,13 +386,22 @@ def _mask_fences(text: str) -> str:
     out: list[str] = []
     fence: str | None = None
     for line in text.splitlines(keepends=True):
-        stripped = line.lstrip()
-        if fence is None and (stripped.startswith("```") or stripped.startswith("~~~")):
-            fence = stripped[:3]
+        m = _FENCE_RE.match(line)
+        if fence is None and m:
+            fence = m.group(1)
             out.append("\n" if line.endswith("\n") else "")
             continue
         if fence is not None:
-            if stripped.startswith(fence):
+            # CommonMark close: the same character, a run at least as long
+            # as the opener, and nothing but whitespace after it - so a
+            # four-backtick fence is not closed by an inner three-backtick
+            # line
+            if (
+                m
+                and m.group(1)[0] == fence[0]
+                and len(m.group(1)) >= len(fence)
+                and not line[m.end():].strip()
+            ):
                 fence = None
             out.append("\n" if line.endswith("\n") else "")
             continue
