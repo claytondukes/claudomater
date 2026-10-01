@@ -177,6 +177,53 @@ def _negative_induced(text: str) -> bool:
     return _clause_dispositions(text)[1]
 
 
+# A quantified arm ("no arm", "every arm", "both arms", "two arms") is a
+# whole-record statement, not a specific arm awaiting its own disposition.
+_GENERIC_ARM_RE = re.compile(
+    r"\b(?:no|none of the|every|each|all|both|neither|any|either|zero|\d+|two|three|four|five|six)"
+    r" (?:\w+ )?arms?\b",
+    re.IGNORECASE,
+)
+
+
+# A statement ends at . ; or a list marker; : and , bind within one
+# ("STATED, not induced: the port arm" is one statement about one arm).
+_STATEMENT_SPLIT_RE = re.compile(r"[.;]|\s+(?:[-*+]|\d+[.)])\s")
+
+
+def _undisposed_arm_segment(item: str) -> bool:
+    """True when the item names two or more specific arms and one of them
+    has no disposition of its own: "ADMIN arm: induced; PORT arm: evidence
+    pending" is judged arm by arm, not by the one `induced` it carries. A
+    statement naming one specific arm must carry a disposition somewhere
+    in it (before or after the arm); a statement naming several must
+    carry one in each arm's own span. Quantified arms ("no arm", "both
+    arms") are whole-record statements and are not counted. An item
+    naming a single specific arm keeps the item-level rule."""
+    specific_total = 0
+    undisposed = False
+    for statement in _STATEMENT_SPLIT_RE.split(item):
+        if not statement or not statement.strip():
+            continue
+        clauses = _clauses(statement)
+        arm_at = [
+            i for i, c in enumerate(clauses)
+            if _ARM_WORD_RE.search(c) and not _GENERIC_ARM_RE.search(c)
+        ]
+        specific_total += len(arm_at)
+        if not arm_at:
+            continue
+        if len(arm_at) == 1:
+            if not _has_disposition(statement):
+                undisposed = True
+            continue
+        for k, i in enumerate(arm_at):
+            stop = arm_at[k + 1] if k + 1 < len(arm_at) else len(clauses)
+            if not _has_disposition("; ".join(clauses[i:stop])):
+                undisposed = True
+    return specific_total >= 2 and undisposed
+
+
 def _has_disposition(item: str) -> bool:
     """A bullet item carries a disposition when one of its clauses says
     induced positively, negates an induce-word, carries STATED, or states
@@ -229,15 +276,16 @@ def lab_record_problems(section: str) -> tuple[list[str], list[str]]:
     items = [_flat(i) for i in _bullet_items(section)]
     undisposed = [
         n for n, item in enumerate(items, start=1)
-        if _ARM_WORD_RE.search(item) and not _has_disposition(item)
+        if _ARM_WORD_RE.search(item)
+        and (not _has_disposition(item) or _undisposed_arm_segment(item))
     ]
     for n in undisposed:
         missing.append(f"arm:{n}")
     if undisposed:
         problems.append(
-            f"lab-record arm entries without an induced / not-induced disposition: "
-            f"bullet item(s) {', '.join(str(n) for n in undisposed)} of {len(items)} "
-            "in the `### Merge and lab record` section (numbered from 1)"
+            f"lab-record arm entries without an induced / not-induced disposition "
+            f"for every arm they name: bullet item(s) {', '.join(str(n) for n in undisposed)} "
+            f"of {len(items)} in the `### Merge and lab record` section (numbered from 1)"
         )
     all_induced = _all_induced(flat)
     if not _positive_induced(flat) and not all_induced:
@@ -433,14 +481,74 @@ def _mask_indented_code(text: str) -> str:
     return "".join(out)
 
 
+_HTML_RAW_START_RE = re.compile(r"^\s{0,3}<(pre|script|style|textarea)(?=[\s>]|$)", re.IGNORECASE)
+_HTML_BLOCK_START_RE = re.compile(
+    r"^\s{0,3}</?(?:address|article|aside|base|basefont|blockquote|body|caption|center|col|colgroup"
+    r"|dd|details|dialog|dir|div|dl|dt|fieldset|figcaption|figure|footer|form|frame|frameset"
+    r"|h[1-6]|head|header|hr|html|iframe|legend|li|link|main|menu|menuitem|nav|noframes|ol"
+    r"|optgroup|option|p|param|search|section|summary|table|tbody|td|tfoot|th|thead|title|tr"
+    r"|track|ul)(?=[\s/>]|$)",
+    re.IGNORECASE,
+)
+_HTML_TAG_LINE_RE = re.compile(
+    r"^\s{0,3}(?:<[A-Za-z][A-Za-z0-9-]*(?:\s+[^<>]*?)?\s*/?>|</[A-Za-z][A-Za-z0-9-]*\s*>)\s*$"
+)
+
+
+def _mask_html_blocks(text: str) -> str:
+    """CommonMark HTML blocks blanked line for line: a `<pre>`, `<script>`,
+    `<style>` or `<textarea>` block runs to the line holding its closing
+    tag (unterminated: to the end of the text); a block-level tag line, or
+    a line that is one complete tag after a blank line, runs to the next
+    blank line. Their contents are raw HTML to a reader, never a Markdown
+    heading or bullet."""
+    out: list[str] = []
+    end_tag: str | None = None
+    until_blank = False
+    prev_blank = True
+    for line in text.splitlines(keepends=True):
+        blank = not line.strip()
+        if end_tag is not None:
+            out.append("\n" if line.endswith("\n") else "")
+            if end_tag in line.lower():
+                end_tag = None
+            prev_blank = blank
+            continue
+        if until_blank:
+            if blank:
+                until_blank = False
+                out.append(line)
+            else:
+                out.append("\n" if line.endswith("\n") else "")
+            prev_blank = blank
+            continue
+        m = _HTML_RAW_START_RE.match(line)
+        if m:
+            end_tag = f"</{m.group(1).lower()}>"
+            out.append("\n" if line.endswith("\n") else "")
+            if end_tag in line.lower()[m.end():]:
+                end_tag = None
+            prev_blank = False
+            continue
+        if _HTML_BLOCK_START_RE.match(line) or (prev_blank and _HTML_TAG_LINE_RE.match(line)):
+            until_blank = True
+            out.append("\n" if line.endswith("\n") else "")
+            prev_blank = False
+            continue
+        out.append(line)
+        prev_blank = blank
+    return "".join(out)
+
+
 def _mask_hidden(text: str) -> str:
     """The text with everything Markdown renders as something other than
     prose blanked, line for line: fenced code blocks first, then HTML
     comments (an unterminated comment hides everything to the end of the
-    text), then indented code blocks. A record a reader cannot see, or
-    sees only as a quoted example, is not the record."""
+    text), then raw HTML blocks, then indented code blocks. A record a
+    reader cannot see, or sees only as a quoted example, is not the
+    record."""
     masked = _HTML_COMMENT_RE.sub(lambda m: "\n" * m.group(0).count("\n"), _mask_fences(text))
-    return _mask_indented_code(masked)
+    return _mask_indented_code(_mask_html_blocks(masked))
 
 
 def _section(text: str, heading_re: re.Pattern[str]) -> str | None:

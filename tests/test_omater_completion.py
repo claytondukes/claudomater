@@ -775,6 +775,45 @@ class TestLabRecordBlade:
                   "- The port arm was not\n    induced; STATED.\n- ADMIN arm: induced.\n")
         assert _completion_report(self._story(record), self.MERGED, lab_record="required").ok
 
+    def test_every_specific_arm_in_an_item_needs_its_own_disposition(self):
+        from claudomater.completion import _completion_report
+
+        record = ("### Merge and lab record (operator, 2026-09-30)\n\n"
+                  "- ADMIN arm: induced; PORT arm: evidence pending.\n"
+                  "- FALLBACK arm: not induced; STATED.\n")
+        report = _completion_report(self._story(record), self.MERGED, lab_record="required")
+        assert report.lab_record_missing == ["arm:1"] and not report.ok
+        # two arms in one statement, the second without its own disposition
+        record = ("### Merge and lab record (operator, 2026-09-30)\n\n"
+                  "- The port arm was not induced but the interface arm was exercised.\n")
+        report = _completion_report(self._story(record), self.MERGED, lab_record="required")
+        assert "arm:1" in report.lab_record_missing and not report.ok
+        for line in (
+            "- ADMIN arm: induced; PORT arm: not induced; STATED.",
+            "- Both arms ran: the ADMIN arm induced for real, the PORT arm not induced (STATED).",
+            "- PORT arm: evidence pending; STATED.",
+            "- Lab: the interface arm INDUCED for real and restored; STATED, not induced: the port arm (shared lab).",
+        ):
+            record = "### Merge and lab record (operator, 2026-09-30)\n\n" + line + "\n- ADMIN arm: induced.\n"
+            report = _completion_report(self._story(record), self.MERGED, lab_record="required")
+            assert report.ok, (line, report.problems)
+
+    def test_a_raw_html_block_is_not_the_record(self):
+        from claudomater.completion import _completion_report
+
+        for wrapped in (
+            "<pre>\n### Merge and lab record (operator, 2026-09-30)\n\n- ADMIN arm: induced.\n- PORT arm: not induced; STATED.\n</pre>\n",
+            "<script>\n### Merge and lab record (operator, 2026-09-30)\n\n- ADMIN arm: induced.\n- PORT arm: not induced; STATED.\n",
+            "<div>\n### Merge and lab record (operator, 2026-09-30)\n- ADMIN arm: induced.\n- PORT arm: not induced; STATED.\n</div>\n",
+        ):
+            report = _completion_report(self._story(wrapped), self.MERGED, lab_record="required")
+            assert report.lab_record_missing == ["section"] and not report.ok, wrapped[:12]
+        # an HTML block after the real record hides its own contents only
+        record = ("### Merge and lab record (operator, 2026-09-30)\n\n"
+                  "- ADMIN arm: induced.\n- PORT arm: not induced; STATED.\n\n"
+                  "<details>\n<summary>probe output</summary>\n- FALLBACK arm: evidence pending\n</details>\n")
+        assert _completion_report(self._story(record), self.MERGED, lab_record="required").ok
+
     def test_a_negated_all_induced_statement_is_not_an_exception(self):
         from claudomater.completion import _completion_report
 
